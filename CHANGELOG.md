@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.4
+- Fixed account showing Offline during a break when the log file has multiple break sessions — startup catchup was finding the first BREAK START instead of the last, causing break_expected_end to be calculated from an old break that had already expired
+- Fixed screenshots queuing and failing before the Discord gateway connects — screenshot worker now waits up to 60 seconds for the gateway to be ready before attempting bot delivery; webhook delivery is unaffected and sends immediately
+
 ## v1.1.3
 - Fixed silent startup update check passing boolean False as asset URL when user accepted the update prompt — caused "unknown url type: 'False'" download error
 

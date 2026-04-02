@@ -570,8 +570,9 @@ class GatewayRunner:
     ]
 
     def __init__(self, cfg, callbacks):
-        self.cfg = cfg
-        self.cb  = callbacks
+        self.cfg       = cfg
+        self.cb        = callbacks
+        self.bot_ready = threading.Event()  # set when gateway on_ready fires
 
     def run(self):
         token = self.cfg.get('bot_token', '').strip()
@@ -592,12 +593,14 @@ class GatewayRunner:
             self.cb['log']("🤖 Could not fetch app ID — slash commands not registered")
 
         # Build and run the async gateway client
-        cb      = self.cb
-        cfg_ref = self.cfg
+        cb        = self.cb
+        cfg_ref   = self.cfg
+        bot_ready = self.bot_ready
 
         class _Client(discord.Client):
             async def on_ready(self):
                 cb['log'](f"🤖 Gateway connected — logged in as {self.user}")
+                bot_ready.set()
 
             async def on_interaction(self, interaction):
                 # type 4 = APPLICATION_COMMAND_AUTOCOMPLETE

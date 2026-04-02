@@ -158,12 +158,14 @@ class LogWatcher:
             'is_muted':           self._is_muted,
             'enqueue_screenshot': self._enqueue_screenshot,
         })
+        self._bot_ready = threading.Event()
         self._ss_svc  = ScreenshotService({
             'get_cfg':        lambda: self.cfg,
             'log':            self.log,
             'is_muted':       self._is_muted,
             'wh_with_thread': self._router.wh_with_thread,
             'window_lock':    self._window_lock,
+            'bot_ready':      self._bot_ready,
         })
         self._ss_svc.start()
         self._thread  = threading.Thread(target=self._run, daemon=True)
@@ -184,6 +186,7 @@ class LogWatcher:
                 'is_running':    lambda: self._running,
                 'get_cfg':       lambda: self.cfg,
             })
+            runner.bot_ready = self._bot_ready  # share the same event
             self._bot_thread = threading.Thread(target=runner.run, daemon=True)
             self._bot_thread.start()
 
@@ -532,11 +535,12 @@ class LogWatcher:
             # If we started mid-break, find the Break length line after BREAK START
             if state.on_break:
                 from py.util import parse_break_length_ms
+                last_break_idx = None
                 for i, line in enumerate(active_lines):
                     if 'BREAK START' in line.upper():
-                        break_length_ms = parse_break_length_ms(active_lines, i + 1, max_search=3)
-                        if break_length_ms is not None:
-                            break
+                        last_break_idx = i
+                if last_break_idx is not None:
+                    break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
 
                 if break_start_log_ts and break_length_ms:
                     state.break_expected_end = break_start_log_ts + break_length_ms / 1000.0

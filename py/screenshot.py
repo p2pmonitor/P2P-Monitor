@@ -220,9 +220,18 @@ class ScreenshotService:
                 else:
                     try:
                         if bot_channel_id and bot_token:
-                            ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
-                            if not ok:
-                                self._cb['log'](f"  🚫 [{account}] Bot screenshot failed: {err}")
+                            # Wait for gateway to be ready before bot delivery
+                            # (max 60s — if not ready by then, drop the screenshot)
+                            bot_ready = self._cb.get('bot_ready')
+                            if bot_ready and not bot_ready.is_set():
+                                self._cb['log'](f"  ⏳ [{account}] Waiting for gateway before screenshot...")
+                                bot_ready.wait(timeout=60)
+                            if bot_ready and not bot_ready.is_set():
+                                self._cb['log'](f"  ⚠ [{account}] Gateway not ready after 60s — screenshot dropped")
+                            else:
+                                ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
+                                if not ok:
+                                    self._cb['log'](f"  🚫 [{account}] Bot screenshot failed: {err}")
                         else:
                             if url_override:
                                 url = url_override
