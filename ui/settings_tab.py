@@ -348,6 +348,16 @@ class SettingsTab:
             bg=app.BG3, fg=app.ACC, relief='flat', padx=14, pady=6,
             cursor='hand2', command=app._check_for_update).pack(side='left')
 
+        beta_row = tk.Frame(inner, bg=app.BG2); beta_row.pack(fill='x', padx=16, pady=(0, 4))
+        beta_var = tk.BooleanVar(value=bool(app.cfg.get('beta_updates', False)))
+        tk.Checkbutton(beta_row, text="Include pre-release versions when checking for updates manually",
+            variable=beta_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['beta_updates'] = beta_var
+        tk.Label(beta_row, text="  (silent startup check always uses stable only)",
+            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+
         tk.Frame(inner, bg=app.BG2, height=8).pack()
         tk.Button(inner, text="💾  SAVE SETTINGS", font=app.MONOL,
             bg=app.ACC, fg=app.BG, relief='flat', padx=20, pady=8,

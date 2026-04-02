@@ -157,4 +157,4 @@ git pull
 
 ## License
 
-MIT
+GNU General Public License v3.0 — free to use, modify, and distribute under the same license. See [LICENSE](LICENSE) for full terms.

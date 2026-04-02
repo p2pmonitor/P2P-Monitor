@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.0.0 — Debian 12 native
+P2P Monitor v1.1.0 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,14 +44,14 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.0.0"
+VERSION     = "1.1.0"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 DEFAULT_CFG = {
     "logs_root": "", "webhook_quest": "", "webhook_task": "",
     "webhook_chat": "", "webhook_error": "", "webhook_drops": "", "webhook_default": "",
-    "mention_id": "", "check_interval": 5,
+    "mention_id": "", "check_interval": 5, "beta_updates": False,
     "screenshot_minutes": 60, "bot_token": "",
     "monitor_quests": True, "monitor_tasks": True,
     "monitor_chat": True, "monitor_errors": True, "screenshots_enabled": False,
@@ -253,129 +253,174 @@ class App(tk.Tk):
     def _silent_update_check(self):
         threading.Thread(target=self._do_silent_update_check, daemon=True).start()
 
-    # All module paths relative to the repo root → local install dir
-    # p2p_monitor.py lives next to this file; py/ and ui/ are subfolders.
-    _UPDATE_FILES = [
-        ('p2p_monitor.py',       None),          # (repo path, local subdir)
-        ('py/__init__.py',       'py'),
-        ('py/reader.py',         'py'),
-        ('py/history.py',        'py'),
-        ('py/config.py',         'py'),
-        ('py/util.py',           'py'),
-        ('py/discord.py',        'py'),
-        ('py/screenshot.py',     'py'),
-        ('py/paint.py',          'py'),
-        ('py/watcher.py',        'py'),
-        ('ui/__init__.py',       'ui'),
-        ('ui/monitor_tab.py',    'ui'),
-        ('ui/status_tab.py',     'ui'),
-        ('ui/history_tab.py',    'ui'),
-        ('ui/settings_tab.py',   'ui'),
-    ]
-
-    def _gh_fetch(self, repo_path):
-        """Fetch a single file from GitHub and return its text content."""
-        import urllib.request
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{repo_path}"
-        req = urllib.request.Request(url)
-        req.add_header('Accept', 'application/vnd.github.v3.raw')
-        req.add_header('User-Agent', f'P2PMonitor/{VERSION}')
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.read().decode('utf-8')
-
     def _local_ver(self):
+        """Return local version string e.g. 'v1.1.0'."""
         with open(__file__, encoding='utf-8') as fh:
             m = re.search(r'P2P Monitor (v[\d.]+)', fh.read())
         return m.group(1) if m else 'unknown'
 
-    def _check_version(self):
-        """Fetch only p2p_monitor.py to read the remote version string. Returns (remote_content, remote_ver)."""
-        content = self._gh_fetch('p2p_monitor.py')
-        m = re.search(r'P2P Monitor (v[\d.]+)', content)
-        return content, (m.group(1) if m else None)
+    def _fetch_release_info(self, include_prerelease=False):
+        """
+        Return (tag, asset_url) for the best available release.
+        include_prerelease=False → /releases/latest (stable only)
+        include_prerelease=True  → /releases list, pick newest by tag
+        """
+        import urllib.request, json
+        headers = {'Accept': 'application/vnd.github.v3+json',
+                   'User-Agent': f'P2PMonitor/{VERSION}'}
+        if include_prerelease:
+            url = f'https://api.github.com/repos/{GITHUB_REPO}/releases'
+        else:
+            url = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode('utf-8'))
+        # /releases returns a list; /releases/latest returns a single object
+        if isinstance(data, list):
+            if not data:
+                return None, None
+            # Sort by published_at descending, pick newest
+            data.sort(key=lambda x: x.get('published_at', ''), reverse=True)
+            release = data[0]
+        else:
+            release = data
+        tag = release.get('tag_name', '')
+        # Find zip asset — prefer asset named P2P-Monitor-*.zip
+        asset_url = None
+        for asset in release.get('assets', []):
+            if asset.get('name', '').endswith('.zip'):
+                asset_url = asset['browser_download_url']
+                break
+        return tag, asset_url
 
     def _do_silent_update_check(self):
+        """Silent startup check — stable releases only, no prompt if already up to date."""
         try:
-            _, remote_ver = self._check_version()
+            tag, _ = self._fetch_release_info(include_prerelease=False)
         except Exception:
             return
-        if not remote_ver:
+        if not tag:
             return
-        local_ver = self._local_ver()
+        local_ver  = self._local_ver()
+        remote_ver = tag if tag.startswith('v') else f'v{tag}'
+        # Never prompt downgrade (e.g. user is on beta ahead of stable)
         if _ver_tuple(remote_ver) <= _ver_tuple(local_ver):
             return
         def _prompt():
             self._log(f"🔄 Update available: {remote_ver} (current: {local_ver})")
-            if messagebox.askyesno("Update Available",
-                    f"New version: {remote_ver}\nYou are on: {local_ver}\n\nUpdate now?"):
+            if messagebox.askyesno('Update Available',
+                    f'New version: {remote_ver}\nYou are on: {local_ver}\n\nUpdate now?'):
                 threading.Thread(target=self._do_apply_update,
-                                 args=(remote_ver,), daemon=True).start()
+                                 args=(remote_ver, False), daemon=True).start()
         self.after(0, _prompt)
 
     def _do_update_check(self):
+        """Manual update check — respects beta opt-in setting."""
         import urllib.error
-        self._log("🔄 Checking for updates...")
+        include_pre = bool(self.cfg.get('beta_updates', False))
+        self._log('🔄 Checking for updates' + (' (including pre-releases)...' if include_pre else '...'))
         try:
-            _, remote_ver = self._check_version()
+            tag, asset_url = self._fetch_release_info(include_prerelease=include_pre)
         except urllib.error.HTTPError as e:
-            self.after(0, lambda: messagebox.showerror("Auto-Update", f"GitHub error: {e.code} {e.reason}"))
+            self.after(0, lambda: messagebox.showerror('Auto-Update', f'GitHub error: {e.code} {e.reason}'))
             return
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror("Auto-Update", f"Update check failed: {e}"))
+            self.after(0, lambda: messagebox.showerror('Auto-Update', f'Update check failed: {e}'))
             return
-        if not remote_ver:
-            self.after(0, lambda: messagebox.showwarning("Auto-Update", "No version string found in remote file."))
+        if not tag:
+            self.after(0, lambda: messagebox.showwarning('Auto-Update', 'No releases found.'))
             return
-        local_ver = self._local_ver()
+        remote_ver = tag if tag.startswith('v') else f'v{tag}'
+        local_ver  = self._local_ver()
         if _ver_tuple(remote_ver) <= _ver_tuple(local_ver):
-            self._log(f"✅ Already up to date ({local_ver})")
-            self.after(0, lambda: messagebox.showinfo("Auto-Update", f"Already up to date ({local_ver})."))
+            self._log(f'✅ Already up to date ({local_ver})')
+            self.after(0, lambda: messagebox.showinfo('Auto-Update', f'Already up to date ({local_ver}).'))
+            return
+        if not asset_url:
+            self.after(0, lambda: messagebox.showwarning('Auto-Update',
+                f'Release {remote_ver} found but no zip asset attached.'))
             return
         def _prompt():
-            if messagebox.askyesno("Update Available",
-                    f"New version: {remote_ver}\nCurrent: {local_ver}\n\nUpdate now?"):
+            if messagebox.askyesno('Update Available',
+                    f'New version: {remote_ver}\nCurrent: {local_ver}\n\nUpdate now?'):
                 threading.Thread(target=self._do_apply_update,
-                                 args=(remote_ver,), daemon=True).start()
+                                 args=(remote_ver, asset_url), daemon=True).start()
         self.after(0, _prompt)
 
-    def _do_apply_update(self, new_ver):
+    def _do_apply_update(self, new_ver, asset_url):
         """
-        Fetch every module file from GitHub and write it to the install directory.
-        Backs up p2p_monitor.py first. Prompts restart when all files are written.
+        Download the release zip, apply only changed files, delete the zip.
+        Backs up p2p_monitor.py first. Prompts restart on completion.
         """
+        import urllib.request, zipfile, io
         install_dir = Path(SCRIPT_PATH).parent
         backup      = SCRIPT_PATH + '.bak'
         errors      = []
 
-        self._log(f"⬇️  Updating to {new_ver} — fetching {len(self._UPDATE_FILES)} files...")
+        self._log(f'⬇️  Downloading {new_ver}...')
 
-        # Back up the entry point first
+        # Back up entry point
         try:
             shutil.copy2(SCRIPT_PATH, backup)
         except Exception as e:
-            self._log(f"⚠ Could not create backup: {e}")
+            self._log(f'⚠ Could not create backup: {e}')
 
-        for repo_path, subdir in self._UPDATE_FILES:
-            try:
-                content  = self._gh_fetch(repo_path)
-                dest_dir = install_dir / subdir if subdir else install_dir
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                dest     = dest_dir / Path(repo_path).name
-                dest.write_text(content, encoding='utf-8')
-                self._log(f"  ✅ {repo_path}")
-            except Exception as e:
-                errors.append(repo_path)
-                self._log(f"  ❌ {repo_path}: {e}")
+        # Download zip into memory
+        try:
+            req = urllib.request.Request(asset_url,
+                headers={'User-Agent': f'P2PMonitor/{VERSION}'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                zip_bytes = r.read()
+        except Exception as e:
+            self._log(f'❌ Download failed: {e}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', f'Download failed: {e}'))
+            return
+
+        self._log(f'📦 Applying {new_ver}...')
+
+        # Extract and apply only changed files
+        applied = 0
+        skipped = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                for entry in zf.namelist():
+                    # Strip any leading directory component from the zip
+                    parts = Path(entry).parts
+                    if not parts:
+                        continue
+                    # Support both flat zips and zips with a top-level folder
+                    rel = Path(*parts[1:]) if len(parts) > 1 and '.' not in parts[0] else Path(*parts)
+                    dest = install_dir / rel
+                    try:
+                        new_content = zf.read(entry)
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        if dest.exists():
+                            old_content = dest.read_bytes()
+                            if old_content == new_content:
+                                skipped += 1
+                                continue
+                        dest.write_bytes(new_content)
+                        applied += 1
+                        self._log(f'  ✅ {rel}')
+                    except Exception as e:
+                        errors.append(str(rel))
+                        self._log(f'  ❌ {rel}: {e}')
+        except Exception as e:
+            self._log(f'❌ Failed to read zip: {e}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', f'Failed to read zip: {e}'))
+            return
+
+        self._log(f'📦 {applied} file(s) updated, {skipped} unchanged')
 
         if errors:
-            msg = f"Update to {new_ver} completed with {len(errors)} error(s):\n" + "\n".join(errors)
-            self._log(f"⚠ {msg}")
-            self.after(0, lambda: messagebox.showwarning("Update Incomplete", msg))
+            msg = f'Update to {new_ver} completed with {len(errors)} error(s):\n' + '\n'.join(errors)
+            self._log(f'⚠ {msg}')
+            self.after(0, lambda: messagebox.showwarning('Update Incomplete', msg))
         else:
-            self._log(f"✅ All files updated to {new_ver} — backup at p2p_monitor.py.bak")
+            self._log(f'✅ Updated to {new_ver} — backup at p2p_monitor.py.bak')
             def _restart():
-                if messagebox.askyesno("Update Complete",
-                        f"All files updated to {new_ver}!\n\nRestart now?"):
+                if messagebox.askyesno('Update Complete',
+                        f'Updated to {new_ver}!\n\nRestart now?'):
                     if self.watcher:
                         self.watcher.stop()
                     os.execv(sys.executable, [sys.executable, SCRIPT_PATH])

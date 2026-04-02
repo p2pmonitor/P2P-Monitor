@@ -540,7 +540,12 @@ class LogWatcher:
 
                 if break_start_log_ts and break_length_ms:
                     state.break_expected_end = break_start_log_ts + break_length_ms / 1000.0
-                # Mark break as ongoing so status tab accumulates time correctly
+                # Add elapsed time of the current break into total_break_secs
+                # so the status tab shows the correct cumulative break time.
+                # _break_start_ts = now means accumulation continues from this point.
+                if break_start_log_ts:
+                    already_elapsed = time.time() - break_start_log_ts
+                    state.total_break_secs += max(0.0, already_elapsed)
                 state._break_start_ts = time.time()
 
             # ── Uptime: first 'Connecting to server' across ALL session files ─────

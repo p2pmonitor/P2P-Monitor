@@ -279,7 +279,9 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
                 time.sleep(0.15)
             _xdotool(['windowraise',  target_wid], env)
             _xdotool(['windowfocus',  '--sync', target_wid], env)
-            time.sleep(0.3)
+            # If we had to bring the window into focus, give it extra time to
+            # fully render before reading the paint button state.
+            time.sleep(0.6 if target_was_minimized else 0.3)
 
             btn_coords = _get_paint_btn_coords(target_wid, env)
             did_hide   = False
@@ -289,11 +291,19 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
                 paint_visible = _paint_is_visible(btn_coords, env)
                 if hide_paint and paint_visible:
                     _click_paint_button(btn_coords, env)
-                    time.sleep(0.15)
+                    time.sleep(0.2)
+                    # Verify the click had the intended effect — self-correct if not
+                    if _paint_is_visible(btn_coords, env):
+                        _click_paint_button(btn_coords, env)
+                        time.sleep(0.2)
                     did_hide = True
                 elif not hide_paint and not paint_visible:
                     _click_paint_button(btn_coords, env)
-                    time.sleep(0.15)
+                    time.sleep(0.2)
+                    # Verify paint is now visible — self-correct if still hidden
+                    if not _paint_is_visible(btn_coords, env):
+                        _click_paint_button(btn_coords, env)
+                        time.sleep(0.2)
 
             result = subprocess.run(
                 ['import', '-window', target_wid, out_path],
