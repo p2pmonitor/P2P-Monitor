@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1
+- Fixed break time calculation — now uses timestamp math (BREAK START → Break over) instead of the logged ms value; DreamBot logs -100 for manually skipped breaks which was corrupting the total
+
 ## v1.1.0
 - Auto-updater now uses GitHub Releases — downloads full release zip, applies only changed files, cleans up after itself
 - Added beta opt-in checkbox in Settings — manual update checks include pre-release versions when enabled; silent startup check always uses stable releases only

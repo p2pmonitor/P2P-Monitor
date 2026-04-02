@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.0 — Debian 12 native
+P2P Monitor v1.1.1 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,7 +44,7 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.1.0"
+VERSION     = "1.1.1"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 

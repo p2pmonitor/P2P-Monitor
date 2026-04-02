@@ -551,10 +551,14 @@ class LogWatcher:
             # ── Uptime: first 'Connecting to server' across ALL session files ─────
             # Session files = logfile-X.log (newest) + logfile-X.log.1, .log.2 … (older).
             # Walk oldest-first to find the first connect time = client session start.
-            # Break time = sum of ALL 'Break over N' ms lines across ALL files.
+            # Break time = timestamp math across all session files.
+            # Pairs each BREAK START with the next Break over line and subtracts
+            # timestamps — ignores the logged N ms value entirely since DreamBot
+            # logs -100 for manually skipped breaks which corrupts the total.
             session_files_oldest_first = list(reversed(session_files_newest_first))
             total_break_ms  = 0
             client_start_ts = None
+            pending_break_start = None  # timestamp of last seen BREAK START with no matching Break over yet
             for sf in session_files_oldest_first:
                 try:
                     sf_fh = open(str(sf), 'r', encoding='utf-8', errors='replace')
@@ -564,20 +568,26 @@ class LogWatcher:
                 with sf_fh:
                     for line in sf_fh:
                         line = line.rstrip('\n')
-                        b = strip_prefix(line).strip()
-                        # Sum all completed breaks across the whole session
-                        bm = re.search(r'break over\s+(\d+)', b, re.IGNORECASE)
-                        if bm:
-                            total_break_ms += int(bm.group(1))
+                        b    = strip_prefix(line).strip()
+                        m    = LOG_TS_RE.match(line)
+                        ts   = None
+                        if m:
+                            try:
+                                ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
+                            except Exception:
+                                pass
+                        # Track BREAK START timestamp
+                        if 'BREAK START' in line.upper() and ts:
+                            pending_break_start = ts
+                        # On Break over — compute duration from timestamps, ignore logged value
+                        elif b.lower().startswith('break over') and ts and pending_break_start:
+                            duration_ms = (ts - pending_break_start) * 1000
+                            if duration_ms > 0:
+                                total_break_ms += duration_ms
+                            pending_break_start = None
                         # First 'Connecting to server' in oldest file = client session start
-                        if client_start_ts is None and 'connecting to server' in b.lower():
-                            m = LOG_TS_RE.match(line)
-                            if m:
-                                try:
-                                    client_start_ts = datetime.strptime(
-                                        m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                                except Exception:
-                                    pass
+                        if client_start_ts is None and 'connecting to server' in b.lower() and ts:
+                            client_start_ts = ts
 
             if client_start_ts:
                 state.script_start_ts = client_start_ts
