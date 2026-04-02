@@ -1,4 +1,4 @@
-# P2P Monitor v1.0.0
+# P2P Monitor
 
 A desktop monitor for [DreamBot](https://dreambot.org) P2P Master AI — tracks multiple RuneScape accounts in real time, posts Discord notifications for in-game events, and keeps a searchable event history.
 
