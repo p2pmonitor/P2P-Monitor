@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.1 — Debian 12 native
+P2P Monitor v1.1.2 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,7 +44,7 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.1.1"
+VERSION     = "1.1.2"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -384,12 +384,14 @@ class App(tk.Tk):
         try:
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
                 for entry in zf.namelist():
-                    # Strip any leading directory component from the zip
+                    # Use the zip entry path as-is.
+                    # Only strip a top-level wrapper folder if ALL entries share
+                    # the same root (e.g. P2P-Monitor-v1.1.2/py/watcher.py).
+                    # Our release zips are flat (py/watcher.py) so no stripping.
                     parts = Path(entry).parts
                     if not parts:
                         continue
-                    # Support both flat zips and zips with a top-level folder
-                    rel = Path(*parts[1:]) if len(parts) > 1 and '.' not in parts[0] else Path(*parts)
+                    rel = Path(*parts)
                     dest = install_dir / rel
                     try:
                         new_content = zf.read(entry)

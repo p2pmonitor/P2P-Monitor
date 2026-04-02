@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.2
+- Fixed auto-updater incorrectly extracting all files flat into the root install directory instead of preserving py/ and ui/ subfolder structure
+
 ## v1.1.1
 - Fixed break time calculation — now uses timestamp math (BREAK START → Break over) instead of the logged ms value; DreamBot logs -100 for manually skipped breaks which was corrupting the total
 
