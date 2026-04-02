@@ -61,6 +61,7 @@ class AccountState:
         self.logged_in       = False
         self.total_break_secs    = 0
         self._break_start_ts     = None
+        self.break_start_log_ts  = None   # log timestamp of current break start
         self.break_expected_end  = None   # time.time() + break_ms/1000 set on BREAK START
         self.last_log_mtime      = 0.0    # updated by _check_file; replaces xdotool window check
         self.notified_levels     = {}
@@ -222,7 +223,7 @@ class LogWatcher:
                 folder = os.path.basename(d)
                 with self._accounts_lock:
                     state = self._accounts.get(folder)
-                if state and session_files != state.session_file_set:
+                if state and (not state._startup_done or session_files != state.session_file_set):
                     state.session_file_set = session_files
                     self._startup_catchup(str(active))
         except Exception:
@@ -233,10 +234,10 @@ class LogWatcher:
             snapshot = list(self._accounts.items())
         for name, s in sorted(snapshot):
             window_open = self._is_window_open(s)
-            if not window_open:
-                status = '🔴 Offline'
-            elif s.on_break or s._break_start_ts or (s.last_task or '').lower() == 'break':
+            if s.on_break or s._break_start_ts or (s.last_task or '').lower() == 'break':
                 status = '🟡 On Break'
+            elif not window_open:
+                status = '🔴 Offline'
             elif not s.logged_in:
                 status = '🟡 Logged Out'
             else:
@@ -244,7 +245,7 @@ class LogWatcher:
             start_ts    = s.script_start_ts or s.session_start
             uptime_secs = time.time() - start_ts
             uptime_str  = _fmt_duration(uptime_secs) if window_open else '—'
-            break_secs  = s.total_break_secs
+            break_secs = s.total_break_secs
             if s._break_start_ts:
                 break_secs += time.time() - s._break_start_ts
             break_str = _fmt_duration(break_secs)
@@ -373,20 +374,13 @@ class LogWatcher:
             self.log(f"  🚫 Daily summary failed: {err}")
 
     def _is_window_open(self, state):
-        """Derive client-running state from log activity instead of xdotool.
-        - On break within expected window → treat as open (script is alive, just paused)
-        - On break past expected_end + 10min → treat as crashed
+        """Derive client-running state from log activity.
+        - On break → always treat as open; trust the break state flag
         - Otherwise → open if log was written to in the last 5 minutes
         """
-        now = time.time()
-        if state.on_break:
-            if state.break_expected_end is None:
-                # No expected end recorded — give generous 8h benefit of the doubt
-                return True
-            if now <= state.break_expected_end + 600:   # +10 minutes grace
-                return True
-            return False   # break ran out — likely crashed
-        return (now - state.last_log_mtime) < 300       # 5 min stale = offline
+        if state.on_break or state._break_start_ts:
+            return True
+        return (time.time() - state.last_log_mtime) < 300
 
     def _prune_dedupe(self):
         with self._offsets_lock:
@@ -583,13 +577,19 @@ class LogWatcher:
             if client_start_ts:
                 state.script_start_ts = client_start_ts
 
-            # Set completed breaks FIRST, then add current in-progress elapsed.
-            # Previously already_elapsed was added before this line and got overwritten.
+            # Completed break total — set unconditionally from session scan.
             state.total_break_secs = total_break_ms / 1000.0
-            if state.on_break and break_start_log_ts:
-                already_elapsed = time.time() - break_start_log_ts
-                state.total_break_secs += max(0.0, already_elapsed)
-                state._break_start_ts = time.time()
+
+            # Seed _break_start_ts from log timestamp once — do not overwrite if
+            # already set so the timer keeps accumulating across _startup_catchup calls.
+            if state.on_break and not state._break_start_ts:
+                if break_start_log_ts and break_start_log_ts <= time.time():
+                    state._break_start_ts = break_start_log_ts
+                else:
+                    # Fallback: use now — better than leaving _break_start_ts unset
+                    state._break_start_ts = time.time()
+
+            state._startup_done = True
 
             # ── Current task: use shared slice_last_task from reader.py ────────
             last_task, last_activity = slice_last_task(active_lines)
@@ -986,8 +986,7 @@ class LogWatcher:
                     state._break_start_ts = None
             elif 'interacting (widget) logout' in b.lower():
                 state.logged_in = False
-                if state._break_start_ts is None:
-                    state._break_start_ts = time.time()
+                # Do NOT set _break_start_ts here — logout is not a break
             elif 'you have successfully been logged in' in b.lower():
                 state.logged_in = True
                 state.on_break  = False

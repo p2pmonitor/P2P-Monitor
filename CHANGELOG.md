@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.6
+- Fixed root cause of break time not accumulating and status flipping between Offline/On Break — _startup_catchup was being called on every status refresh, resetting _break_start_ts and total_break_secs each time
+- Added _startup_done flag to AccountState — _startup_catchup now runs only once per state object; session file rotation still triggers it correctly
+- Fixed status priority — on_break now checked before window_open so accounts on break always show On Break, never Offline
+- Fixed _break_start_ts seeding — set once from the parsed log timestamp (break_start_log_ts) so break timer starts from actual break start, not monitor startup; not overwritten on subsequent calls
+- Removed interacting (widget) logout from break timing — normal logout no longer starts the break timer
+
 ## v1.1.5
 - Fixed root cause of account showing Offline during a break — backwards scan was treating 'Break over -> Startup' (a skip notification) as a completed break; fixed in backwards scan, live poll loop, and timestamp pair math to only match 'Break over N' (with a number)
 - Fixed break time overwrite — completed break total from session files was overwriting the current in-progress elapsed time; now sets total_break_secs from completed breaks first, then adds current break elapsed on top
