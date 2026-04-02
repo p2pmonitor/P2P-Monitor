@@ -519,7 +519,8 @@ class LogWatcher:
                 b = strip_prefix(line).strip().lower()
                 if 'you have successfully been logged in' in b:
                     state.logged_in = True;  state.on_break = False;  break
-                elif b.startswith('break over'):
+                elif re.match(r'break over\s*(-?\d+)', b):
+                    # Real completed break (Break over N ms) — not 'Break over -> Startup'
                     state.logged_in = True;  state.on_break = False;  break
                 elif 'break start' in line.upper():
                     state.logged_in = False; state.on_break = True
@@ -532,7 +533,7 @@ class LogWatcher:
                             pass
                     break
 
-            # If we started mid-break, find the Break length line after BREAK START
+            # If we started mid-break, find the break length for expected_end calculation
             if state.on_break:
                 from py.util import parse_break_length_ms
                 last_break_idx = None
@@ -541,28 +542,17 @@ class LogWatcher:
                         last_break_idx = i
                 if last_break_idx is not None:
                     break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
-
                 if break_start_log_ts and break_length_ms:
                     state.break_expected_end = break_start_log_ts + break_length_ms / 1000.0
-                # Add elapsed time of the current break into total_break_secs
-                # so the status tab shows the correct cumulative break time.
-                # _break_start_ts = now means accumulation continues from this point.
-                if break_start_log_ts:
-                    already_elapsed = time.time() - break_start_log_ts
-                    state.total_break_secs += max(0.0, already_elapsed)
-                state._break_start_ts = time.time()
 
-            # ── Uptime: first 'Connecting to server' across ALL session files ─────
-            # Session files = logfile-X.log (newest) + logfile-X.log.1, .log.2 … (older).
-            # Walk oldest-first to find the first connect time = client session start.
-            # Break time = timestamp math across all session files.
-            # Pairs each BREAK START with the next Break over line and subtracts
-            # timestamps — ignores the logged N ms value entirely since DreamBot
-            # logs -100 for manually skipped breaks which corrupts the total.
+            # ── Uptime + break time: scan ALL session files ───────────────────
+            # Walk oldest-first to find client start time and sum all completed breaks.
+            # Uses timestamp math (BREAK START → Break over N) — ignores logged ms value
+            # since DreamBot logs -100 for manually skipped breaks.
             session_files_oldest_first = list(reversed(session_files_newest_first))
             total_break_ms  = 0
             client_start_ts = None
-            pending_break_start = None  # timestamp of last seen BREAK START with no matching Break over yet
+            pending_break_start = None
             for sf in session_files_oldest_first:
                 try:
                     sf_fh = open(str(sf), 'r', encoding='utf-8', errors='replace')
@@ -580,22 +570,26 @@ class LogWatcher:
                                 ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                             except Exception:
                                 pass
-                        # Track BREAK START timestamp
                         if 'BREAK START' in line.upper() and ts:
                             pending_break_start = ts
-                        # On Break over — compute duration from timestamps, ignore logged value
-                        elif b.lower().startswith('break over') and ts and pending_break_start:
+                        elif re.match(r'break over\s*(-?\d+)', b.lower()) and ts and pending_break_start:
                             duration_ms = (ts - pending_break_start) * 1000
                             if duration_ms > 0:
                                 total_break_ms += duration_ms
                             pending_break_start = None
-                        # First 'Connecting to server' in oldest file = client session start
                         if client_start_ts is None and 'connecting to server' in b.lower() and ts:
                             client_start_ts = ts
 
             if client_start_ts:
                 state.script_start_ts = client_start_ts
+
+            # Set completed breaks FIRST, then add current in-progress elapsed.
+            # Previously already_elapsed was added before this line and got overwritten.
             state.total_break_secs = total_break_ms / 1000.0
+            if state.on_break and break_start_log_ts:
+                already_elapsed = time.time() - break_start_log_ts
+                state.total_break_secs += max(0.0, already_elapsed)
+                state._break_start_ts = time.time()
 
             # ── Current task: use shared slice_last_task from reader.py ────────
             last_task, last_activity = slice_last_task(active_lines)
@@ -982,7 +976,8 @@ class LogWatcher:
                 bl_ms = parse_break_length_ms(lines, idx + 1, max_search=3)
                 if bl_ms is not None:
                     state.break_expected_end = time.time() + bl_ms / 1000.0
-            elif b.lower().startswith('break over'):
+            elif re.match(r'break over\s*(-?\d+)', b.lower()):
+                # Real completed break (Break over N ms) — not 'Break over -> Startup'
                 state.on_break = False
                 state.logged_in = True
                 state.break_expected_end = None

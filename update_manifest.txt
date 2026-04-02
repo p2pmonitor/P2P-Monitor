@@ -1,0 +1,17 @@
+# P2P Monitor update manifest
+# One relative path per line. Blank lines and # comments are ignored.
+# The updater applies exactly these files from the release zip.
+
+p2p_monitor.py
+py/reader.py
+py/history.py
+py/config.py
+py/util.py
+py/discord.py
+py/screenshot.py
+py/paint.py
+py/watcher.py
+ui/monitor_tab.py
+ui/status_tab.py
+ui/history_tab.py
+ui/settings_tab.py

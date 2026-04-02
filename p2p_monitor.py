@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.4 — Debian 12 native
+P2P Monitor v1.1.5 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,7 +44,7 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.1.4"
+VERSION     = "1.1.5"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -254,16 +254,15 @@ class App(tk.Tk):
         threading.Thread(target=self._do_silent_update_check, daemon=True).start()
 
     def _local_ver(self):
-        """Return local version string e.g. 'v1.1.0'."""
-        with open(__file__, encoding='utf-8') as fh:
-            m = re.search(r'P2P Monitor (v[\d.]+)', fh.read())
-        return m.group(1) if m else 'unknown'
+        """Return local version string e.g. 'v1.1.5'."""
+        v = VERSION if VERSION.startswith('v') else f'v{VERSION}'
+        return v
 
     def _fetch_release_info(self, include_prerelease=False):
         """
         Return (tag, asset_url) for the best available release.
         include_prerelease=False → /releases/latest (stable only)
-        include_prerelease=True  → /releases list, pick newest by tag
+        include_prerelease=True  → /releases list, pick highest semver
         """
         import urllib.request, json
         headers = {'Accept': 'application/vnd.github.v3+json',
@@ -279,18 +278,30 @@ class App(tk.Tk):
         if isinstance(data, list):
             if not data:
                 return None, None
-            # Sort by published_at descending, pick newest
-            data.sort(key=lambda x: x.get('published_at', ''), reverse=True)
+            # Sort by parsed semver descending — not published_at
+            def _semver_key(rel):
+                tag = rel.get('tag_name', '').lstrip('v')
+                try:
+                    return tuple(int(x) for x in tag.split('.')[:3])
+                except Exception:
+                    return (0, 0, 0)
+            data.sort(key=_semver_key, reverse=True)
             release = data[0]
         else:
             release = data
         tag = release.get('tag_name', '')
-        # Find zip asset — prefer asset named P2P-Monitor-*.zip
+        # Find the release zip — prefer P2P-Monitor-*.zip, fall back to any .zip
         asset_url = None
         for asset in release.get('assets', []):
-            if asset.get('name', '').endswith('.zip'):
+            name = asset.get('name', '')
+            if name.startswith('P2P-Monitor-') and name.endswith('.zip'):
                 asset_url = asset['browser_download_url']
                 break
+        if not asset_url:
+            for asset in release.get('assets', []):
+                if asset.get('name', '').endswith('.zip'):
+                    asset_url = asset['browser_download_url']
+                    break
         return tag, asset_url
 
     def _do_silent_update_check(self):
@@ -358,21 +369,15 @@ class App(tk.Tk):
 
     def _do_apply_update(self, new_ver, asset_url):
         """
-        Download the release zip, apply only changed files, delete the zip.
-        Backs up p2p_monitor.py first. Prompts restart on completion.
+        Download release zip, stage in temp dir, verify via manifest, then apply.
+        Staged approach: install dir is not touched until all files are verified.
+        Falls back gracefully if manifest is missing (applies all .py files).
         """
-        import urllib.request, zipfile, io
+        import urllib.request, zipfile, io, tempfile, traceback
         install_dir = Path(SCRIPT_PATH).parent
         backup      = SCRIPT_PATH + '.bak'
-        errors      = []
 
         self._log(f'⬇️  Downloading {new_ver}...')
-
-        # Back up entry point
-        try:
-            shutil.copy2(SCRIPT_PATH, backup)
-        except Exception as e:
-            self._log(f'⚠ Could not create backup: {e}')
 
         # Download zip into memory
         try:
@@ -385,49 +390,88 @@ class App(tk.Tk):
             self.after(0, lambda: messagebox.showerror('Update Failed', f'Download failed: {e}'))
             return
 
-        self._log(f'📦 Applying {new_ver}...')
-
-        # Extract and apply only changed files
-        applied = 0
-        skipped = 0
-        # Only update actual code files — skip docs, metadata, and repo files
-        _CODE_FILES = {
-            'p2p_monitor.py',
-            'py/reader.py', 'py/history.py', 'py/config.py', 'py/util.py',
-            'py/discord.py', 'py/screenshot.py', 'py/paint.py', 'py/watcher.py',
-            'ui/monitor_tab.py', 'ui/status_tab.py', 'ui/history_tab.py', 'ui/settings_tab.py',
-        }
+        # Stage in a temp dir on the same filesystem as install_dir
         try:
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                for entry in zf.namelist():
-                    parts = Path(entry).parts
-                    if not parts:
-                        continue
-                    rel = Path(*parts)
-                    # Skip anything not in the code files list
-                    if str(rel).replace('\\', '/') not in _CODE_FILES:
-                        continue
-                    dest = install_dir / rel
-                    try:
-                        new_content = zf.read(entry)
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        if dest.exists():
-                            old_content = dest.read_bytes()
-                            if old_content == new_content:
-                                skipped += 1
-                                continue
-                        dest.write_bytes(new_content)
-                        applied += 1
-                        self._log(f'  ✅ {rel}')
-                    except Exception as e:
-                        errors.append(str(rel))
-                        self._log(f'  ❌ {rel}: {e}')
+            stage_dir = Path(tempfile.mkdtemp(dir=install_dir, prefix='.update_tmp_'))
         except Exception as e:
-            self._log(f'❌ Failed to read zip: {e}')
-            self.after(0, lambda: messagebox.showerror('Update Failed', f'Failed to read zip: {e}'))
+            self._log(f'❌ Could not create staging dir: {e}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', f'Staging failed: {e}'))
             return
 
-        self._log(f'📦 {applied} file(s) updated, {skipped} unchanged')
+        self._log(f'📦 Staging {new_ver}...')
+        try:
+            # Extract full zip into staging dir
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                zf.extractall(stage_dir)
+
+            # Read manifest — determines which files to apply
+            manifest_path = stage_dir / 'update_manifest.txt'
+            if manifest_path.exists():
+                manifest_lines = manifest_path.read_text(encoding='utf-8').splitlines()
+                update_files = []
+                for line in manifest_lines:
+                    line = line.strip().replace('\\', '/')
+                    if not line or line.startswith('#'):
+                        continue
+                    if line.startswith('/') or '..' in line:
+                        self._log(f'⚠ Skipping unsafe manifest path: {line}')
+                        continue
+                    update_files.append(line)
+                self._log(f'📋 Manifest: {len(update_files)} file(s) to apply')
+            else:
+                # Fallback: apply all .py files found in staging dir
+                self._log('⚠ No manifest found — applying all .py files')
+                update_files = [
+                    str(p.relative_to(stage_dir)).replace('\\', '/')
+                    for p in stage_dir.rglob('*.py')
+                ]
+
+            # Verify all manifest files exist in staging dir before touching install
+            missing = [f for f in update_files if not (stage_dir / f).exists()]
+            if missing:
+                self._log(f'❌ Staging verification failed — missing: {missing}')
+                self.after(0, lambda: messagebox.showerror('Update Failed',
+                    f'Zip is missing expected files:\n' + '\n'.join(missing)))
+                return
+
+            # Back up entry point before any writes
+            try:
+                shutil.copy2(SCRIPT_PATH, backup)
+            except Exception as e:
+                self._log(f'⚠ Could not create backup: {e}')
+
+            # Apply staged files to install dir
+            applied = 0
+            skipped = 0
+            errors  = []
+            for rel_str in update_files:
+                src  = stage_dir / rel_str
+                dest = install_dir / rel_str
+                try:
+                    new_content = src.read_bytes()
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists() and dest.read_bytes() == new_content:
+                        skipped += 1
+                        continue
+                    dest.write_bytes(new_content)
+                    applied += 1
+                    self._log(f'  ✅ {rel_str}')
+                except Exception as e:
+                    errors.append(rel_str)
+                    self._log(f'  ❌ {rel_str}: {e}')
+
+            self._log(f'📦 {applied} file(s) updated, {skipped} unchanged')
+
+        except Exception as e:
+            self._log(f'❌ Update failed: {e}\n{traceback.format_exc()}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', str(e)))
+            return
+        finally:
+            # Always clean up staging dir
+            try:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         if errors:
             msg = f'Update to {new_ver} completed with {len(errors)} error(s):\n' + '\n'.join(errors)

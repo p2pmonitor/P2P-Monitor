@@ -8,6 +8,18 @@ class StatusTab:
     def __init__(self, app, parent_frame):
         self.app = app
         self._build(parent_frame)
+        self._auto_refresh()
+
+    def _auto_refresh(self):
+        """Refresh every 30 seconds so uptime and break time tick live."""
+        self.refresh()
+        self.app.after(30000, self._auto_refresh)
+        self._auto_refresh()
+
+    def _auto_refresh(self):
+        """Refresh every 30 seconds so uptime and break time tick live."""
+        self.refresh()
+        self.app.after(30000, self._auto_refresh)
 
     def _build(self, f):
         app = self.app
