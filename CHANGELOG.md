@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.7
+- Fixed root cause of on_break never being set correctly — backwards scan was stopping at a previous completed 'Break over N' line before reaching the current BREAK START; replaced with a forward scan that tracks the last unmatched BREAK START, which is the correct algorithm
+- Added _is_break_start() and _is_break_over() helper functions — used consistently in startup scan, session file scan, and live poll loop
+- Fixed logged_in detection in startup scan — was incorrectly set as 'not on_break'; now tracked properly through logged in/out/break events
+- All previous v1.1.6 fixes remain: _startup_done guard, status priority (on_break before Offline), _break_start_ts seeded once from log timestamp, logout no longer starts break timer
+
+## v1.1.7
+- Fixed break detection — backwards scan was replaced with forward scan to correctly find the last unmatched BREAK START; backwards scan failed when a completed 'Break over N' line appeared after the last BREAK START (i.e. a prior completed break existed in the same log)
+- Fixed case bug in forward scan — 'break start' was checked against line.upper() which never matched; corrected to 'BREAK START'
+- Uptime now shows during breaks regardless of window_open state
+
 ## v1.1.6
 - Fixed root cause of break time not accumulating and status flipping between Offline/On Break — _startup_catchup was being called on every status refresh, resetting _break_start_ts and total_break_secs each time
 - Added _startup_done flag to AccountState — _startup_catchup now runs only once per state object; session file rotation still triggers it correctly

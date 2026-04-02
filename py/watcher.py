@@ -32,6 +32,18 @@ from py.screenshot import (get_focused_wid,
 
 LOG_PATTERN = "logfile-*.log"
 
+_IS_BREAK_START_RE = re.compile(r'BREAK START', re.IGNORECASE)
+_IS_BREAK_OVER_RE  = re.compile(r'break over\s*(-?\d+)', re.IGNORECASE)
+
+def _is_break_start(line):
+    """True if this log line signals the start of a break."""
+    return bool(_IS_BREAK_START_RE.search(line))
+
+def _is_break_over(stripped_lower):
+    """True if stripped lowercase line is a real completed break — not 'Break over -> Startup'."""
+    return bool(_IS_BREAK_OVER_RE.match(stripped_lower))
+
+
 def _get_log_files(folder):
     p = Path(folder)
     files = list(p.glob("logfile-*.log")) + list(p.glob("logfile-*.log.*"))
@@ -61,11 +73,11 @@ class AccountState:
         self.logged_in       = False
         self.total_break_secs    = 0
         self._break_start_ts     = None
-        self.break_start_log_ts  = None   # log timestamp of current break start
-        self.break_expected_end  = None   # time.time() + break_ms/1000 set on BREAK START
+        self.break_expected_end  = None
         self.last_log_mtime      = 0.0    # updated by _check_file; replaces xdotool window check
         self.notified_levels     = {}
         self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
+        self._startup_done       = False  # guards _startup_catchup to run only once per state
 
     def should_alert(self, key, threshold, window_sec, dedupe_sec):
         now = time.time()
@@ -244,7 +256,8 @@ class LogWatcher:
                 status = '🟢 Logged In'
             start_ts    = s.script_start_ts or s.session_start
             uptime_secs = time.time() - start_ts
-            uptime_str  = _fmt_duration(uptime_secs) if window_open else '—'
+            show_uptime = window_open or s.on_break or bool(s._break_start_ts)
+            uptime_str  = _fmt_duration(uptime_secs) if show_uptime else '—'
             break_secs = s.total_break_secs
             if s._break_start_ts:
                 break_secs += time.time() - s._break_start_ts
@@ -506,33 +519,42 @@ class LogWatcher:
                 self.log(f"⚠ [{folder}] Could not read active log: {e}")
                 active_lines = []
 
-            # ── Login / break state: scan active file backwards ───────────────
+            # ── Login / break state: forward scan to find final state ────────────
+            # Forward scan is the correct algorithm — it tracks the last unmatched
+            # BREAK START, giving the true current break state regardless of how
+            # many completed breaks appear in the file.
             break_start_log_ts = None
-            break_length_ms    = None
-            for line in reversed(active_lines):
-                b = strip_prefix(line).strip().lower()
-                if 'you have successfully been logged in' in b:
-                    state.logged_in = True;  state.on_break = False;  break
-                elif re.match(r'break over\s*(-?\d+)', b):
-                    # Real completed break (Break over N ms) — not 'Break over -> Startup'
-                    state.logged_in = True;  state.on_break = False;  break
-                elif 'break start' in line.upper():
-                    state.logged_in = False; state.on_break = True
+            state.on_break      = False
+            state.logged_in     = False
+            for line in active_lines:
+                b = strip_prefix(line).strip()
+                if _is_break_start(line):
+                    state.on_break  = True
+                    state.logged_in = False
                     m = LOG_TS_RE.match(line)
                     if m:
                         try:
                             break_start_log_ts = datetime.strptime(
                                 m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                         except Exception:
-                            pass
-                    break
+                            break_start_log_ts = None
+                elif _is_break_over(b.lower()):
+                    state.on_break      = False
+                    state.logged_in     = True
+                    break_start_log_ts  = None
+                elif 'you have successfully been logged in' in b.lower():
+                    state.on_break      = False
+                    state.logged_in     = True
+                    break_start_log_ts  = None
+                elif 'interacting (widget) logout' in b.lower():
+                    state.logged_in     = False
 
             # If we started mid-break, find the break length for expected_end calculation
             if state.on_break:
                 from py.util import parse_break_length_ms
                 last_break_idx = None
                 for i, line in enumerate(active_lines):
-                    if 'BREAK START' in line.upper():
+                    if _is_break_start(line):
                         last_break_idx = i
                 if last_break_idx is not None:
                     break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
@@ -564,9 +586,9 @@ class LogWatcher:
                                 ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                             except Exception:
                                 pass
-                        if 'BREAK START' in line.upper() and ts:
+                        if _is_break_start(line) and ts:
                             pending_break_start = ts
-                        elif re.match(r'break over\s*(-?\d+)', b.lower()) and ts and pending_break_start:
+                        elif _is_break_over(b.lower()) and ts and pending_break_start:
                             duration_ms = (ts - pending_break_start) * 1000
                             if duration_ms > 0:
                                 total_break_ms += duration_ms
@@ -968,16 +990,17 @@ class LogWatcher:
         # Update login/break state from this batch
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
-            if 'BREAK START' in line.upper():
-                state.on_break = True
+            if _is_break_start(line):
+                state.on_break  = True
                 state.logged_in = False
-                state._break_start_ts = time.time()
+                if not state._break_start_ts:
+                    state._break_start_ts = time.time()
                 from py.util import parse_break_length_ms
                 bl_ms = parse_break_length_ms(lines, idx + 1, max_search=3)
                 if bl_ms is not None:
                     state.break_expected_end = time.time() + bl_ms / 1000.0
-            elif re.match(r'break over\s*(-?\d+)', b.lower()):
-                # Real completed break (Break over N ms) — not 'Break over -> Startup'
+            elif _is_break_over(b.lower()):
+                # Real completed break — not 'Break over -> Startup'
                 state.on_break = False
                 state.logged_in = True
                 state.break_expected_end = None
