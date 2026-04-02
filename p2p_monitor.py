@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.2 — Debian 12 native
+P2P Monitor v1.1.3 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,7 +44,7 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.1.2"
+VERSION     = "1.1.3"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -310,8 +310,17 @@ class App(tk.Tk):
             self._log(f"🔄 Update available: {remote_ver} (current: {local_ver})")
             if messagebox.askyesno('Update Available',
                     f'New version: {remote_ver}\nYou are on: {local_ver}\n\nUpdate now?'):
-                threading.Thread(target=self._do_apply_update,
-                                 args=(remote_ver, False), daemon=True).start()
+                def _fetch_and_apply():
+                    try:
+                        _, asset_url = self._fetch_release_info(include_prerelease=False)
+                    except Exception as e:
+                        self._log(f'❌ Could not fetch release info: {e}')
+                        return
+                    if not asset_url:
+                        self._log('❌ No zip asset found for this release')
+                        return
+                    self._do_apply_update(remote_ver, asset_url)
+                threading.Thread(target=_fetch_and_apply, daemon=True).start()
         self.after(0, _prompt)
 
     def _do_update_check(self):
@@ -381,17 +390,23 @@ class App(tk.Tk):
         # Extract and apply only changed files
         applied = 0
         skipped = 0
+        # Only update actual code files — skip docs, metadata, and repo files
+        _CODE_FILES = {
+            'p2p_monitor.py',
+            'py/reader.py', 'py/history.py', 'py/config.py', 'py/util.py',
+            'py/discord.py', 'py/screenshot.py', 'py/paint.py', 'py/watcher.py',
+            'ui/monitor_tab.py', 'ui/status_tab.py', 'ui/history_tab.py', 'ui/settings_tab.py',
+        }
         try:
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
                 for entry in zf.namelist():
-                    # Use the zip entry path as-is.
-                    # Only strip a top-level wrapper folder if ALL entries share
-                    # the same root (e.g. P2P-Monitor-v1.1.2/py/watcher.py).
-                    # Our release zips are flat (py/watcher.py) so no stripping.
                     parts = Path(entry).parts
                     if not parts:
                         continue
                     rel = Path(*parts)
+                    # Skip anything not in the code files list
+                    if str(rel).replace('\\', '/') not in _CODE_FILES:
+                        continue
                     dest = install_dir / rel
                     try:
                         new_content = zf.read(entry)

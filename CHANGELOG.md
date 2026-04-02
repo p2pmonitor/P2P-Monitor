@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.3
+- Fixed silent startup update check passing boolean False as asset URL when user accepted the update prompt — caused "unknown url type: 'False'" download error
+
 ## v1.1.2
 - Fixed auto-updater incorrectly extracting all files flat into the root install directory instead of preserving py/ and ui/ subfolder structure
 
