@@ -368,6 +368,24 @@ def slice_tasks(lines):
 
             task_name = re.sub(r'^Task is\s*', '', b, flags=re.IGNORECASE).strip()
 
+            # Suppress if 'Actually task is' appears within the same timestamp block
+            # (same second or within 15 lines) — Actually task is takes full priority
+            ts_match_ti = LOG_TS_RE.match(arr[i])
+            this_ts_ti  = ts_match_ti.group(1) if ts_match_ti else None
+            overridden  = False
+            for j in range(i + 1, min(n, i + 15)):
+                raw_j = arr[j]
+                ts_j  = LOG_TS_RE.match(raw_j)
+                if ts_j and this_ts_ti and ts_j.group(1) != this_ts_ti:
+                    break
+                nb_j = strip_prefix(raw_j).strip()
+                if re.match(r'^Actually task is\s+', nb_j, re.IGNORECASE):
+                    overridden = True
+                    break
+            if overridden:
+                i += 1
+                continue
+
             # Look ahead up to 10 lines for locking, activity, step 0, slayer
             locked    = False
             activity  = ''

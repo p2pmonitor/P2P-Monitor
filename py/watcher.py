@@ -62,8 +62,6 @@ class AccountState:
         self.name            = name
         self.last_task       = ''
         self.last_activity   = ''
-        self.last_seen       = now_str()
-        self.last_seen_ts    = time.time()
         self.err_history     = {}
         self.err_alerted     = {}
         self.last_screenshot_ts = 0
@@ -73,8 +71,7 @@ class AccountState:
         self.logged_in       = False
         self.total_break_secs    = 0
         self._break_start_ts     = None
-        self.break_expected_end  = None
-        self.last_log_mtime      = 0.0    # updated by _check_file; replaces xdotool window check
+        self.script_running      = False  # True once script start confirmed; False on stop
         self.notified_levels     = {}
         self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
         self._startup_done       = False  # guards _startup_catchup to run only once per state
@@ -236,27 +233,27 @@ class LogWatcher:
                 with self._accounts_lock:
                     state = self._accounts.get(folder)
                 if state and (not state._startup_done or session_files != state.session_file_set):
+                    is_rotation = state._startup_done and session_files != state.session_file_set
                     state.session_file_set = session_files
-                    self._startup_catchup(str(active))
-        except Exception:
-            pass
+                    self._startup_catchup(str(active), is_rotation=is_rotation)
+        except Exception as e:
+            self.log(f'[DEBUG] get_account_rows rotation check failed: {e}')
 
         rows = []
         with self._accounts_lock:
             snapshot = list(self._accounts.items())
         for name, s in sorted(snapshot):
-            window_open = self._is_window_open(s)
-            if s.on_break or s._break_start_ts or (s.last_task or '').lower() == 'break':
-                status = '🟡 On Break'
-            elif not window_open:
+            if not s.script_running:
                 status = '🔴 Offline'
+            elif s.on_break or s._break_start_ts:
+                status = '🟡 On Break'
             elif not s.logged_in:
-                status = '🟡 Logged Out'
+                status = '🟡 Starting...'
             else:
                 status = '🟢 Logged In'
             start_ts    = s.script_start_ts or s.session_start
             uptime_secs = time.time() - start_ts
-            show_uptime = window_open or s.on_break or bool(s._break_start_ts)
+            show_uptime = s.script_running or s.on_break or bool(s._break_start_ts)
             uptime_str  = _fmt_duration(uptime_secs) if show_uptime else '—'
             break_secs = s.total_break_secs
             if s._break_start_ts:
@@ -337,7 +334,8 @@ class LogWatcher:
         summary_time = self.cfg.get('summary_time', '22:00').strip()
         try:
             sh, sm = [int(x) for x in summary_time.split(':')]
-        except Exception:
+        except Exception as e:
+            self.log(f'[DEBUG] Daily summary skipped — bad summary_time value "{summary_time}": {e}')
             return
         now   = datetime.now()
         today = now.strftime('%Y-%m-%d')
@@ -386,27 +384,48 @@ class LogWatcher:
         if not ok:
             self.log(f"  🚫 Daily summary failed: {err}")
 
-    def _is_window_open(self, state):
-        """Derive client-running state from log activity.
-        - On break → always treat as open; trust the break state flag
-        - Otherwise → open if log was written to in the last 5 minutes
-        """
-        if state.on_break or state._break_start_ts:
-            return True
-        return (time.time() - state.last_log_mtime) < 300
-
     def _prune_dedupe(self):
         with self._offsets_lock:
             dead = [p for p in list(self._offsets) if not os.path.exists(p)]
             for p in dead:
                 del self._offsets[p]
 
+    def _is_folder_active(self, folder):
+        """
+        Check if any process has an open file handle in the given folder.
+        Uses lsof +D — returns True if DreamBot is actively writing to the folder.
+        Returns False if no process has the folder open (stale/dead session).
+        """
+        import subprocess
+        try:
+            result = subprocess.run(
+                ['lsof', '+D', str(folder)],
+                capture_output=True, text=True, timeout=5
+            )
+            # Only check stdout — lsof exit code varies by version/platform
+            # even when files are found, so don't rely on returncode
+            return bool(result.stdout.strip())
+        except Exception as e:
+            self.log(f'[DEBUG] lsof check failed for {folder}: {e}')
+            return True  # Fail open — assume active if lsof unavailable
+
     # ── Main run loop ──────────────────────────────────────────────────────────
     def _run(self):
         dirs = self._get_log_dirs()
         if not dirs:
-            self.log("⚠ No valid log directories configured")
-            return
+            # Idle wait — check every 5 seconds for up to 10 minutes
+            self.log("⏳ Waiting for active sessions...")
+            deadline = time.time() + 600  # 10 minutes
+            while self._running and time.time() < deadline:
+                time.sleep(5)
+                dirs = self._get_log_dirs()
+                if dirs:
+                    break
+            if not dirs:
+                self.log("⚠ No active sessions found after 10 minutes — stopping monitor.")
+                self._running = False
+                return
+            self.log(f"✅ Sessions found — starting monitor.")
         for d in dirs:
             log_files = _get_log_files(d)
             active = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
@@ -421,14 +440,22 @@ class LogWatcher:
         for d in dirs:
             log_files = _get_log_files(d)
             active = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
-            if active:
+            folder_active = self._is_folder_active(d)
+            if active and folder_active:
                 self._startup_catchup(str(active))
                 # Pin active file to EOF so poll loop only sees new content from here
                 try:
                     with self._offsets_lock:
                         self._offsets[str(active)] = active.stat().st_size
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f'[DEBUG] Could not pin offset for {active.name}: {e}')
+            else:
+                # Stale log — create blank offline state, skip catchup entirely
+                folder_name = os.path.basename(d)
+                with self._accounts_lock:
+                    if folder_name not in self._accounts:
+                        self._accounts[folder_name] = AccountState(folder_name)
+                self.log(f"📋 [{folder_name}] No active session — showing Offline")
             t = threading.Thread(target=self._backfill_history, args=(d,), daemon=True)
             t.start()
             with self._backfill_lock:
@@ -459,7 +486,7 @@ class LogWatcher:
             time.sleep(interval)
 
     # ── Startup catchup ────────────────────────────────────────────────────────
-    def _startup_catchup(self, active_path):
+    def _startup_catchup(self, active_path, is_rotation=False):
         """
         Called once per account at startup with the active log file path.
         Reads the current session (active file + any .log.1/.log.2 rotated
@@ -479,11 +506,6 @@ class LogWatcher:
             folder = os.path.basename(os.path.dirname(active_path)) or \
                      os.path.splitext(os.path.basename(active_path))[0]
             state = self._get_account(folder, skip_backfill=True)
-            # Use actual file mtime so stale accounts don't appear online for 5min
-            try:
-                state.last_log_mtime = Path(active_path).stat().st_mtime
-            except Exception:
-                state.last_log_mtime = 0.0
 
             # ── Identify all files in this session ────────────────────────────
             active_name = os.path.basename(active_path)  # e.g. logfile-X.log
@@ -505,7 +527,8 @@ class LogWatcher:
                     return 0
                 try:
                     return -int(n.rsplit('.', 1)[1])
-                except Exception:
+                except Exception as e:
+                    self.log(f'[DEBUG] Could not parse rotation index for {n}: {e}')
                     return -999
 
             # Newest first for scanning; we'll reverse where needed
@@ -523,9 +546,14 @@ class LogWatcher:
             # Forward scan is the correct algorithm — it tracks the last unmatched
             # BREAK START, giving the true current break state regardless of how
             # many completed breaks appear in the file.
+            # On rotation: preserve last known good state — only override if new
+            # log contains explicit state-changing lines (break, stop, solvers etc.)
+            # On cold start: reset all state and rebuild from scratch.
             break_start_log_ts = None
-            state.on_break      = False
-            state.logged_in     = False
+            if not is_rotation:
+                state.on_break       = False
+                state.logged_in      = False
+                state.script_running = False
             for line in active_lines:
                 b = strip_prefix(line).strip()
                 if _is_break_start(line):
@@ -536,17 +564,36 @@ class LogWatcher:
                         try:
                             break_start_log_ts = datetime.strptime(
                                 m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                        except Exception:
+                        except Exception as e:
+                            self.log(f'[DEBUG] Break start timestamp parse failed: {e}')
                             break_start_log_ts = None
                 elif _is_break_over(b.lower()):
-                    state.on_break      = False
-                    state.logged_in     = True
-                    break_start_log_ts  = None
+                    state.on_break       = False
+                    state.logged_in      = True
+                    state.script_running = True
+                    break_start_log_ts   = None
                 elif 'you have successfully been logged in' in b.lower():
                     state.on_break      = False
                     state.logged_in     = True
                     break_start_log_ts  = None
-                elif 'interacting (widget) logout' in b.lower():
+                elif 'starting p2p master ai now' in b.lower() or \
+                     'script set to running' in b.lower() or \
+                     'awaiting login' in b.lower():
+                    state.script_running = True
+                    state.logged_in      = False
+                elif 'solvers all finished' in b.lower():
+                    state.script_running = True
+                    state.logged_in      = True
+                    state.on_break       = False
+                elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+                    # Script is processing tasks — definitively in game
+                    # Don't override on_break — break state takes priority
+                    state.logged_in = True
+                elif 'stopped p2p master ai' in b.lower():
+                    state.script_running = False
+                    state.logged_in      = False
+                    state.on_break       = False
+                    state._break_start_ts = None
                     state.logged_in     = False
 
             # If we started mid-break, find the break length for expected_end calculation
@@ -558,8 +605,6 @@ class LogWatcher:
                         last_break_idx = i
                 if last_break_idx is not None:
                     break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
-                if break_start_log_ts and break_length_ms:
-                    state.break_expected_end = break_start_log_ts + break_length_ms / 1000.0
 
             # ── Uptime + break time: scan ALL session files ───────────────────
             # Walk oldest-first to find client start time and sum all completed breaks.
@@ -584,8 +629,8 @@ class LogWatcher:
                         if m:
                             try:
                                 ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                self.log(f'[DEBUG] Break scan timestamp parse failed: {e}')
                         if _is_break_start(line) and ts:
                             pending_break_start = ts
                         elif _is_break_over(b.lower()) and ts and pending_break_start:
@@ -614,16 +659,19 @@ class LogWatcher:
             state._startup_done = True
 
             # ── Current task: use shared slice_last_task from reader.py ────────
-            last_task, last_activity = slice_last_task(active_lines)
-
-            if last_task or last_activity:
-                state.last_task     = last_task
-                state.last_activity = last_activity
-                display = last_task or last_activity or '?'
-                self.log(f"📋 [{folder}] Startup task: {display}" +
-                         (f" / {last_activity}" if last_activity and last_task else ''))
-            else:
-                self.log(f"⚠ [{folder}] No task found in active log")
+            # On rotation: preserve existing task — new log starts empty so searching
+            # for a task would always fail and log a misleading warning.
+            # On cold start: always search for task.
+            if not is_rotation:
+                last_task, last_activity = slice_last_task(active_lines)
+                if last_task or last_activity:
+                    state.last_task     = last_task
+                    state.last_activity = last_activity
+                    display = last_task or last_activity or '?'
+                    self.log(f"📋 [{folder}] Startup task: {display}" +
+                             (f" / {last_activity}" if last_activity and last_task else ''))
+                else:
+                    self.log(f"⚠ [{folder}] No task found in active log")
 
         except Exception as e:
             self.log(f"⚠ Startup scan error [{e.__class__.__name__}]: {e}")
@@ -669,8 +717,8 @@ class LogWatcher:
                         if is_active and stored_offset is not None:
                             self._offsets[fstr] = stored_offset
                         # rotated files already set to EOF by _run, leave them
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f'[DEBUG] Could not restore offset for {os.path.basename(fstr)}: {e}')
 
                 # Skip already-scanned rotated files only.
                 # Always process the active file — it may have grown, and on upgrade
@@ -855,11 +903,6 @@ class LogWatcher:
                 return
             new_lines = new_text.splitlines()
             folder    = os.path.basename(os.path.dirname(path)) or os.path.splitext(os.path.basename(path))[0]
-            # Update last_log_mtime so window_open can be derived without xdotool
-            with self._accounts_lock:
-                s = self._accounts.get(folder)
-            if s is not None:
-                s.last_log_mtime = time.time()
             self._process_lines(new_lines, folder)
         except Exception as e:
             self.log(f"⚠ Error reading {os.path.basename(path)}: {e}")
@@ -870,8 +913,6 @@ class LogWatcher:
             if is_new:
                 self._accounts[folder] = AccountState(folder)
             s = self._accounts[folder]
-        s.last_seen    = datetime.now().strftime('%m/%d/%y %H:%M')
-        s.last_seen_ts = time.time()
         if is_new:
             threading.Thread(target=self._ensure_threads_for_account, args=(folder,), daemon=True).start()
             if not skip_backfill:
@@ -997,13 +1038,11 @@ class LogWatcher:
                     state._break_start_ts = time.time()
                 from py.util import parse_break_length_ms
                 bl_ms = parse_break_length_ms(lines, idx + 1, max_search=3)
-                if bl_ms is not None:
-                    state.break_expected_end = time.time() + bl_ms / 1000.0
             elif _is_break_over(b.lower()):
                 # Real completed break — not 'Break over -> Startup'
                 state.on_break = False
                 state.logged_in = True
-                state.break_expected_end = None
+                state.script_running = True
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts = None
@@ -1013,17 +1052,38 @@ class LogWatcher:
             elif 'you have successfully been logged in' in b.lower():
                 state.logged_in = True
                 state.on_break  = False
-                state.break_expected_end = None
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts = None
             elif 'starting p2p master ai now' in b.lower():
-                m = LOG_TS_RE.match(line)
-                if m:
-                    try:
-                        state.script_start_ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                    except Exception:
-                        pass
+                state.script_running = True
+                state.logged_in      = False
+                # Only set script_start_ts if not already set from DreamBot client start
+                # (Connecting to server in _startup_catchup). This preserves session uptime
+                # across script restarts — uptime tracks DreamBot session, not script runs.
+                if not state.script_start_ts:
+                    m = LOG_TS_RE.match(line)
+                    if m:
+                        try:
+                            state.script_start_ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
+                        except Exception as e:
+                            self.log(f'[DEBUG] script_start_ts parse failed: {e}')
+            elif 'script set to running' in b.lower() or 'awaiting login' in b.lower():
+                state.script_running = True
+                state.logged_in      = False
+            elif 'solvers all finished' in b.lower():
+                state.script_running = True
+                state.logged_in      = True
+                state.on_break       = False
+            elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+                # Script is processing tasks — definitively in game
+                # Don't touch on_break — break state takes priority
+                state.logged_in = True
+            elif 'stopped p2p master ai' in b.lower():
+                state.script_running  = False
+                state.logged_in       = False
+                state.on_break        = False
+                state._break_start_ts = None
 
         # Parse all events through the unified reader pipeline.
         parsed = parse_lines(lines)
