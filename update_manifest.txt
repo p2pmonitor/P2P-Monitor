@@ -3,6 +3,7 @@
 # The updater applies exactly these files from the release zip.
 
 p2p_monitor.py
+py/__init__.py
 py/reader.py
 py/history.py
 py/config.py
@@ -11,6 +12,7 @@ py/discord.py
 py/screenshot.py
 py/paint.py
 py/watcher.py
+ui/__init__.py
 ui/monitor_tab.py
 ui/status_tab.py
 ui/history_tab.py

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.7 — Debian 12 native
+P2P Monitor v1.1.8 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -44,7 +44,7 @@ from ui.status_tab   import StatusTab
 from ui.history_tab  import HistoryTab
 from ui.settings_tab import SettingsTab
 
-VERSION     = "1.1.7"
+VERSION     = "1.1.8"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -76,7 +76,16 @@ DEFAULT_CFG = {
 }
 
 def _ver_tuple(v):
-    return tuple(int(x) for x in v.lstrip('v').split('.') if x.isdigit())
+    import re as _re
+    s = v.lstrip('v').lower()
+    m = _re.match(r'^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$', s)
+    if not m:
+        return (0, 0, 0, -1, -1)
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    beta_num = m.group(4)
+    if beta_num is None:
+        return (major, minor, patch, 1, 0)       # stable — ranks above any beta
+    return (major, minor, patch, 0, int(beta_num))  # beta
 
 
 class App(tk.Tk):
@@ -253,11 +262,6 @@ class App(tk.Tk):
     def _silent_update_check(self):
         threading.Thread(target=self._do_silent_update_check, daemon=True).start()
 
-    def _local_ver(self):
-        """Return local version string e.g. 'v1.1.5'."""
-        v = VERSION if VERSION.startswith('v') else f'v{VERSION}'
-        return v
-
     def _fetch_release_info(self, include_prerelease=False):
         """
         Return (tag, asset_url) for the best available release.
@@ -280,11 +284,7 @@ class App(tk.Tk):
                 return None, None
             # Sort by parsed semver descending — not published_at
             def _semver_key(rel):
-                tag = rel.get('tag_name', '').lstrip('v')
-                try:
-                    return tuple(int(x) for x in tag.split('.')[:3])
-                except Exception:
-                    return (0, 0, 0)
+                return _ver_tuple(rel.get('tag_name', ''))
             data.sort(key=_semver_key, reverse=True)
             release = data[0]
         else:
@@ -312,7 +312,7 @@ class App(tk.Tk):
             return
         if not tag:
             return
-        local_ver  = self._local_ver()
+        local_ver  = f'v{VERSION}'
         remote_ver = tag if tag.startswith('v') else f'v{tag}'
         # Never prompt downgrade (e.g. user is on beta ahead of stable)
         if _ver_tuple(remote_ver) <= _ver_tuple(local_ver):
@@ -351,7 +351,7 @@ class App(tk.Tk):
             self.after(0, lambda: messagebox.showwarning('Auto-Update', 'No releases found.'))
             return
         remote_ver = tag if tag.startswith('v') else f'v{tag}'
-        local_ver  = self._local_ver()
+        local_ver  = f'v{VERSION}'
         if _ver_tuple(remote_ver) <= _ver_tuple(local_ver):
             self._log(f'✅ Already up to date ({local_ver})')
             self.after(0, lambda: messagebox.showinfo('Auto-Update', f'Already up to date ({local_ver}).'))

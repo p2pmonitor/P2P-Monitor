@@ -10,9 +10,11 @@ Built for Debian 12. Requires DreamBot with the P2P Master AI script running.
 
 ### Multi-account monitoring
 - Watches all accounts simultaneously from a single window
-- Detects account status: online, on break, offline, or crashed
+- Detects account status: 🟢 Logged In, 🟡 Starting..., 🟡 On Break, 🔴 Offline
+- Status updates reflect actual script lifecycle: Starting... on script init, Logged In once in-game, Offline when script stops
 - Tracks current task, activity, uptime, and break time per account
 - Auto-detects new accounts when DreamBot starts a new log file
+- If no active sessions exist on startup, monitor waits up to 10 minutes for logs to appear before stopping
 
 ### Discord notifications
 - Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, and script lifecycle events (start/stop/pause/resume)
