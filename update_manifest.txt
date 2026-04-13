@@ -16,4 +16,5 @@ ui/__init__.py
 ui/monitor_tab.py
 ui/status_tab.py
 ui/history_tab.py
+ui/launcher_tab.py
 ui/settings_tab.py

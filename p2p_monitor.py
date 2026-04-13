@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.1.8 — Debian 12 native
+P2P Monitor v1.2.0 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -17,6 +17,7 @@ File structure:
   ui/status_tab.py        — Status tab
   ui/history_tab.py       — History tab, date picker, tree
   ui/settings_tab.py      — Settings tab, event notifications table
+  ui/launcher_tab.py      — DreamBot CLI Launcher tab
 """
 
 import os
@@ -39,12 +40,13 @@ except ImportError:
 from py.history      import migrate_history
 from py.config       import save_config, load_config
 from py.watcher      import LogWatcher
-from ui.monitor_tab  import MonitorTab
-from ui.status_tab   import StatusTab
-from ui.history_tab  import HistoryTab
-from ui.settings_tab import SettingsTab
+from ui.monitor_tab   import MonitorTab
+from ui.status_tab    import StatusTab
+from ui.history_tab   import HistoryTab
+from ui.launcher_tab  import LauncherTab
+from ui.settings_tab  import SettingsTab
 
-VERSION     = "1.1.8"
+VERSION     = "1.2.0"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -155,15 +157,16 @@ class App(tk.Tk):
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill='both', expand=True)
         frames = {}
-        for name in ('Monitor', 'Status', 'History', 'Settings'):
+        for name in ('Monitor', 'Status', 'History', 'Launcher', 'Settings'):
             f = ttk.Frame(self._nb)
             self._nb.add(f, text=f'  {name.upper()}  ')
             frames[name] = f
 
-        MonitorTab(self,       frames['Monitor'])
-        self._status_tab = StatusTab(self,   frames['Status'])
-        self._history    = HistoryTab(self,  frames['History'])
-        self._settings   = SettingsTab(self, frames['Settings'])
+        MonitorTab(self,        frames['Monitor'])
+        self._status_tab  = StatusTab(self,    frames['Status'])
+        self._history     = HistoryTab(self,   frames['History'])
+        self._launcher    = LauncherTab(self,  frames['Launcher'])
+        self._settings    = SettingsTab(self,  frames['Settings'])
         self._history_tab_frame = frames['History']
         self._status_tab_frame  = frames['Status']
 
@@ -215,7 +218,7 @@ class App(tk.Tk):
         self.after(0, _do)
 
     def _on_status_refresh(self):
-        self.after(0, self._status_tab.refresh)
+        self.after(0, self._status_tab.push_refresh)
 
     def _on_tab_changed(self, event):
         try:
@@ -223,7 +226,7 @@ class App(tk.Tk):
             if sel == str(self._history_tab_frame):
                 self._history.on_tab_shown()
             elif sel == str(self._status_tab_frame):
-                self._status_tab.refresh()
+                self._status_tab.on_tab_shown()
         except Exception:
             pass
 

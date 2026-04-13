@@ -8,18 +8,64 @@ class StatusTab:
     def __init__(self, app, parent_frame):
         self.app = app
         self._build(parent_frame)
-        self._auto_refresh()
+        self._tick_uptime()  # start lightweight minute ticker
 
-    def _auto_refresh(self):
-        """Refresh every 30 seconds so uptime and break time tick live."""
-        self.refresh()
-        self.app.after(30000, self._auto_refresh)
-        self._auto_refresh()
+    # ── Lightweight uptime tick — pure math, no I/O ────────────────────────────
+    def _tick_uptime(self):
+        """Every 60 seconds recalculate uptime/break columns from cached state.
+        No threads, no watcher calls — just arithmetic on already-known timestamps."""
+        if self.app.watcher:
+            try:
+                rows = self.app.watcher.get_uptime_rows()
+                self.app.after(0, lambda: self._update_uptime_cols(rows))
+            except Exception:
+                pass
+        self.app.after(60000, self._tick_uptime)
 
-    def _auto_refresh(self):
-        """Refresh every 30 seconds so uptime and break time tick live."""
+    def _update_uptime_cols(self, rows):
+        """Update only uptime and break_time columns without rebuilding the tree."""
+        app = self.app
+        # Build lookup by account name → tree item id
+        items = {app._st_tree.item(i, 'values')[0]: i
+                 for i in app._st_tree.get_children()
+                 if app._st_tree.item(i, 'values')}
+        for r in rows:
+            iid = items.get(r['account'])
+            if iid:
+                vals = list(app._st_tree.item(iid, 'values'))
+                if len(vals) >= 5:
+                    vals[3] = r['uptime']
+                    vals[4] = r['break_time']
+                    app._st_tree.item(iid, values=vals)
+
+    # ── Push-based full refresh — called by watcher events and manual refresh ──
+    def refresh(self):
+        """Full refresh — checks active sessions then rebuilds the tree."""
+        app = self.app
+        if not app.watcher:
+            return
+        def _do():
+            try:
+                app.watcher.check_active_sessions()
+            except Exception:
+                pass
+            rows = app.watcher.get_account_rows()
+            app.after(0, lambda: self._update_tree(rows))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def push_refresh(self):
+        """Lightweight push from watcher events — no check_active_sessions."""
+        app = self.app
+        if not app.watcher:
+            return
+        def _do():
+            rows = app.watcher.get_account_rows()
+            app.after(0, lambda: self._update_tree(rows))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def on_tab_shown(self):
+        """Called when status tab is selected — full refresh."""
         self.refresh()
-        self.app.after(30000, self._auto_refresh)
 
     def _build(self, f):
         app = self.app
@@ -62,15 +108,6 @@ class StatusTab:
         tk.Label(f,
             text="Click Mute to silence  |  Click Screenshot for on-demand  |  Double-click account name → History",
             font=app.MONO, bg=app.BG2, fg=app.FG2).pack(pady=4)
-
-    def refresh(self):
-        app = self.app
-        if not app.watcher:
-            return
-        def _do():
-            rows = app.watcher.get_account_rows()
-            app.after(0, lambda: self._update_tree(rows))
-        threading.Thread(target=_do, daemon=True).start()
 
     def _update_tree(self, rows):
         app = self.app

@@ -53,8 +53,8 @@ _LOCK_REASON_PATTERNS = [
     (re.compile(r"Don't have any bank tp", re.IGNORECASE),
      'No teleport to exit area'),
     # No teleport available
-    (re.compile(r"Don't have tp there", re.IGNORECASE),
-     'No teleport to reach area'),
+    (re.compile(r"Don't have tp there(?:\s*\[([^\]]+?)(?:\s+true\s+(?:true|false))?\])?", re.IGNORECASE),
+     'No teleport to reach area{item}'),
     # Quest-specific failures
     (re.compile(r'You need a stake to continue', re.IGNORECASE),
      'Missing: stake (Vampyre Slayer)'),
@@ -66,6 +66,9 @@ _LOCK_REASON_PATTERNS = [
     # Quest state loop — always co-occurs with > Locking on same timestamp
     (re.compile(r'Quest state repeated too many times', re.IGNORECASE),
      'Quest state loop — auto-skipped'),
+    # QuestStep traversal failure
+    (re.compile(r'QuestStep traversal failed', re.IGNORECASE),
+     'Quest step traversal failed (script could not determine next step)'),
 ]
 
 # Farming patch skip detection
@@ -138,10 +141,34 @@ def slice_drops(lines):
     """Returns list of (item, [types]) with types combined per item."""
     raw = []
     arr = list(lines)
+    _consumed_by_pet = set()  # line indices consumed as pet name source
+
+    # First pass: mark collection log lines consumed by a pet event
+    for idx, line in enumerate(arr):
+        clean = strip_color(strip_prefix(line)).strip()
+        for pat in PET_PATTERNS:
+            if pat.search(clean):
+                line_ts = LOG_TS_RE.match(line)
+                ts_str  = line_ts.group(1) if line_ts else None
+                for k in range(max(0, idx - 3), min(len(arr), idx + 4)):
+                    if k == idx:
+                        continue
+                    nb_ts = LOG_TS_RE.match(arr[k])
+                    if nb_ts and ts_str and nb_ts.group(1) != ts_str:
+                        continue
+                    nb = strip_color(strip_prefix(arr[k])).strip()
+                    pm = re.search(r'New item added to your collection log:\s*(.+)', nb, re.IGNORECASE)
+                    if pm:
+                        _consumed_by_pet.add(k)
+                        break
+                break
+
     for idx, line in enumerate(arr):
         clean = strip_color(strip_prefix(line)).strip()
         m = re.search(r'New item added to your collection log:\s*(.+)', clean, re.IGNORECASE)
         if m:
+            if idx in _consumed_by_pet:
+                continue  # already consumed as pet name
             raw.append(('collection', m.group(1).strip()))
             continue
         m = re.search(r'Untradeable drop:\s*(.+)', clean, re.IGNORECASE)
@@ -184,14 +211,17 @@ def slice_drops(lines):
 
 def slice_slayer_tasks(lines):
     """Returns list of (monster, count). Deduped within the batch, but allows
-    re-assignment of the same monster if a cancellation line appears between them."""
+    re-assignment of the same monster if a new task is fetched between them."""
     seen_since_cancel = set()
     tasks = []
     arr   = list(lines)
     for line in arr:
         low = line.lower()
-        # A cancellation resets the dedup set — next assignment is always fresh
-        if 'your task has been cancelled' in low:
+        # Reset dedup whenever the script fetches a new task — covers cancellations
+        # and legitimate re-assignments of the same monster
+        if ('your task has been cancelled' in low or
+                'need a new slayer task' in low or
+                'getting new task' in low):
             seen_since_cancel = set()
             continue
         m = re.search(r'Slayer\s*->\s*(\d+)\s+(.+)', strip_prefix(line).strip(), re.IGNORECASE)
@@ -262,10 +292,9 @@ def slice_slayer_skipped(lines):
         reason  = 'Not doable'
 
         # Find the Slayer -> line that precedes this cancellation
+        # Search up to 2000 lines back — task can be assigned far before cancel
         slayer_idx = None
-        for j in range(i-1, -1, -1):
-            if 'getting new task' in arr[j].lower():
-                break
+        for j in range(i-1, max(-1, i-2000), -1):
             ms = re.search(r'Slayer\s*->\s*\d+\s+(.+)',
                            strip_prefix(arr[j]).strip(), re.IGNORECASE)
             if ms:
@@ -507,15 +536,10 @@ def slice_last_task(lines):
             else:
                 for j in range(new_task_idx, min(n, new_task_idx + 60)):
                     if 'BREAK START' in arr[j].upper():
-                        return ('Break', '')
+                        return ('', '')  # Break follows — no real task
 
     # Fallback: check for BREAK START at end of log
-    for i in range(n - 1, -1, -1):
-        if 'BREAK START' in arr[i].upper():
-            bl_ms = parse_break_length_ms(arr, max(0, i - 25), max_search=51)
-            activity = "Length: " + format_break_duration(bl_ms) if bl_ms else ''
-            return ('Break', activity)
-
+    # Don't return 'Break' as last task — it's not a real task name
     return ('', '')
 
 def slice_chat_segments(lines):
@@ -834,7 +858,6 @@ def parse_lines(lines):
             if pattern.search(line):
                 events.append({'type': 'script_event', 'value': ev_key, 'activity': label,
                                'ts': _ts_for_line(i), '_line_idx': i})
-                break
 
     # Sort by timestamp then line index so same-second events reflect log order
     events.sort(key=lambda e: (e.get('ts', ''), e.get('_line_idx', len(arr))))

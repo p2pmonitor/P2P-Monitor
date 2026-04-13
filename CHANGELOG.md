@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.2.0
+- Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
+- Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
+- Fixed teleport reason showing generic "No teleport to reach area" — now captures the specific teleport item from the log line (e.g. "No teleport to reach area: Fenkenstrain's castle teleport")
+
+## v1.2.0-beta.4
+- Fixed critical thread leak in status tab — duplicate `_auto_refresh` definition was spawning exponentially multiplying refresh chains, causing the monitor to become unresponsive after a few minutes
+- Status tab is now push-based — watcher events push updates directly to the status tab instead of polling on a timer; tab selection and manual Refresh button trigger a full refresh
+- Uptime and break time tick every 60 seconds via a lightweight local calculation (pure math, no I/O, no threads) — consistent with HH:MM display format
+- `readlink /proc/*/fd/*` is called once per refresh cycle and reused across all accounts, further reducing overhead
+
+## v1.2.0-beta.3
+- Replaced `lsof +D` with `readlink /proc/*/fd/*` for all file handle detection — eliminates the startup lag and status tab slowness; the new approach reads kernel file descriptor symlinks directly instead of doing a full system-wide process scan
+- Fixed status tab showing accounts as online after DreamBot closes without a clean stop — periodic refresh and manual refresh now re-check open file handles and immediately flip stale accounts Offline
+- Fixed monitor picking the wrong log file when two clients were accidentally launched for the same account — active log identified by which file has an open handle, not filename order
+- Added duplicate launch prevention in the CLI Launcher — attempting to launch an account that is already running shows an error instead of opening a second client
+
+## v1.2.0-beta.2
+- Fixed status tab showing accounts as online after DreamBot closes without writing a clean stop line — status tab refresh and tab-open now re-run lsof to detect dead sessions and immediately flip them Offline
+- Fixed monitor picking the wrong log file when two DreamBot clients were accidentally launched for the same account — active log file is now identified by which file actually has an open file handle, not by filename order
+- Active log file selection now uses lsof at startup instead of relying on filename sorting, ensuring the correct session is always tracked
+
+## v1.2.0-beta.1
+
+### Bug Fixes (reader.py)
+- Fixed script start/stop/pause/resume events only emitting the first occurrence per session — all occurrences now fire correctly
+- Fixed Slayer new task being deduplicated too aggressively — same monster assigned twice legitimately now both fire; dedup resets on every new task fetch
+- Fixed Slayer task cancellation not detecting the monster name — backward search now scans up to 2000 lines, matching the real distance between assignment and cancellation
+- Fixed Slayer complete missing tasks that only have a `Slayer task complete!` script line with no GAME message — now anchors on both lines with timestamp dedup to prevent double-firing
+- Fixed pet drop showing as `Pet / Pet` when collection logs are enabled — the collection log line is now consumed by the pet event and suppressed from also firing as a separate collection event
+- Fixed `Hunter - Birdhouses` being split into task=`Hunter` / activity=`Birdhouses` — added to the split exception list alongside `Questing`
+- Fixed `QuestStep traversal failed` not being surfaced as the reason when a quest is abandoned — added to `_LOCK_REASON_PATTERNS`
+- Fixed `Task: Break` appearing in the task column when the last `NEW TASK` block preceded a break — `slice_last_task` no longer returns `Break` as a task name
+
+### New Features
+- Added DreamBot CLI Launcher tab (between History and Settings) — save account launch presets and launch DreamBot instances directly from the monitor
+  - Launcher.jar path selection saved to config
+  - Per-account presets: account nickname, script, proxy nickname, memory (-Xmx), -covert, -nofresh, -fresh, -menuManipulation, -noClickWalk, world, custom args, params
+  - Live command preview updates as fields are filled
+  - Launch one account or select multiple and fire all at once
+  - Delete confirmation dialog prevents accidental removal
+  - Presets stored in config.json under `launcher_presets`
+
 ## v1.1.8
 - Fixed status showing incorrect state after log rotation — logged_in, script_running and current task preserved across rotation-triggered recatchup
 - Fixed break time lost on log rotation — startup catchup now scans full session file set in chronological order
@@ -15,6 +58,49 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.0
+- Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
+- Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
+- Fixed teleport reason showing generic "No teleport to reach area" — now captures the specific teleport item from the log line (e.g. "No teleport to reach area: Fenkenstrain's castle teleport")
+
+## v1.2.0-beta.4
+- Fixed critical thread leak in status tab — duplicate `_auto_refresh` definition was spawning exponentially multiplying refresh chains, causing the monitor to become unresponsive after a few minutes
+- Status tab is now push-based — watcher events push updates directly to the status tab instead of polling on a timer; tab selection and manual Refresh button trigger a full refresh
+- Uptime and break time tick every 60 seconds via a lightweight local calculation (pure math, no I/O, no threads) — consistent with HH:MM display format
+- `readlink /proc/*/fd/*` is called once per refresh cycle and reused across all accounts, further reducing overhead
+
+## v1.2.0-beta.3
+- Replaced `lsof +D` with `readlink /proc/*/fd/*` for all file handle detection — eliminates the startup lag and status tab slowness; the new approach reads kernel file descriptor symlinks directly instead of doing a full system-wide process scan
+- Fixed status tab showing accounts as online after DreamBot closes without a clean stop — periodic refresh and manual refresh now re-check open file handles and immediately flip stale accounts Offline
+- Fixed monitor picking the wrong log file when two clients were accidentally launched for the same account — active log identified by which file has an open handle, not filename order
+- Added duplicate launch prevention in the CLI Launcher — attempting to launch an account that is already running shows an error instead of opening a second client
+
+## v1.2.0-beta.2
+- Fixed status tab showing accounts as online after DreamBot closes without writing a clean stop line — status tab refresh and tab-open now re-run lsof to detect dead sessions and immediately flip them Offline
+- Fixed monitor picking the wrong log file when two DreamBot clients were accidentally launched for the same account — active log file is now identified by which file actually has an open file handle, not by filename order
+- Active log file selection now uses lsof at startup instead of relying on filename sorting, ensuring the correct session is always tracked
+
+## v1.2.0-beta.1
+
+### Bug Fixes (reader.py)
+- Fixed script start/stop/pause/resume events only emitting the first occurrence per session — all occurrences now fire correctly
+- Fixed Slayer new task being deduplicated too aggressively — same monster assigned twice legitimately now both fire; dedup resets on every new task fetch
+- Fixed Slayer task cancellation not detecting the monster name — backward search now scans up to 2000 lines, matching the real distance between assignment and cancellation
+- Fixed Slayer complete missing tasks that only have a `Slayer task complete!` script line with no GAME message — now anchors on both lines with timestamp dedup to prevent double-firing
+- Fixed pet drop showing as `Pet / Pet` when collection logs are enabled — the collection log line is now consumed by the pet event and suppressed from also firing as a separate collection event
+- Fixed `Hunter - Birdhouses` being split into task=`Hunter` / activity=`Birdhouses` — added to the split exception list alongside `Questing`
+- Fixed `QuestStep traversal failed` not being surfaced as the reason when a quest is abandoned — added to `_LOCK_REASON_PATTERNS`
+- Fixed `Task: Break` appearing in the task column when the last `NEW TASK` block preceded a break — `slice_last_task` no longer returns `Break` as a task name
+
+### New Features
+- Added DreamBot CLI Launcher tab (between History and Settings) — save account launch presets and launch DreamBot instances directly from the monitor
+  - Launcher.jar path selection saved to config
+  - Per-account presets: account nickname, script, proxy nickname, memory (-Xmx), -covert, -nofresh, -fresh, -menuManipulation, -noClickWalk, world, custom args, params
+  - Live command preview updates as fields are filled
+  - Launch one account or select multiple and fire all at once
+  - Delete confirmation dialog prevents accidental removal
+  - Presets stored in config.json under `launcher_presets`
 
 ## v1.1.8
 - Fixed status showing incorrect state after log rotation — logged_in, script_running, and current task preserved across rotation-triggered recatchup; state only reset on cold start
@@ -43,6 +129,49 @@
 ## v1.1.8-beta.3
 - Fixed version comparison not correctly ordering beta vs stable — _ver_tuple and _semver_key now use full semver-aware parsing: beta.1 < beta.2 < stable < next-stable; beta users are now correctly offered stable releases when promoted, and beta-to-beta upgrades work in order
 
+## v1.2.0
+- Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
+- Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
+- Fixed teleport reason showing generic "No teleport to reach area" — now captures the specific teleport item from the log line (e.g. "No teleport to reach area: Fenkenstrain's castle teleport")
+
+## v1.2.0-beta.4
+- Fixed critical thread leak in status tab — duplicate `_auto_refresh` definition was spawning exponentially multiplying refresh chains, causing the monitor to become unresponsive after a few minutes
+- Status tab is now push-based — watcher events push updates directly to the status tab instead of polling on a timer; tab selection and manual Refresh button trigger a full refresh
+- Uptime and break time tick every 60 seconds via a lightweight local calculation (pure math, no I/O, no threads) — consistent with HH:MM display format
+- `readlink /proc/*/fd/*` is called once per refresh cycle and reused across all accounts, further reducing overhead
+
+## v1.2.0-beta.3
+- Replaced `lsof +D` with `readlink /proc/*/fd/*` for all file handle detection — eliminates the startup lag and status tab slowness; the new approach reads kernel file descriptor symlinks directly instead of doing a full system-wide process scan
+- Fixed status tab showing accounts as online after DreamBot closes without a clean stop — periodic refresh and manual refresh now re-check open file handles and immediately flip stale accounts Offline
+- Fixed monitor picking the wrong log file when two clients were accidentally launched for the same account — active log identified by which file has an open handle, not filename order
+- Added duplicate launch prevention in the CLI Launcher — attempting to launch an account that is already running shows an error instead of opening a second client
+
+## v1.2.0-beta.2
+- Fixed status tab showing accounts as online after DreamBot closes without writing a clean stop line — status tab refresh and tab-open now re-run lsof to detect dead sessions and immediately flip them Offline
+- Fixed monitor picking the wrong log file when two DreamBot clients were accidentally launched for the same account — active log file is now identified by which file actually has an open file handle, not by filename order
+- Active log file selection now uses lsof at startup instead of relying on filename sorting, ensuring the correct session is always tracked
+
+## v1.2.0-beta.1
+
+### Bug Fixes (reader.py)
+- Fixed script start/stop/pause/resume events only emitting the first occurrence per session — all occurrences now fire correctly
+- Fixed Slayer new task being deduplicated too aggressively — same monster assigned twice legitimately now both fire; dedup resets on every new task fetch
+- Fixed Slayer task cancellation not detecting the monster name — backward search now scans up to 2000 lines, matching the real distance between assignment and cancellation
+- Fixed Slayer complete missing tasks that only have a `Slayer task complete!` script line with no GAME message — now anchors on both lines with timestamp dedup to prevent double-firing
+- Fixed pet drop showing as `Pet / Pet` when collection logs are enabled — the collection log line is now consumed by the pet event and suppressed from also firing as a separate collection event
+- Fixed `Hunter - Birdhouses` being split into task=`Hunter` / activity=`Birdhouses` — added to the split exception list alongside `Questing`
+- Fixed `QuestStep traversal failed` not being surfaced as the reason when a quest is abandoned — added to `_LOCK_REASON_PATTERNS`
+- Fixed `Task: Break` appearing in the task column when the last `NEW TASK` block preceded a break — `slice_last_task` no longer returns `Break` as a task name
+
+### New Features
+- Added DreamBot CLI Launcher tab (between History and Settings) — save account launch presets and launch DreamBot instances directly from the monitor
+  - Launcher.jar path selection saved to config
+  - Per-account presets: account nickname, script, proxy nickname, memory (-Xmx), -covert, -nofresh, -fresh, -menuManipulation, -noClickWalk, world, custom args, params
+  - Live command preview updates as fields are filled
+  - Launch one account or select multiple and fire all at once
+  - Delete confirmation dialog prevents accidental removal
+  - Presets stored in config.json under `launcher_presets`
+
 ## v1.1.8
 - Fixed status showing incorrect state after log rotation — logged_in, script_running and current task preserved across rotation-triggered recatchup
 - Fixed break time lost on log rotation — startup catchup now scans full session file set in chronological order
@@ -58,6 +187,49 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.0
+- Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
+- Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
+- Fixed teleport reason showing generic "No teleport to reach area" — now captures the specific teleport item from the log line (e.g. "No teleport to reach area: Fenkenstrain's castle teleport")
+
+## v1.2.0-beta.4
+- Fixed critical thread leak in status tab — duplicate `_auto_refresh` definition was spawning exponentially multiplying refresh chains, causing the monitor to become unresponsive after a few minutes
+- Status tab is now push-based — watcher events push updates directly to the status tab instead of polling on a timer; tab selection and manual Refresh button trigger a full refresh
+- Uptime and break time tick every 60 seconds via a lightweight local calculation (pure math, no I/O, no threads) — consistent with HH:MM display format
+- `readlink /proc/*/fd/*` is called once per refresh cycle and reused across all accounts, further reducing overhead
+
+## v1.2.0-beta.3
+- Replaced `lsof +D` with `readlink /proc/*/fd/*` for all file handle detection — eliminates the startup lag and status tab slowness; the new approach reads kernel file descriptor symlinks directly instead of doing a full system-wide process scan
+- Fixed status tab showing accounts as online after DreamBot closes without a clean stop — periodic refresh and manual refresh now re-check open file handles and immediately flip stale accounts Offline
+- Fixed monitor picking the wrong log file when two clients were accidentally launched for the same account — active log identified by which file has an open handle, not filename order
+- Added duplicate launch prevention in the CLI Launcher — attempting to launch an account that is already running shows an error instead of opening a second client
+
+## v1.2.0-beta.2
+- Fixed status tab showing accounts as online after DreamBot closes without writing a clean stop line — status tab refresh and tab-open now re-run lsof to detect dead sessions and immediately flip them Offline
+- Fixed monitor picking the wrong log file when two DreamBot clients were accidentally launched for the same account — active log file is now identified by which file actually has an open file handle, not by filename order
+- Active log file selection now uses lsof at startup instead of relying on filename sorting, ensuring the correct session is always tracked
+
+## v1.2.0-beta.1
+
+### Bug Fixes (reader.py)
+- Fixed script start/stop/pause/resume events only emitting the first occurrence per session — all occurrences now fire correctly
+- Fixed Slayer new task being deduplicated too aggressively — same monster assigned twice legitimately now both fire; dedup resets on every new task fetch
+- Fixed Slayer task cancellation not detecting the monster name — backward search now scans up to 2000 lines, matching the real distance between assignment and cancellation
+- Fixed Slayer complete missing tasks that only have a `Slayer task complete!` script line with no GAME message — now anchors on both lines with timestamp dedup to prevent double-firing
+- Fixed pet drop showing as `Pet / Pet` when collection logs are enabled — the collection log line is now consumed by the pet event and suppressed from also firing as a separate collection event
+- Fixed `Hunter - Birdhouses` being split into task=`Hunter` / activity=`Birdhouses` — added to the split exception list alongside `Questing`
+- Fixed `QuestStep traversal failed` not being surfaced as the reason when a quest is abandoned — added to `_LOCK_REASON_PATTERNS`
+- Fixed `Task: Break` appearing in the task column when the last `NEW TASK` block preceded a break — `slice_last_task` no longer returns `Break` as a task name
+
+### New Features
+- Added DreamBot CLI Launcher tab (between History and Settings) — save account launch presets and launch DreamBot instances directly from the monitor
+  - Launcher.jar path selection saved to config
+  - Per-account presets: account nickname, script, proxy nickname, memory (-Xmx), -covert, -nofresh, -fresh, -menuManipulation, -noClickWalk, world, custom args, params
+  - Live command preview updates as fields are filled
+  - Launch one account or select multiple and fire all at once
+  - Delete confirmation dialog prevents accidental removal
+  - Presets stored in config.json under `launcher_presets`
 
 ## v1.1.8
 - Fixed status showing incorrect state after log rotation — logged_in, script_running, and current task preserved across rotation-triggered recatchup; state only reset on cold start

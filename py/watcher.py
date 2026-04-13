@@ -49,6 +49,53 @@ def _get_log_files(folder):
     files = list(p.glob("logfile-*.log")) + list(p.glob("logfile-*.log.*"))
     return sorted(files, key=lambda f: f.name)
 
+def _proc_open_files():
+    """
+    Return a set of file paths currently open by any process, using
+    readlink on /proc/*/fd/* — fast, no system-wide scan like lsof.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            'readlink /proc/*/fd/* 2>/dev/null',
+            shell=True, capture_output=True, text=True, timeout=5
+        )
+        return set(result.stdout.splitlines())
+    except Exception:
+        return set()
+
+
+def _get_active_log_file(folder):
+    """
+    Return the active logfile-*.log Path in folder — the one actually being
+    written to by a running DreamBot process.
+
+    Strategy:
+      1. Use readlink /proc/*/fd/* to find files with open handles (fast).
+      2. If exactly one .log (no suffix) has an open handle — return it.
+      3. If multiple have open handles (duplicate client) — return the one
+         with the most recent mtime.
+      4. If none have open handles (client closed) — fall back to newest
+         by filename (existing behaviour).
+    """
+    log_files = [f for f in _get_log_files(folder)
+                 if re.match(r'logfile-\d+\.log$', f.name)]
+    if not log_files:
+        return None
+    try:
+        open_paths = _proc_open_files()
+        active_candidates = [f for f in log_files if str(f) in open_paths]
+        if len(active_candidates) == 1:
+            return active_candidates[0]
+        elif len(active_candidates) > 1:
+            # Duplicate client — pick most recently modified
+            return max(active_candidates, key=lambda f: f.stat().st_mtime)
+        # No open handles — fall through to name-based fallback
+    except Exception:
+        pass
+    # Fallback: newest by filename (highest number = most recent session)
+    return log_files[-1]
+
 def _fmt_duration(secs):
     """Format a duration in seconds as 'Xh YYm', or '—' if zero/negative."""
     if secs <= 0:
@@ -222,7 +269,7 @@ class LogWatcher:
         try:
             for d in self._get_log_dirs():
                 log_files   = _get_log_files(d)
-                active      = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
+                active      = _get_active_log_file(d)
                 if not active:
                     continue
                 active_name   = active.name
@@ -263,6 +310,29 @@ class LogWatcher:
                          'activity': s.last_activity or '—', 'status': status,
                          'uptime': uptime_str, 'break_time': break_str,
                          'muted': name in self.cfg.get('muted_accounts', [])})
+        return rows
+
+    def get_uptime_rows(self):
+        """
+        Lightweight uptime/break tick — pure math, no I/O, no threads.
+        Returns list of {account, uptime, break_time} for the minute ticker.
+        """
+        rows = []
+        with self._accounts_lock:
+            snapshot = list(self._accounts.items())
+        for name, s in sorted(snapshot):
+            show_uptime = s.script_running or s.on_break or bool(s._break_start_ts)
+            if show_uptime:
+                start_ts    = s.script_start_ts or s.session_start
+                uptime_str  = _fmt_duration(time.time() - start_ts)
+            else:
+                uptime_str  = '—'
+            break_secs = s.total_break_secs
+            if s._break_start_ts:
+                break_secs += time.time() - s._break_start_ts
+            rows.append({'account': name,
+                         'uptime': uptime_str,
+                         'break_time': _fmt_duration(break_secs)})
         return rows
 
     def _is_muted(self, account):
@@ -390,24 +460,47 @@ class LogWatcher:
             for p in dead:
                 del self._offsets[p]
 
+    def check_active_sessions(self):
+        """
+        Re-check open file handles for each tracked account. If a folder has no
+        active file handle, flip script_running=False and clear break state.
+        Called by the status tab on open and on manual refresh.
+        Calls _proc_open_files() once and reuses the result for all accounts.
+        """
+        open_paths = _proc_open_files()
+        for d in self._get_log_dirs():
+            folder = os.path.basename(d)
+            with self._accounts_lock:
+                state = self._accounts.get(folder)
+            if state is None:
+                continue
+            folder_str = str(d)
+            is_active = any(p.startswith(folder_str + '/') or p == folder_str
+                            for p in open_paths)
+            if not is_active:
+                if state.script_running or state.on_break or state._break_start_ts:
+                    self.log(f'[proc] [{folder}] No active file handle — marking Offline')
+                    state.script_running  = False
+                    state.logged_in       = False
+                    state.on_break        = False
+                    state._break_start_ts = None
+        self.on_status()
+
     def _is_folder_active(self, folder):
         """
         Check if any process has an open file handle in the given folder.
-        Uses lsof +D — returns True if DreamBot is actively writing to the folder.
+        Uses readlink /proc/*/fd/* — fast, no system-wide scan.
+        Returns True if DreamBot is actively writing to the folder.
         Returns False if no process has the folder open (stale/dead session).
         """
-        import subprocess
         try:
-            result = subprocess.run(
-                ['lsof', '+D', str(folder)],
-                capture_output=True, text=True, timeout=5
-            )
-            # Only check stdout — lsof exit code varies by version/platform
-            # even when files are found, so don't rely on returncode
-            return bool(result.stdout.strip())
+            open_paths = _proc_open_files()
+            folder_str = str(folder)
+            return any(p.startswith(folder_str + '/') or p == folder_str
+                       for p in open_paths)
         except Exception as e:
-            self.log(f'[DEBUG] lsof check failed for {folder}: {e}')
-            return True  # Fail open — assume active if lsof unavailable
+            self.log(f'[DEBUG] proc fd check failed for {folder}: {e}')
+            return True  # Fail open — assume active if unavailable
 
     # ── Main run loop ──────────────────────────────────────────────────────────
     def _run(self):
@@ -428,7 +521,7 @@ class LogWatcher:
             self.log(f"✅ Sessions found — starting monitor.")
         for d in dirs:
             log_files = _get_log_files(d)
-            active = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
+            active = _get_active_log_file(d)
             for f in log_files:
                 with self._offsets_lock:
                     if active and str(f) == str(active):
@@ -439,7 +532,7 @@ class LogWatcher:
         self.log(f"▶ Monitoring {len(dirs)} account(s): {', '.join(account_names)}")
         for d in dirs:
             log_files = _get_log_files(d)
-            active = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
+            active = _get_active_log_file(d)
             folder_active = self._is_folder_active(d)
             if active and folder_active:
                 self._startup_catchup(str(active))
@@ -471,7 +564,7 @@ class LogWatcher:
             current_dirs = self._get_log_dirs()
             for d in current_dirs:
                 log_files = _get_log_files(d)
-                active    = next((f for f in reversed(log_files) if re.match(r'logfile-\d+\.log$', f.name)), None)
+                active    = _get_active_log_file(d)
                 if not active:
                     continue
                 self._check_file(str(active))
@@ -664,14 +757,15 @@ class LogWatcher:
             # On cold start: always search for task.
             if not is_rotation:
                 last_task, last_activity = slice_last_task(active_lines)
-                if last_task or last_activity:
+                if (last_task or last_activity) and state.script_running:
                     state.last_task     = last_task
                     state.last_activity = last_activity
                     display = last_task or last_activity or '?'
                     self.log(f"📋 [{folder}] Startup task: {display}" +
                              (f" / {last_activity}" if last_activity and last_task else ''))
                 else:
-                    self.log(f"⚠ [{folder}] No task found in active log")
+                    if state.script_running:
+                        self.log(f"⚠ [{folder}] No task found in active log")
 
         except Exception as e:
             self.log(f"⚠ Startup scan error [{e.__class__.__name__}]: {e}")
@@ -1238,6 +1332,9 @@ class LogWatcher:
                 }
                 self.handle_event(reset_ev, folder, source='live')
 
+        # Push status tab update if any events fired or state changed
+        if events:
+            self.on_status()
         return events
 
     # ── Bot wiring ─────────────────────────────────────────────────────────────
