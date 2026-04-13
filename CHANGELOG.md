@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.1
+- Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
+- Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
+- Added dedup to history writes — identical consecutive entries (same type, value, activity, timestamp) are now silently dropped, preventing duplicates from backfill/live overlap on monitor restart
+- Added "Screenshot on monitor startup" toggle in Settings — defaults to off; previously the first scheduled screenshot always fired immediately on startup with no way to disable it
+
 ## v1.2.0
 - Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
 - Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
@@ -58,6 +64,12 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.1
+- Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
+- Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
+- Added dedup to history writes — identical consecutive entries (same type, value, activity, timestamp) are now silently dropped, preventing duplicates from backfill/live overlap on monitor restart
+- Added "Screenshot on monitor startup" toggle in Settings — defaults to off; previously the first scheduled screenshot always fired immediately on startup with no way to disable it
 
 ## v1.2.0
 - Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
@@ -129,6 +141,12 @@
 ## v1.1.8-beta.3
 - Fixed version comparison not correctly ordering beta vs stable — _ver_tuple and _semver_key now use full semver-aware parsing: beta.1 < beta.2 < stable < next-stable; beta users are now correctly offered stable releases when promoted, and beta-to-beta upgrades work in order
 
+## v1.2.1
+- Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
+- Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
+- Added dedup to history writes — identical consecutive entries (same type, value, activity, timestamp) are now silently dropped, preventing duplicates from backfill/live overlap on monitor restart
+- Added "Screenshot on monitor startup" toggle in Settings — defaults to off; previously the first scheduled screenshot always fired immediately on startup with no way to disable it
+
 ## v1.2.0
 - Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running
 - Fixed Slayer task complete double-firing (complete + unknown) — reverted to original single-anchor detection on the GAME message only; the script-only line fix was causing double events since the two lines have different timestamps
@@ -187,6 +205,12 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.1
+- Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
+- Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
+- Added dedup to history writes — identical consecutive entries (same type, value, activity, timestamp) are now silently dropped, preventing duplicates from backfill/live overlap on monitor restart
+- Added "Screenshot on monitor startup" toggle in Settings — defaults to off; previously the first scheduled screenshot always fired immediately on startup with no way to disable it
 
 ## v1.2.0
 - Fixed stale task and activity showing in status tab on a new session — last task is now only carried over from startup scan when the script is confirmed running

@@ -269,7 +269,10 @@ class LogWatcher:
         try:
             for d in self._get_log_dirs():
                 log_files   = _get_log_files(d)
-                active      = _get_active_log_file(d)
+                # Use name-based selection here — fast, no proc scan.
+                # _get_active_log_file is only needed at startup and on explicit refresh.
+                active = next((f for f in reversed(log_files)
+                               if re.match(r'logfile-\d+\.log$', f.name)), None)
                 if not active:
                     continue
                 active_name   = active.name
@@ -395,6 +398,8 @@ class LogWatcher:
         if not due:
             return
         for i, name in enumerate(due):
+            if is_startup and not self.cfg.get('screenshot_on_startup', False):
+                continue
             trigger = 'startup' if is_startup else 'scheduled'
             self._enqueue_screenshot(SS_PRIORITY_SCHEDULED, name, trigger)
 
@@ -757,7 +762,7 @@ class LogWatcher:
             # On cold start: always search for task.
             if not is_rotation:
                 last_task, last_activity = slice_last_task(active_lines)
-                if (last_task or last_activity) and state.script_running:
+                if last_task or last_activity:
                     state.last_task     = last_task
                     state.last_activity = last_activity
                     display = last_task or last_activity or '?'

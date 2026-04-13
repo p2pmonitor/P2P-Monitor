@@ -126,6 +126,29 @@ def append_history(account, etype, value, activity='', timestamp=None):
         "value":    value,
         "activity": activity,
     }
+    # Dedup — skip if identical to the last entry (same type, value, activity, time)
+    # Prevents double-writes from backfill/live overlap or restart re-scanning.
+    try:
+        hf = history_file(account)
+        if hf.exists():
+            with open(hf, 'rb') as f:
+                # Read last line efficiently
+                f.seek(0, 2)
+                size = f.tell()
+                if size > 0:
+                    f.seek(max(0, size - 512))
+                    last_line = f.read().decode('utf-8', errors='replace').strip().splitlines()[-1]
+                    try:
+                        last = json.loads(last_line)
+                        if (last.get('type') == etype and
+                                last.get('value') == value and
+                                last.get('activity') == activity and
+                                last.get('time') == (timestamp or ts_now)):
+                            return  # exact duplicate — skip
+                    except Exception:
+                        pass
+    except Exception:
+        pass
     try:
         with open(history_file(account), 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry) + '\n')
