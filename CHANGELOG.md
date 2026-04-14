@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.2.3
+- Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
+- This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
+- Fixed status tab staying stuck on "Fetching task..." after a new Slayer task is assigned — the standalone activity update loop was overwriting the correct task name set by the slayer_task event when both "Getting new task" and "Slayer ->" lines arrived in the same 5-second poll chunk
+- Added skip notification for tasks cancelled immediately as unsupported by the script (no Slayer -> assignment line) — fires as a slayer_skip event; task ID 126 is identified as Spiritual creatures, other unknown IDs show as "Unknown task (ID X)"
+
 ## v1.2.2
 - Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
 
@@ -67,6 +73,12 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.3
+- Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
+- This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
+- Fixed status tab staying stuck on "Fetching task..." after a new Slayer task is assigned — the standalone activity update loop was overwriting the correct task name set by the slayer_task event when both "Getting new task" and "Slayer ->" lines arrived in the same 5-second poll chunk
+- Added skip notification for tasks cancelled immediately as unsupported by the script (no Slayer -> assignment line) — fires as a slayer_skip event; task ID 126 is identified as Spiritual creatures, other unknown IDs show as "Unknown task (ID X)"
 
 ## v1.2.2
 - Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
@@ -147,6 +159,12 @@
 ## v1.1.8-beta.3
 - Fixed version comparison not correctly ordering beta vs stable — _ver_tuple and _semver_key now use full semver-aware parsing: beta.1 < beta.2 < stable < next-stable; beta users are now correctly offered stable releases when promoted, and beta-to-beta upgrades work in order
 
+## v1.2.3
+- Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
+- This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
+- Fixed status tab staying stuck on "Fetching task..." after a new Slayer task is assigned — the standalone activity update loop was overwriting the correct task name set by the slayer_task event when both "Getting new task" and "Slayer ->" lines arrived in the same 5-second poll chunk
+- Added skip notification for tasks cancelled immediately as unsupported by the script (no Slayer -> assignment line) — fires as a slayer_skip event; task ID 126 is identified as Spiritual creatures, other unknown IDs show as "Unknown task (ID X)"
+
 ## v1.2.2
 - Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
 
@@ -214,6 +232,12 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.3
+- Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
+- This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
+- Fixed status tab staying stuck on "Fetching task..." after a new Slayer task is assigned — the standalone activity update loop was overwriting the correct task name set by the slayer_task event when both "Getting new task" and "Slayer ->" lines arrived in the same 5-second poll chunk
+- Added skip notification for tasks cancelled immediately as unsupported by the script (no Slayer -> assignment line) — fires as a slayer_skip event; task ID 126 is identified as Spiritual creatures, other unknown IDs show as "Unknown task (ID X)"
 
 ## v1.2.2
 - Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read

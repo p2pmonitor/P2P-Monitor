@@ -282,7 +282,14 @@ def slice_slayer_skipped(lines):
     'failed for the reasons above' (which appears later and was previously
     being picked up by the old backwards scan, causing the wrong reason
     on Discord).
+    Also detects tasks cancelled immediately as unsupported (no Slayer -> line)
+    by looking for 'This slayer task is not supported' before the cancel.
     """
+    # Known unsupported task IDs
+    _UNSUPPORTED_TASK_IDS = {
+        126: 'Spiritual creatures',
+    }
+
     results = []
     arr = list(lines)
     for i, line in enumerate(arr):
@@ -290,6 +297,28 @@ def slice_slayer_skipped(lines):
             continue
         monster = None
         reason  = 'Not doable'
+
+        # Check if this cancel was preceded by 'This slayer task is not supported'
+        # within a short window — means script cancelled immediately, no Slayer -> line
+        not_supported = False
+        task_id = None
+        for j in range(max(0, i - 50), i):
+            lb = arr[j].lower()
+            if 'this slayer task is not supported' in lb:
+                not_supported = True
+            # Look for 'Task id X' to identify the task
+            m_id = re.search(r'task id\s+(\d+)', lb)
+            if m_id:
+                task_id = int(m_id.group(1))
+
+        if not_supported:
+            if task_id is not None:
+                name = _UNSUPPORTED_TASK_IDS.get(task_id, f'Unknown task (ID {task_id})')
+                reason = f'Not supported by script'
+                results.append((name, reason))
+            else:
+                results.append(('Unsupported task', 'Not supported by script'))
+            continue
 
         # Find the Slayer -> line that precedes this cancellation
         # Search up to 2000 lines back — task can be assigned far before cancel

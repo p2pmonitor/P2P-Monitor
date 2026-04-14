@@ -987,6 +987,16 @@ class LogWatcher:
                 files_scanned  += 1
 
             if files_scanned:
+                # Dedup history file after backfill — catches duplicates from
+                # previous sessions where DreamBot closed before monitor did
+                try:
+                    from py.history import _dedup_history_file, history_file
+                    hf = history_file(account)
+                    _, dupes = _dedup_history_file(hf, log_fn=self.log)
+                    if dupes:
+                        self.log(f'🧹 [{account}] Cleaned {dupes} duplicate history entries')
+                except Exception as e:
+                    self.log(f'[DEBUG] History dedup failed [{account}]: {e}')
                 if self._on_backfill_done:
                     self._on_backfill_done()
 
@@ -1319,8 +1329,11 @@ class LogWatcher:
         for line in lines:
             b = strip_prefix(line).strip()
             if 'need a new slayer task' in b.lower() or 'getting new task' in b.lower():
-                state.last_task     = 'Slayer'
-                state.last_activity = 'Fetching task...'
+                # Only set Fetching task... if no slayer_task event already fired
+                # in this same chunk — if it did, the task is already known
+                if not any(e['type'] == 'slayer_task' for e in events):
+                    state.last_task     = 'Slayer'
+                    state.last_activity = 'Fetching task...'
             if b.lower().startswith('activity is ') and 'NEW TASK' not in ''.join(lines):
                 act = re.sub(r'^Activity is\s*', '', b, flags=re.IGNORECASE).strip()
                 if act and act != state.last_activity:

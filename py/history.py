@@ -192,6 +192,58 @@ def get_scanned_logs(account):
             pass
     return scanned
 
+def _dedup_history_file(hf, log_fn=None):
+    """
+    Read a history JSONL file, remove duplicate entries (same time+type+value+activity),
+    keeping the first occurrence. Rewrites the file in-place if duplicates are found.
+    Returns (rows, dupes_removed) where rows is the deduplicated list.
+    """
+    if not hf.exists():
+        return [], 0
+    rows = []
+    seen = set()
+    dupes = 0
+    try:
+        with open(hf, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    rows.append(line)  # keep unparseable lines as-is
+                    continue
+                # scan records only — leave scan entries (type=scan) always
+                if rec.get('type') == 'scan':
+                    rows.append(rec)
+                    continue
+                key = (rec.get('time', ''), rec.get('type', ''),
+                       rec.get('value', ''), rec.get('activity', ''))
+                if key in seen:
+                    dupes += 1
+                else:
+                    seen.add(key)
+                    rows.append(rec)
+    except Exception:
+        return [], 0
+
+    if dupes > 0:
+        try:
+            with open(hf, 'w', encoding='utf-8') as f:
+                for rec in rows:
+                    if isinstance(rec, str):
+                        f.write(rec + '\n')
+                    else:
+                        f.write(json.dumps(rec) + '\n')
+            if log_fn:
+                log_fn(f'🧹 [{hf.parent.name}] Removed {dupes} duplicate history entries')
+        except Exception:
+            pass
+
+    return [r for r in rows if isinstance(r, dict) and r.get('type') != 'scan'], dupes
+
+
 def load_history_tail(account, cutoff_ts):
     """Read only entries >= cutoff_ts. Uses backwards seek to find the cutoff position,
     then reads forward from there — avoids loading the entire file."""
@@ -248,8 +300,9 @@ def load_history_tail(account, cutoff_ts):
         rows = [r for r in rows if r.get('time', '') >= cutoff_ts]
     return rows
 
-def load_history_for(account):
-    """Load all history entries for a single account, including rotated files."""
+def load_history_for(account, log_fn=None):
+    """Load all history entries for a single account, including rotated files.
+    Deduplicates each file on load and rewrites if duplicates are found."""
     acc_dir = account_history_dir(account)
     if not acc_dir.exists():
         return []
@@ -257,17 +310,8 @@ def load_history_for(account):
     files = sorted(acc_dir.glob('history*.jsonl'), key=lambda f: f.stat().st_mtime)
     rows = []
     for hf in files:
-        try:
-            with open(hf, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            rows.append(json.loads(line))
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+        clean_rows, dupes = _dedup_history_file(hf, log_fn=log_fn)
+        rows.extend(clean_rows)
     return rows
 
 def load_history_accounts():
