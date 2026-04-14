@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.2.2
+- Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
+
 ## v1.2.1
 - Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
 - Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
@@ -64,6 +67,9 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.2
+- Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
 
 ## v1.2.1
 - Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
@@ -141,6 +147,9 @@
 ## v1.1.8-beta.3
 - Fixed version comparison not correctly ordering beta vs stable — _ver_tuple and _semver_key now use full semver-aware parsing: beta.1 < beta.2 < stable < next-stable; beta users are now correctly offered stable releases when promoted, and beta-to-beta upgrades work in order
 
+## v1.2.2
+- Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
+
 ## v1.2.1
 - Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state
 - Fixed status tab not updating to new Slayer task after completing — get_account_rows was calling _get_active_log_file (proc scan) on every call, causing race conditions with live state updates; rotation check now uses fast name-based file selection
@@ -205,6 +214,9 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.2
+- Fixed history duplication when DreamBot closes before the monitor is stopped — on monitor exit, any active log file whose DreamBot client has already closed is now EOF-pinned before saving offsets, so backfill on next startup finds nothing new to re-read
 
 ## v1.2.1
 - Fixed task and activity showing blank in status tab when monitor starts mid-session — the script_running guard was too aggressive; task is now always shown from startup scan regardless of script state

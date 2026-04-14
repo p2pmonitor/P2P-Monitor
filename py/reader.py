@@ -513,6 +513,13 @@ def slice_last_task(lines):
 
         if not locked:
             resolved = actually_val or task_val
+
+            # If no explicit Task is line but a Slayer -> line exists in this block,
+            # infer task=Slayer (handles new slayer task assigned outside a full NEW TASK block)
+            if not resolved and slayer_val:
+                resolved  = 'Slayer'
+                task_val  = 'Slayer'
+
             if resolved:
                 task = resolved
                 activity = activity_val
@@ -537,8 +544,55 @@ def slice_last_task(lines):
                 for j in range(new_task_idx, min(n, new_task_idx + 60)):
                     if 'BREAK START' in arr[j].upper():
                         return ('', '')  # Break follows — no real task
+                # Last NEW TASK block had no task — scan backwards through
+                # previous NEW TASK blocks to find the last one that resolved
+                for i in range(new_task_idx - 1, -1, -1):
+                    if 'NEW TASK' not in arr[i].upper():
+                        continue
+                    prev_task_idx = i
+                    prev_task_val = ''; prev_actually_val = ''; prev_activity_val = ''; prev_slayer_val = ''
+                    prev_locked = False; prev_step_seen = False
+                    for j in range(prev_task_idx, min(n, prev_task_idx + 60)):
+                        b2 = strip_prefix(arr[j]).strip()
+                        if re.match(r'.+\bStep\s+0\b', b2, re.IGNORECASE):
+                            prev_step_seen = True
+                        if not prev_step_seen and re.search(r'\]\s*>\s*Locking\b', arr[j], re.IGNORECASE):
+                            prev_locked = True
+                        m2 = re.match(r'^Actually task is\s+(.+)', b2, re.IGNORECASE)
+                        if m2: prev_actually_val = m2.group(1).strip(); continue
+                        m2 = re.match(r'^Task is\s+(.+)', b2, re.IGNORECASE)
+                        if m2:
+                            cand = m2.group(1).strip()
+                            if not re.match(r'^(doable|not doable)\b', cand, re.IGNORECASE):
+                                prev_task_val = cand
+                            continue
+                        m2 = re.match(r'^Activity is\s+(.+)', b2, re.IGNORECASE)
+                        if m2: prev_activity_val = m2.group(1).strip(); continue
+                        ms2 = re.search(r'Slayer\s*->\s*(\d+)\s+(.+)', b2, re.IGNORECASE)
+                        if ms2: prev_slayer_val = f"{ms2.group(1)} {ms2.group(2).strip()}"
+                    if prev_locked:
+                        continue
+                    prev_resolved = prev_actually_val or prev_task_val
+                    if not prev_resolved and prev_slayer_val:
+                        prev_resolved = 'Slayer'
+                    if prev_resolved:
+                        task = prev_resolved
+                        activity = prev_activity_val
+                        if ' - ' in task and task.lower() != 'questing':
+                            parts = task.split(' - ', 1)
+                            task = parts[0].strip()
+                            if not activity: activity = parts[1].strip()
+                        if task.lower() == 'slayer':
+                            # Use most recent Slayer -> from the full file
+                            for k in range(n - 1, -1, -1):
+                                ms3 = re.search(r'Slayer\s*->\s*(\d+)\s+(.+)',
+                                                strip_prefix(arr[k]).strip(), re.IGNORECASE)
+                                if ms3:
+                                    activity = f"{ms3.group(1)} {ms3.group(2).strip()}"
+                                    break
+                        return (task, activity)
 
-    # Fallback: check for BREAK START at end of log
+    # Fallback
     # Don't return 'Break' as last task — it's not a real task name
     return ('', '')
 

@@ -261,6 +261,23 @@ class LogWatcher:
         if hasattr(self, '_bot_thread') and self._bot_thread and self._bot_thread.is_alive() and self._bot_thread is not threading.current_thread():
             self._bot_thread.join(timeout=5)
         with self._offsets_lock:
+            # Before saving offsets, EOF-pin any active log files whose DreamBot
+            # client has already closed. This prevents backfill from re-reading
+            # those lines on next startup and duplicating history entries.
+            open_paths = _proc_open_files()
+            for d in self._get_log_dirs():
+                log_files = _get_log_files(d)
+                active = next((f for f in reversed(log_files)
+                               if re.match(r'logfile-\d+\.log$', f.name)), None)
+                if not active:
+                    continue
+                fstr = str(active)
+                if fstr not in open_paths:
+                    # DreamBot already closed — pin to EOF
+                    try:
+                        self._offsets[fstr] = active.stat().st_size
+                    except Exception:
+                        pass
             save_offsets(dict(self._offsets))
 
     # ── Account row export ─────────────────────────────────────────────────────

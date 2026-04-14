@@ -326,19 +326,19 @@ class SettingsTab:
         field("Send time (HH:MM):", 'summary_time')
 
         # Scheduled screenshots — now lives in Daily Summary section
-        ss_row = tk.Frame(inner, bg=app.BG2); ss_row.pack(fill='x', padx=16, pady=2)
-        ss_var = tk.BooleanVar(value=bool(app.cfg.get('screenshots_enabled', False)))
-        tk.Checkbutton(ss_row, text="Enable scheduled screenshots", variable=ss_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['screenshots_enabled'] = ss_var
-
         ss_startup_row = tk.Frame(inner, bg=app.BG2); ss_startup_row.pack(fill='x', padx=16, pady=2)
         ss_startup_var = tk.BooleanVar(value=bool(app.cfg.get('screenshot_on_startup', False)))
         tk.Checkbutton(ss_startup_row, text="Screenshot on monitor startup", variable=ss_startup_var, font=app.MONO,
             bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
             selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
         self._vars['screenshot_on_startup'] = ss_startup_var
+
+        ss_row = tk.Frame(inner, bg=app.BG2); ss_row.pack(fill='x', padx=16, pady=2)
+        ss_var = tk.BooleanVar(value=bool(app.cfg.get('screenshots_enabled', False)))
+        tk.Checkbutton(ss_row, text="Enable scheduled screenshots", variable=ss_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['screenshots_enabled'] = ss_var
 
         int_row = tk.Frame(inner, bg=app.BG2); int_row.pack(fill='x', padx=16, pady=2)
         tk.Label(int_row, text="Screenshot interval (minutes):", font=app.MONO,
