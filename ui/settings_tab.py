@@ -365,6 +365,28 @@ class SettingsTab:
         tk.Label(beta_row, text="  (silent startup check always uses stable only)",
             font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
 
+        # ── Debug mode ────────────────────────────────────────────────────────
+        section("DEBUG")
+        debug_row = tk.Frame(inner, bg=app.BG2); debug_row.pack(fill='x', padx=16, pady=(4, 4))
+        debug_var = tk.BooleanVar(value=bool(app.cfg.get('debug', False)))
+        tk.Checkbutton(debug_row, text="Enable debug logging",
+            variable=debug_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['debug'] = debug_var
+        tk.Label(debug_row, text="  (logs internal errors and failures to the monitor tab)",
+            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+
+        stats_row = tk.Frame(inner, bg=app.BG2); stats_row.pack(fill='x', padx=16, pady=(0, 8))
+        stats_var = tk.BooleanVar(value=bool(app.cfg.get('enable_usage_stats', True)))
+        tk.Checkbutton(stats_row, text="Enable anonymous usage stats",
+            variable=stats_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['enable_usage_stats'] = stats_var
+        tk.Label(stats_row, text="  (sends version + OS on startup, no personal data)",
+            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+
         tk.Frame(inner, bg=app.BG2, height=8).pack()
         tk.Button(inner, text="💾  SAVE SETTINGS", font=app.MONOL,
             bg=app.ACC, fg=app.BG, relief='flat', padx=20, pady=8,

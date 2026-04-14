@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.2.3 — Debian 12 native
+P2P Monitor v1.2.4 — Debian 12 native
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -46,7 +46,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION     = "1.2.3"
+VERSION     = "1.2.4"
 SCRIPT_PATH  = os.path.abspath(__file__)
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
@@ -75,7 +75,28 @@ DEFAULT_CFG = {
     "monitor_script_start": True, "monitor_script_pause": True,
     "monitor_script_resume": True, "monitor_script_stop": True,
     "levelup_every": 5,
+    "debug": False,
+    "enable_usage_stats": True,
+    "usage_stats_url": "https://stats.p2pmonitor.workers.dev",
 }
+
+def _send_startup_ping(cfg, log_fn=None):
+    """Send anonymous startup ping in background. No retry, no IDs, fails silently."""
+    if not cfg.get('enable_usage_stats', True):
+        return
+    import platform, urllib.request, json as _json, threading
+    def _ping():
+        try:
+            url     = cfg.get('usage_stats_url', 'https://stats.p2pmonitor.workers.dev')
+            payload = _json.dumps({'version': VERSION, 'os': platform.system().lower()}).encode()
+            req     = urllib.request.Request(url, data=payload,
+                                             headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=3)
+        except Exception as e:
+            if cfg.get('debug') and log_fn:
+                log_fn(f'[DEBUG] startup ping failed: {e}')
+    threading.Thread(target=_ping, daemon=True).start()
+
 
 def _ver_tuple(v):
     import re as _re
@@ -121,6 +142,7 @@ class App(tk.Tk):
         self._style()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(500, lambda: _send_startup_ping(self.cfg, log_fn=self._log))
 
     def _style(self):
         s = ttk.Style(self)

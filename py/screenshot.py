@@ -92,13 +92,14 @@ def _paint_is_visible(btn_coords, env):
             pass
     return True
 
-def _save_paint_reference(btn_coords, env):
+def _save_paint_reference(btn_coords, env, log=None, debug=False):
     crop = _capture_btn_crop(btn_coords, env)
     if crop:
         try:
             shutil.move(crop, str(PAINT_REF_FILE))
-        except Exception:
-            pass
+        except Exception as e:
+            if debug and log:
+                log(f'[DEBUG] _save_paint_reference failed: {e}')
 
 def _click_paint_button(coords, env):
     bx, by = coords
@@ -191,9 +192,9 @@ class ScreenshotService:
                     if f.stat().st_mtime < cutoff:
                         f.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    pass  # file already gone or locked — safe to ignore
         except Exception:
-            pass
+            pass  # screenshot dir unavailable — safe to ignore
 
     def _worker(self):
         """Process queued screenshot requests in priority order."""

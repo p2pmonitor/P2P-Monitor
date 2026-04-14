@@ -24,7 +24,7 @@ def history_file(account):
     return account_history_dir(account) / "history.jsonl"
 
 # ── Resume offsets ─────────────────────────────────────────────────────────────
-def load_offsets():
+def load_offsets(log_fn=None, debug=False):
     """Load {filename: byte_offset} from offsets.json. Returns empty dict if missing/corrupt."""
     try:
         if OFFSETS_FILE.exists():
@@ -32,25 +32,29 @@ def load_offsets():
                 data = json.load(f)
                 if isinstance(data, dict):
                     return data
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] load_offsets failed for {OFFSETS_FILE}: {e}')
     return {}
 
-def save_offsets(offsets):
+def save_offsets(offsets, log_fn=None, debug=False):
     """Flush {filename: byte_offset} to offsets.json. Called only on clean shutdown."""
     try:
         OFFSETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(OFFSETS_FILE, 'w', encoding='utf-8') as f:
             json.dump(offsets, f)
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] save_offsets failed for {OFFSETS_FILE}: {e}')
 
 # ── Migration ──────────────────────────────────────────────────────────────────
-def migrate_history():
+def migrate_history(log_fn=None, debug=False):
     """Migrate legacy flat history files to per-account subfolders."""
     try:
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] migrate_history mkdir failed: {e}')
         return
     try:
         old_root = Path.home() / ".p2p_monitor"
@@ -70,10 +74,12 @@ def migrate_history():
                          open(dest, 'a', encoding='utf-8') as dst:
                         dst.write(src.read())
                     old_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-    except Exception:
-        pass
+            except Exception as e:
+                if debug and log_fn:
+                    log_fn(f'[DEBUG] migrate_history file move failed for {old_file}: {e}')
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] migrate_history glob failed: {e}')
     if not HISTORY_FILE.exists():
         return
     try:
@@ -84,8 +90,9 @@ def migrate_history():
                 if line:
                     try:
                         rows.append(json.loads(line))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if debug and log_fn:
+                            log_fn(f'[DEBUG] migrate_history parse error: {e}')
         if not rows:
             HISTORY_FILE.rename(HISTORY_FILE.with_suffix('.jsonl.bak'))
             return
@@ -101,23 +108,30 @@ def migrate_history():
                 for e in entries:
                     f.write(json.dumps(e) + '\n')
         HISTORY_FILE.rename(HISTORY_FILE.with_suffix('.jsonl.bak'))
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] migrate_history flat-file migration failed: {e}')
 
 # ── Write ──────────────────────────────────────────────────────────────────────
-def _rotate_if_needed(account):
+def _rotate_if_needed(account, log_fn=None, debug=False):
     hf = history_file(account)
     try:
         if hf.exists() and hf.stat().st_size >= HISTORY_MAX_BYTES:
             ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
             dated  = account_history_dir(account) / f"history_{ts_str}.jsonl"
             hf.rename(dated)
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] _rotate_if_needed failed for {account}: {e}')
 
-def append_history(account, etype, value, activity='', timestamp=None):
-    account_history_dir(account).mkdir(parents=True, exist_ok=True)
-    _rotate_if_needed(account)
+def append_history(account, etype, value, activity='', timestamp=None, log_fn=None, debug=False):
+    try:
+        account_history_dir(account).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] append_history mkdir failed for {account}: {e}')
+        return
+    _rotate_if_needed(account, log_fn=log_fn, debug=debug)
     ts_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     entry = {
         "time":     timestamp or ts_now,
@@ -127,12 +141,10 @@ def append_history(account, etype, value, activity='', timestamp=None):
         "activity": activity,
     }
     # Dedup — skip if identical to the last entry (same type, value, activity, time)
-    # Prevents double-writes from backfill/live overlap or restart re-scanning.
     try:
         hf = history_file(account)
         if hf.exists():
             with open(hf, 'rb') as f:
-                # Read last line efficiently
                 f.seek(0, 2)
                 size = f.tell()
                 if size > 0:
@@ -147,30 +159,35 @@ def append_history(account, etype, value, activity='', timestamp=None):
                             return  # exact duplicate — skip
                     except Exception:
                         pass
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] append_history dedup check failed for {account}: {e}')
     try:
         with open(history_file(account), 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry) + '\n')
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] append_history write failed for {account}: {e}')
 
-def record_log_scanned(account, log_filename):
-    """Record that a log file has been fully backfilled for this account.
-    Only called for rotated (completed) files — active file resume uses offsets.json."""
-    account_history_dir(account).mkdir(parents=True, exist_ok=True)
+def record_log_scanned(account, log_filename, log_fn=None, debug=False):
+    """Record that a log file has been fully backfilled for this account."""
+    try:
+        account_history_dir(account).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] record_log_scanned mkdir failed for {account}: {e}')
+        return
     rec = {'type': 'scan', 'file': log_filename}
     try:
         with open(history_file(account), 'a', encoding='utf-8') as f:
             f.write(json.dumps(rec) + '\n')
-    except Exception:
-        pass
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] record_log_scanned write failed for {account}/{log_filename}: {e}')
 
 # ── Read ───────────────────────────────────────────────────────────────────────
-def get_scanned_logs(account):
-    """Return set of filenames already fully backfilled for this account.
-    Reads all history files (active + rotated) so rotation doesn't re-trigger backfill.
-    Resume offsets are now stored separately in offsets.json, not here."""
+def get_scanned_logs(account, log_fn=None, debug=False):
+    """Return set of filenames already fully backfilled for this account."""
     acc_dir = account_history_dir(account)
     if not acc_dir.exists():
         return set()
@@ -188,11 +205,12 @@ def get_scanned_logs(account):
                                 scanned.add(fname)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as e:
+            if debug and log_fn:
+                log_fn(f'[DEBUG] get_scanned_logs read failed for {hf}: {e}')
     return scanned
 
-def _dedup_history_file(hf, log_fn=None):
+def _dedup_history_file(hf, log_fn=None, debug=False):
     """
     Read a history JSONL file, remove duplicate entries (same time+type+value+activity),
     keeping the first occurrence. Rewrites the file in-place if duplicates are found.
@@ -212,9 +230,8 @@ def _dedup_history_file(hf, log_fn=None):
                 try:
                     rec = json.loads(line)
                 except Exception:
-                    rows.append(line)  # keep unparseable lines as-is
+                    rows.append(line)
                     continue
-                # scan records only — leave scan entries (type=scan) always
                 if rec.get('type') == 'scan':
                     rows.append(rec)
                     continue
@@ -225,7 +242,9 @@ def _dedup_history_file(hf, log_fn=None):
                 else:
                     seen.add(key)
                     rows.append(rec)
-    except Exception:
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] _dedup_history_file read failed for {hf}: {e}')
         return [], 0
 
     if dupes > 0:
@@ -236,17 +255,15 @@ def _dedup_history_file(hf, log_fn=None):
                         f.write(rec + '\n')
                     else:
                         f.write(json.dumps(rec) + '\n')
-            if log_fn:
-                log_fn(f'🧹 [{hf.parent.name}] Removed {dupes} duplicate history entries')
-        except Exception:
-            pass
+        except Exception as e:
+            if debug and log_fn:
+                log_fn(f'[DEBUG] _dedup_history_file rewrite failed for {hf}: {e}')
 
     return [r for r in rows if isinstance(r, dict) and r.get('type') != 'scan'], dupes
 
 
-def load_history_tail(account, cutoff_ts):
-    """Read only entries >= cutoff_ts. Uses backwards seek to find the cutoff position,
-    then reads forward from there — avoids loading the entire file."""
+def load_history_tail(account, cutoff_ts, log_fn=None, debug=False):
+    """Read only entries >= cutoff_ts. Uses backwards seek to find the cutoff position."""
     hf = history_file(account)
     if not hf.exists():
         return []
@@ -260,7 +277,7 @@ def load_history_tail(account, cutoff_ts):
             chunk_size = 32768
             pos        = file_size
             remainder  = b''
-            cutoff_pos = 0   # byte position where we should start the forward read
+            cutoff_pos = 0
             while pos > 0:
                 read_size = min(chunk_size, pos)
                 pos -= read_size
@@ -276,13 +293,11 @@ def load_history_tail(account, cutoff_ts):
                         rec = json.loads(raw)
                         ts  = rec.get('time', '')
                         if ts and ts < cutoff_ts:
-                            # Found the first entry before cutoff — start reading from here
                             cutoff_pos = pos
                             pos = 0
                             break
                     except Exception:
                         continue
-            # Forward read from cutoff_pos to end
             f.seek(cutoff_pos)
             for line in f.read().decode('utf-8', errors='replace').splitlines():
                 line = line.strip()
@@ -295,22 +310,23 @@ def load_history_tail(account, cutoff_ts):
                         rows.append(rec)
                 except Exception:
                     pass
-    except Exception:
-        rows = load_history_for(account)
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] load_history_tail failed for {account}, falling back to full load: {e}')
+        rows = load_history_for(account, log_fn=log_fn, debug=debug)
         rows = [r for r in rows if r.get('time', '') >= cutoff_ts]
     return rows
 
-def load_history_for(account, log_fn=None):
+def load_history_for(account, log_fn=None, debug=False):
     """Load all history entries for a single account, including rotated files.
     Deduplicates each file on load and rewrites if duplicates are found."""
     acc_dir = account_history_dir(account)
     if not acc_dir.exists():
         return []
-    # Read active file + all rotated history_*.jsonl files, oldest first
     files = sorted(acc_dir.glob('history*.jsonl'), key=lambda f: f.stat().st_mtime)
     rows = []
     for hf in files:
-        clean_rows, dupes = _dedup_history_file(hf, log_fn=log_fn)
+        clean_rows, dupes = _dedup_history_file(hf, log_fn=log_fn, debug=debug)
         rows.extend(clean_rows)
     return rows
 
@@ -323,4 +339,3 @@ def load_history_accounts():
         if d.is_dir() and (d / 'history.jsonl').exists():
             accounts.append(d.name)
     return accounts
-

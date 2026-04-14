@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.4
+### Reliability
+- Added debug mode toggle in Settings → Debug — when enabled, internal errors that were previously swallowed silently are now logged to the monitor tab; covers history reads/writes, config I/O, offset restore, backfill, rotation, and screenshot operations
+- Normalized all existing `[DEBUG]` log calls in watcher.py to use the new `_dbg()` helper so they respect the debug flag consistently
+- Annotated intentionally silent catches in screenshot.py (paint comparison, file pruning) to distinguish "safe to ignore" from "should never fail"
+
+### Launcher
+- Replaced `pgrep -f account` duplicate-launch detection with `psutil` process inspection — checks for a `java` process with both `-jar` and the account name in its command line, eliminating false positives from unrelated processes; falls back to `pgrep` if `psutil` is unavailable
+
+### Documentation
+- Added event dict contract comment block above `handle_event()` in watcher.py — documents all optional keys (`_drop_types`, `_slayer_complete`, `_raw`, `_detail`, `_task_ctx`, `_lock_name`, etc.), their types, which events produce them, and which consumers rely on them
+- Added TODO markers to `_process_lines()` and `_backfill_history()` noting intentional deferral of function-split refactoring
+
 ## v1.2.3
 - Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
 - This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
@@ -73,6 +86,19 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.4
+### Reliability
+- Added debug mode toggle in Settings → Debug — when enabled, internal errors that were previously swallowed silently are now logged to the monitor tab; covers history reads/writes, config I/O, offset restore, backfill, rotation, and screenshot operations
+- Normalized all existing `[DEBUG]` log calls in watcher.py to use the new `_dbg()` helper so they respect the debug flag consistently
+- Annotated intentionally silent catches in screenshot.py (paint comparison, file pruning) to distinguish "safe to ignore" from "should never fail"
+
+### Launcher
+- Replaced `pgrep -f account` duplicate-launch detection with `psutil` process inspection — checks for a `java` process with both `-jar` and the account name in its command line, eliminating false positives from unrelated processes; falls back to `pgrep` if `psutil` is unavailable
+
+### Documentation
+- Added event dict contract comment block above `handle_event()` in watcher.py — documents all optional keys (`_drop_types`, `_slayer_complete`, `_raw`, `_detail`, `_task_ctx`, `_lock_name`, etc.), their types, which events produce them, and which consumers rely on them
+- Added TODO markers to `_process_lines()` and `_backfill_history()` noting intentional deferral of function-split refactoring
 
 ## v1.2.3
 - Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
@@ -159,6 +185,19 @@
 ## v1.1.8-beta.3
 - Fixed version comparison not correctly ordering beta vs stable — _ver_tuple and _semver_key now use full semver-aware parsing: beta.1 < beta.2 < stable < next-stable; beta users are now correctly offered stable releases when promoted, and beta-to-beta upgrades work in order
 
+## v1.2.4
+### Reliability
+- Added debug mode toggle in Settings → Debug — when enabled, internal errors that were previously swallowed silently are now logged to the monitor tab; covers history reads/writes, config I/O, offset restore, backfill, rotation, and screenshot operations
+- Normalized all existing `[DEBUG]` log calls in watcher.py to use the new `_dbg()` helper so they respect the debug flag consistently
+- Annotated intentionally silent catches in screenshot.py (paint comparison, file pruning) to distinguish "safe to ignore" from "should never fail"
+
+### Launcher
+- Replaced `pgrep -f account` duplicate-launch detection with `psutil` process inspection — checks for a `java` process with both `-jar` and the account name in its command line, eliminating false positives from unrelated processes; falls back to `pgrep` if `psutil` is unavailable
+
+### Documentation
+- Added event dict contract comment block above `handle_event()` in watcher.py — documents all optional keys (`_drop_types`, `_slayer_complete`, `_raw`, `_detail`, `_task_ctx`, `_lock_name`, etc.), their types, which events produce them, and which consumers rely on them
+- Added TODO markers to `_process_lines()` and `_backfill_history()` noting intentional deferral of function-split refactoring
+
 ## v1.2.3
 - Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found
 - This serves as a backup to the v1.2.2 EOF-pin fix and also cleans up any existing duplicates from previous sessions
@@ -232,6 +271,19 @@
 - Monitor waits up to 10 minutes for sessions if no account folders exist on startup
 - Added py/__init__.py and ui/__init__.py to update manifest
 - Removed dead code: _is_window_open, last_log_mtime, last_seen, last_seen_ts, break_expected_end, _local_ver()
+
+## v1.2.4
+### Reliability
+- Added debug mode toggle in Settings → Debug — when enabled, internal errors that were previously swallowed silently are now logged to the monitor tab; covers history reads/writes, config I/O, offset restore, backfill, rotation, and screenshot operations
+- Normalized all existing `[DEBUG]` log calls in watcher.py to use the new `_dbg()` helper so they respect the debug flag consistently
+- Annotated intentionally silent catches in screenshot.py (paint comparison, file pruning) to distinguish "safe to ignore" from "should never fail"
+
+### Launcher
+- Replaced `pgrep -f account` duplicate-launch detection with `psutil` process inspection — checks for a `java` process with both `-jar` and the account name in its command line, eliminating false positives from unrelated processes; falls back to `pgrep` if `psutil` is unavailable
+
+### Documentation
+- Added event dict contract comment block above `handle_event()` in watcher.py — documents all optional keys (`_drop_types`, `_slayer_complete`, `_raw`, `_detail`, `_task_ctx`, `_lock_name`, etc.), their types, which events produce them, and which consumers rely on them
+- Added TODO markers to `_process_lines()` and `_backfill_history()` noting intentional deferral of function-split refactoring
 
 ## v1.2.3
 - Added automatic history dedup on backfill completion — after each account's backfill finishes, the history file is scanned for duplicate entries (same time, type, value, and activity) and duplicates are silently removed; a cleanup message is logged to the monitor if any are found

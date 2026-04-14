@@ -10,6 +10,13 @@ import threading
 import shlex
 from py.config import save_config
 
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _psutil = None
+    _PSUTIL_AVAILABLE = False
+
 
 class LauncherTab:
     def __init__(self, app, frame):
@@ -154,19 +161,37 @@ class LauncherTab:
 
         account = preset.get('account', '?')
 
-        # Check if this account is already running
+        # Check if this account is already running using psutil if available,
+        # falling back to pgrep. Looks for a java process with the account name
+        # and -jar in its command line for specificity.
         try:
-            result = subprocess.run(
-                ['pgrep', '-f', account],
-                capture_output=True, text=True
-            )
-            if result.stdout.strip():
+            already_running = False
+            if _PSUTIL_AVAILABLE:
+                for proc in _psutil.process_iter(['name', 'cmdline']):
+                    try:
+                        cmdline = proc.info.get('cmdline') or []
+                        cmdline_str = ' '.join(cmdline)
+                        if ('java' in (proc.info.get('name') or '').lower() and
+                                '-jar' in cmdline_str and
+                                account in cmdline_str):
+                            already_running = True
+                            break
+                    except (_psutil.NoSuchProcess, _psutil.AccessDenied):
+                        continue
+            else:
+                result = subprocess.run(
+                    ['pgrep', '-f', account],
+                    capture_output=True, text=True
+                )
+                already_running = bool(result.stdout.strip())
+
+            if already_running:
                 messagebox.showerror('Already Running',
                     f'"{account}" appears to already be running.\n'
                     f'Close the existing client before launching again.')
                 return
         except Exception:
-            pass  # pgrep unavailable — allow launch
+            pass  # allow launch if check fails
 
         cmd = _build_command(jar, preset)
         self.app._log(f'🚀 [{account}] Launching: {" ".join(shlex.quote(c) for c in cmd)}')

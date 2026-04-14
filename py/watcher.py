@@ -18,6 +18,13 @@ from py.reader  import LOG_TS_RE
 from py.history import (append_history, record_log_scanned, get_scanned_logs,
                         load_history_for, load_offsets, save_offsets)
 from py.paint import do_force, do_force_skill, do_force_panel, PANEL_ACTIONS, AMOUNT_ACTIONS
+
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _psutil = None
+    _PSUTIL_AVAILABLE = False
 from py.discord import (post_discord, bot_api, bot_setup_discord, bot_ensure_thread,
                         GatewayRunner, DiscordRouter, DROP_ICONS,
                         quest_started_payload, quest_payload,
@@ -181,6 +188,11 @@ class LogWatcher:
         self._dirs_last_check = 0
         self._last_summary_date = None
 
+    def _dbg(self, msg):
+        """Log msg only when debug mode is enabled in config."""
+        if self.cfg and self.cfg.get('debug', False):
+            self.log(f'[DEBUG] {msg}')
+
     # ── Dir discovery ──────────────────────────────────────────────────────────
     def _get_log_dirs(self):
         now = time.time()
@@ -304,7 +316,7 @@ class LogWatcher:
                     state.session_file_set = session_files
                     self._startup_catchup(str(active), is_rotation=is_rotation)
         except Exception as e:
-            self.log(f'[DEBUG] get_account_rows rotation check failed: {e}')
+            self._dbg(f'get_account_rows rotation check failed: {e}')
 
         rows = []
         with self._accounts_lock:
@@ -427,7 +439,7 @@ class LogWatcher:
         try:
             sh, sm = [int(x) for x in summary_time.split(':')]
         except Exception as e:
-            self.log(f'[DEBUG] Daily summary skipped — bad summary_time value "{summary_time}": {e}')
+            self._dbg(f'Daily summary skipped — bad summary_time value "{summary_time}": {e}')
             return
         now   = datetime.now()
         today = now.strftime('%Y-%m-%d')
@@ -521,7 +533,7 @@ class LogWatcher:
             return any(p.startswith(folder_str + '/') or p == folder_str
                        for p in open_paths)
         except Exception as e:
-            self.log(f'[DEBUG] proc fd check failed for {folder}: {e}')
+            self._dbg(f'proc fd check failed for {folder}: {e}')
             return True  # Fail open — assume active if unavailable
 
     # ── Main run loop ──────────────────────────────────────────────────────────
@@ -563,7 +575,7 @@ class LogWatcher:
                     with self._offsets_lock:
                         self._offsets[str(active)] = active.stat().st_size
                 except Exception as e:
-                    self.log(f'[DEBUG] Could not pin offset for {active.name}: {e}')
+                    self._dbg(f'Could not pin offset for {active.name}: {e}')
             else:
                 # Stale log — create blank offline state, skip catchup entirely
                 folder_name = os.path.basename(d)
@@ -643,7 +655,7 @@ class LogWatcher:
                 try:
                     return -int(n.rsplit('.', 1)[1])
                 except Exception as e:
-                    self.log(f'[DEBUG] Could not parse rotation index for {n}: {e}')
+                    self._dbg(f'Could not parse rotation index for {n}: {e}')
                     return -999
 
             # Newest first for scanning; we'll reverse where needed
@@ -680,7 +692,7 @@ class LogWatcher:
                             break_start_log_ts = datetime.strptime(
                                 m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                         except Exception as e:
-                            self.log(f'[DEBUG] Break start timestamp parse failed: {e}')
+                            self._dbg(f'Break start timestamp parse failed: {e}')
                             break_start_log_ts = None
                 elif _is_break_over(b.lower()):
                     state.on_break       = False
@@ -745,7 +757,7 @@ class LogWatcher:
                             try:
                                 ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                             except Exception as e:
-                                self.log(f'[DEBUG] Break scan timestamp parse failed: {e}')
+                                self._dbg(f'Break scan timestamp parse failed: {e}')
                         if _is_break_start(line) and ts:
                             pending_break_start = ts
                         elif _is_break_over(b.lower()) and ts and pending_break_start:
@@ -794,6 +806,8 @@ class LogWatcher:
 
     # ── Backfill ───────────────────────────────────────────────────────────────
     def _backfill_history(self, folder):
+        # TODO: _backfill_history handles file selection, offset restore, chunked parsing,
+        # and history dispatch. Split when adding new backfill-specific event handling.
         """
         Scan all unscanned log files for this account and write history entries.
         Uses parse_lines() — no Discord, no screenshots, no state updates.
@@ -834,7 +848,7 @@ class LogWatcher:
                             self._offsets[fstr] = stored_offset
                         # rotated files already set to EOF by _run, leave them
                 except Exception as e:
-                    self.log(f'[DEBUG] Could not restore offset for {os.path.basename(fstr)}: {e}')
+                    self._dbg(f'Could not restore offset for {os.path.basename(fstr)}: {e}')
 
                 # Skip already-scanned rotated files only.
                 # Always process the active file — it may have grown, and on upgrade
@@ -996,7 +1010,7 @@ class LogWatcher:
                     if dupes:
                         self.log(f'🧹 [{account}] Cleaned {dupes} duplicate history entries')
                 except Exception as e:
-                    self.log(f'[DEBUG] History dedup failed [{account}]: {e}')
+                    self._dbg(f'History dedup failed [{account}]: {e}')
                 if self._on_backfill_done:
                     self._on_backfill_done()
 
@@ -1050,6 +1064,31 @@ class LogWatcher:
         return s
 
     # ── Unified event dispatcher ───────────────────────────────────────────────
+    #
+    # Event dict contract — keys emitted by reader.parse_lines() and consumed here:
+    #
+    #   ALWAYS PRESENT:
+    #     type       str   — event type: task, slayer_task, slayer_complete, slayer_skip,
+    #                        quest, quest_started, drop, death, levelup, script_event,
+    #                        chat, error
+    #     value      str   — primary value (task name, monster, item, skill, label…)
+    #     activity   str   — secondary value (count, level, reason, drop type…)
+    #     ts         str   — ISO timestamp from log line (or now_str() fallback)
+    #
+    #   OPTIONAL — set by specific event types:
+    #     _drop_types       list[str]   — drop categories e.g. ['pet', 'collection']
+    #                                     (drop events only)
+    #     _slayer_complete  tuple       — (tasks_done, points_earned, total_points)
+    #                                     (slayer_complete events only)
+    #     _total_level      int         — total level reached (levelup/total events only)
+    #     _raw              tuple       — (key, threshold, window_sec, dedupe_sec, detail)
+    #                                     (error events only — used for threshold/dedup)
+    #     _detail           str         — human-readable error detail (error events only)
+    #     _task_ctx         str         — task context string for error embed enrichment
+    #     _lock_name        str         — locked task/quest name (lock error events only)
+    #     _is_farm_skip     bool        — True for farming patch skip errors
+    #     _line_idx         int         — source line index in the parsed batch
+    #
     def handle_event(self, ev, account, *, source):
         """
         Fan a single normalized event out to all output legs independently.
@@ -1076,12 +1115,15 @@ class LogWatcher:
             try:
                 hist_etype = 'quest_completed' if etype == 'quest' else etype
                 if etype == 'script_event':
-                    append_history(account, 'script_event', activity, '', timestamp=ts)
+                    append_history(account, 'script_event', activity, '', timestamp=ts,
+                                        log_fn=self.log, debug=self.cfg.get('debug', False))
                 elif etype == 'drop':
                     dtype = (ev.get('_drop_types') or [activity])[0] if activity else 'drop'
-                    append_history(account, 'drop', value, dtype, timestamp=ts)
+                    append_history(account, 'drop', value, dtype, timestamp=ts,
+                                        log_fn=self.log, debug=self.cfg.get('debug', False))
                 else:
-                    append_history(account, hist_etype, value, activity, timestamp=ts)
+                    append_history(account, hist_etype, value, activity, timestamp=ts,
+                                        log_fn=self.log, debug=self.cfg.get('debug', False))
             except Exception as e:
                 self.log(f"⚠ [{account}] history write failed for {etype}: {e}")
 
@@ -1151,6 +1193,9 @@ class LogWatcher:
 
     # ── Process lines (live) ───────────────────────────────────────────────────
     def _process_lines(self, lines, folder):
+        # TODO: _process_lines handles state mutation, suppression, event filtering,
+        # and dispatch prep in one pass. Split when adding a new event family or
+        # significant new stateful parsing rule.
         state  = self._get_account(folder)
         events = []
 
@@ -1193,7 +1238,7 @@ class LogWatcher:
                         try:
                             state.script_start_ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
                         except Exception as e:
-                            self.log(f'[DEBUG] script_start_ts parse failed: {e}')
+                            self._dbg(f'script_start_ts parse failed: {e}')
             elif 'script set to running' in b.lower() or 'awaiting login' in b.lower():
                 state.script_running = True
                 state.logged_in      = False

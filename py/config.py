@@ -10,20 +10,29 @@ from pathlib import Path
 CONFIG_FILE = Path.home() / ".p2p_monitor" / "config.json"
 
 
-def save_config(cfg):
+def save_config(cfg, log_fn=None, debug=False):
     """Write cfg dict to ~/.p2p_monitor/config.json."""
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(cfg, f, indent=2)
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] save_config failed for {CONFIG_FILE}: {e}')
 
 
-def load_config(defaults):
+def load_config(defaults, log_fn=None, debug=False):
     """Load config from disk, merging with defaults. Returns merged dict."""
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        if debug and log_fn:
+            log_fn(f'[DEBUG] load_config mkdir failed: {e}')
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
                 return {**defaults, **json.load(f)}
-        except Exception:
-            pass
+        except Exception as e:
+            if debug and log_fn:
+                log_fn(f'[DEBUG] load_config failed for {CONFIG_FILE}, using defaults: {e}')
     return dict(defaults)
