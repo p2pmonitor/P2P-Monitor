@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.0
+### Performance Fix
+- Fixed severe lag on Windows — `get_open_log_handles()` was scanning all running processes via psutil `open_files()` on every call, which is expensive on Windows
+- Windows scan now filtered to `java`/`javaw` processes only — DreamBot always runs as Java; reduces scan from 100+ processes to 2-5
+- Added 15-second result cache to `get_open_log_handles()` — scan runs at most once per 15 seconds regardless of how many times it's called; worst-case delay detecting a closed client is 15 seconds
+- Linux behavior unchanged — `readlink /proc/*/fd/*` is already fast and benefits from the cache as a bonus
+
 ## v1.3.0-beta.1
 ### Windows Port — First Beta
 

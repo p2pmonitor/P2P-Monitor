@@ -2,7 +2,22 @@
 
 A desktop monitor for [DreamBot](https://dreambot.org) P2P Master AI — tracks multiple RuneScape accounts in real time, posts Discord notifications for in-game events, and keeps a searchable event history.
 
-Runs on **Linux** (Debian/Ubuntu) and **Windows** (packaged `.exe` or source). Requires DreamBot with the P2P Master AI script running.
+Runs on **Linux** (Debian/Ubuntu) and **Windows 10/11**. Requires DreamBot with the P2P Master AI script running.
+
+---
+
+## Download
+
+Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/latest) page and download the file for your platform:
+
+| Platform | File |
+|---|---|
+| Linux (Debian/Ubuntu) | `P2P-Monitor-vX.X.X.zip` |
+| Windows 10/11 | `P2P Monitor.exe` |
+
+> **Windows note:** Windows may show a SmartScreen warning ("Windows protected your PC") when you first run the `.exe`. This is normal for unsigned applications — click **More info → Run anyway** to proceed. The app contains no malware. You can verify by uploading the `.exe` to [VirusTotal](https://virustotal.com) before running.
+>
+> If you prefer to build from source instead of using the pre-built `.exe`, see [WINDOWS_BUILD.md](WINDOWS_BUILD.md).
 
 ---
 
@@ -40,21 +55,6 @@ Runs on **Linux** (Debian/Ubuntu) and **Windows** (packaged `.exe` or source). R
 
 ---
 
-## Requirements
-
-### Linux
-- Debian 12 or compatible Ubuntu/Debian-based distro
-- Python 3.10+ with Tkinter (`python3-tk`)
-- `xdotool`, `imagemagick` (for screenshots and paint detection)
-- `psutil`, `pystray`, `pillow`, `tkcalendar` (installed by `install.sh`)
-
-### Windows
-- Windows 10/11 (64-bit)
-- Run from source: Python 3.10+ with dependencies from `requirements-windows.txt`
-- Packaged `.exe`: no Python required — see [WINDOWS_BUILD.md](WINDOWS_BUILD.md)
-
----
-
 ## Installation — Linux
 
 ```bash
@@ -75,13 +75,29 @@ python3 ~/.p2p_monitor/p2p_monitor.py
 
 ## Installation — Windows
 
-See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full build instructions.
+### Option A — Pre-built executable (recommended)
+1. Download `P2P Monitor.exe` from the [Releases](https://github.com/p2pmonitor/P2P-Monitor/releases/latest) page
+2. Place it anywhere — your Desktop, a `P2P Monitor` folder, wherever you like
+3. Double-click to run
+4. If Windows SmartScreen appears, click **More info → Run anyway**
 
-Quick start from source:
+No Python, no dependencies, no installer needed.
+
+### Option B — Run from source
+If you prefer to run from source or build your own `.exe`:
+
 ```
 pip install -r requirements-windows.txt
 python p2p_monitor.py
 ```
+
+To build your own executable:
+```
+pip install pyinstaller
+pyinstaller p2p_monitor.spec
+```
+
+Output will be at `dist/P2P Monitor.exe`. See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full details.
 
 ---
 
@@ -90,7 +106,8 @@ python p2p_monitor.py
 ### DreamBot logs
 Set your DreamBot log folder path in **Settings → Log Folder**. Each subfolder inside that path corresponds to one account.
 
-Default DreamBot log location: `/home/debian/DreamBot/Logs` (Linux) or `C:\Users\<you>\DreamBot\Logs` (Windows)
+- Linux default: `/home/debian/DreamBot/Logs`
+- Windows default: `C:\Users\<you>\DreamBot\Logs`
 
 ### Discord — webhook mode
 1. Create a Discord webhook in any channel
@@ -125,15 +142,15 @@ Default DreamBot log location: `/home/debian/DreamBot/Logs` (Linux) or `C:\Users
 | `~/.p2p_monitor/offsets.json` | Log file read positions |
 | `~/.p2p_monitor/screenshots/` | Screenshot files (auto-deleted after 24h) |
 
+On Windows, `~` resolves to `C:\Users\<you>`.
+
 ---
 
 ## Updating
 
-**In-app (Linux source install):** Settings → 🔄 Check for Update
+**In-app (Linux):** Settings → 🔄 Check for Update — downloads and applies the update automatically, then prompts to restart.
 
-The updater fetches all module files from GitHub and writes them to `~/.p2p_monitor/`. A restart prompt appears when complete.
-
-**Windows packaged `.exe`:** The update prompt opens the GitHub releases page so you can download the new version manually.
+**In-app (Windows packaged):** The update prompt opens the GitHub releases page so you can download the new `.exe` manually and replace the old one.
 
 **Via git (Linux):**
 ```bash
