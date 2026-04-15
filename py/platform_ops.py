@@ -13,6 +13,7 @@ Adding a new platform:
 """
 
 import os
+import time
 import re
 import subprocess
 import sys
@@ -20,6 +21,12 @@ from pathlib import Path
 
 
 # ── Open file detection ────────────────────────────────────────────────────────
+
+# Cache for get_open_log_handles() — avoids expensive repeated scans.
+# On Windows a full psutil scan is slow; caching limits it to once per TTL.
+_HANDLE_CACHE_TTL  = 15   # seconds — worst-case delay detecting a closed client
+_handle_cache_time = 0.0
+_handle_cache_result = None
 
 class HandleScanResult:
     """
@@ -66,16 +73,23 @@ def get_open_log_handles():
 
     Returns: HandleScanResult
     """
+    global _handle_cache_time, _handle_cache_result
+    now = time.time()
+    if _handle_cache_result is not None and (now - _handle_cache_time) < _HANDLE_CACHE_TTL:
+        return _handle_cache_result
     try:
         if sys.platform.startswith('linux'):
-            return _get_open_log_handles_linux()
+            result = _get_open_log_handles_linux()
         elif sys.platform == 'win32':
-            return _get_open_log_handles_windows()
+            result = _get_open_log_handles_windows()
         else:
-            return _get_open_log_handles_linux()  # best effort on other Unix
+            result = _get_open_log_handles_linux()  # best effort on other Unix
     except Exception as e:
-        return HandleScanResult(set(), reliable=False,
-                                reason=f'unexpected error in handle scan: {e}')
+        result = HandleScanResult(set(), reliable=False,
+                                  reason=f'unexpected error in handle scan: {e}')
+    _handle_cache_time   = now
+    _handle_cache_result = result
+    return result
 
 
 def _get_open_log_handles_linux():
@@ -115,9 +129,15 @@ def _get_open_log_handles_windows():
     open_paths  = set()
     proc_count  = 0
     try:
-        for proc in psutil.process_iter(['open_files']):
-            proc_count += 1
+        # Filter to java/javaw only — DreamBot always runs as a Java process.
+        # Scanning all processes via open_files() is expensive on Windows;
+        # filtering reduces the scan from 100+ processes to 2-5.
+        for proc in psutil.process_iter(['name', 'open_files']):
             try:
+                name = (proc.info.get('name') or '').lower()
+                if 'java' not in name:
+                    continue
+                proc_count += 1
                 files = proc.info.get('open_files') or []
                 for f in files:
                     try:
@@ -133,11 +153,8 @@ def _get_open_log_handles_windows():
         return HandleScanResult(set(), reliable=False,
                                 reason=f'psutil scan failed: {e}')
 
-    if proc_count == 0:
-        # psutil returned nothing at all — pathological, cannot trust result
-        return HandleScanResult(set(), reliable=False,
-                                reason='psutil returned no processes')
-
+    # proc_count = 0 means no java processes found — not pathological on
+    # Windows (DreamBot may not be running), so still reliable.
     return HandleScanResult(open_paths, reliable=True)
 
 

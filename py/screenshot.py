@@ -58,13 +58,8 @@ def get_focused_wid():
     return get_focused_window()
 
 def _get_paint_btn_coords(wid, env=None):
-    import sys
-    if sys.platform.startswith('linux'):
-        env  = env or _get_linux_env()
-        geom = _query_window_geom(wid, env)
-    else:
-        from py.platform_ops import get_window_geometry
-        geom = get_window_geometry(wid)
+    from py.platform_ops import get_window_geometry
+    geom = get_window_geometry(wid)
     if not geom:
         return None
     x, y, w, h = geom
