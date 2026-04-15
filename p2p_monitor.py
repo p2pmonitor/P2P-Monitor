@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.2.4 — Debian 12 native
+P2P Monitor v1.3.0-beta.1
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -46,9 +46,16 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION     = "1.2.4"
-SCRIPT_PATH  = os.path.abspath(__file__)
+VERSION      = "1.3.0-beta.1"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
+
+def _is_frozen():
+    """Return True when running as a packaged PyInstaller executable."""
+    return getattr(sys, 'frozen', False)
+
+# When frozen, __file__ is unreliable — use sys.executable instead.
+# Both point to the app entry point in their respective environments.
+SCRIPT_PATH = sys.executable if _is_frozen() else os.path.abspath(__file__)
 
 DEFAULT_CFG = {
     "logs_root": "", "webhook_quest": "", "webhook_task": "",
@@ -90,10 +97,14 @@ def _send_startup_ping(cfg, log_fn=None):
             url     = cfg.get('usage_stats_url', 'https://stats.p2pmonitor.workers.dev')
             payload = _json.dumps({'version': VERSION, 'os': platform.system().lower()}).encode()
             req     = urllib.request.Request(url, data=payload,
-                                             headers={'Content-Type': 'application/json'})
+                                             headers={
+                                                 'Content-Type': 'application/json',
+                                                 'User-Agent':   f'P2PMonitor/{VERSION}',
+                                             })
             urllib.request.urlopen(req, timeout=3)
         except Exception as e:
             if cfg.get('debug') and log_fn:
+                # _log uses self.after(0, ...) internally — safe to call from thread
                 log_fn(f'[DEBUG] startup ping failed: {e}')
     threading.Thread(target=_ping, daemon=True).start()
 
@@ -397,7 +408,15 @@ class App(tk.Tk):
         Download release zip, stage in temp dir, verify via manifest, then apply.
         Staged approach: install dir is not touched until all files are verified.
         Falls back gracefully if manifest is missing (applies all .py files).
+        Source installs only — frozen builds use browser-open update flow.
         """
+        if _is_frozen():
+            # Packaged exe — do not attempt in-place file patching.
+            # Open the releases page so the user can download the new version.
+            import webbrowser
+            self._log(f'🌐 Packaged build — opening download page for {new_ver}')
+            webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+            return
         import urllib.request, zipfile, io, tempfile, traceback
         install_dir = Path(SCRIPT_PATH).parent
         backup      = SCRIPT_PATH + '.bak'
@@ -503,13 +522,21 @@ class App(tk.Tk):
             self._log(f'⚠ {msg}')
             self.after(0, lambda: messagebox.showwarning('Update Incomplete', msg))
         else:
-            self._log(f'✅ Updated to {new_ver} — backup at p2p_monitor.py.bak')
+            self._log(f'✅ Updated to {new_ver}')
             def _restart():
                 if messagebox.askyesno('Update Complete',
                         f'Updated to {new_ver}!\n\nRestart now?'):
                     if self.watcher:
                         self.watcher.stop()
-                    os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
+                    if _is_frozen():
+                        # Packaged exe — cannot patch files in place.
+                        # This path should not be reached (frozen builds use
+                        # browser-open update flow), but guard defensively.
+                        import webbrowser
+                        webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+                    else:
+                        # Source install — restart via execv
+                        os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
             self.after(0, _restart)
 
     # ── Tray ───────────────────────────────────────────────────────────────────

@@ -1,13 +1,23 @@
 """
 util.py — Shared utilities for P2P Monitor
-Formatting helpers, xdotool wrappers, and break-length parsing
-used across py/ and ui/ layers. stdlib only.
+Formatting helpers and break-length parsing used across py/ and ui/ layers.
+
+Note: xdotool/X11 helpers (get_display_env, xdotool, get_window_geom) remain
+here as Linux backend implementation details. They are internal helpers used
+by py/platform_ops.py Linux backends only — callers outside platform_ops
+should not import them directly.
 """
 
 import os
 import re
 import subprocess
 from datetime import datetime
+
+
+def is_frozen():
+    """Return True when running as a packaged PyInstaller executable."""
+    import sys
+    return getattr(sys, 'frozen', False)
 
 
 def now_str():
@@ -24,7 +34,9 @@ def fmt_ts(ts_str):
         return ts_str
 
 
-# ── xdotool helpers (shared by screenshot.py and paint.py) ─────────────────────
+# ── Linux/X11 backend helpers (used by platform_ops.py only) ──────────────────
+# These are implementation details for the Linux window-control backends.
+# Do not import these directly — use platform_ops.py abstractions instead.
 
 def get_display_env():
     """Return os.environ with DISPLAY set for X11 operations."""

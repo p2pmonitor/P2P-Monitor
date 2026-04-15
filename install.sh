@@ -21,7 +21,7 @@ sudo apt-get install -y \
 
 echo ""
 echo "[2/4] Installing Python dependencies..."
-pip3 install pystray pillow tkcalendar --break-system-packages
+pip3 install pystray pillow psutil tkcalendar --break-system-packages
 
 echo ""
 echo "[3/4] Installing files to ~/.p2p_monitor/..."
@@ -40,10 +40,12 @@ cp "$SCRIPT_DIR/py/discord.py"     "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/screenshot.py"  "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/paint.py"       "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/watcher.py"     "$INSTALL_DIR/py/"
+cp "$SCRIPT_DIR/py/platform_ops.py" "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/ui/__init__.py"      "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/monitor_tab.py"   "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/status_tab.py"    "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/history_tab.py"   "$INSTALL_DIR/ui/"
+cp "$SCRIPT_DIR/ui/launcher_tab.py"  "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/settings_tab.py"  "$INSTALL_DIR/ui/"
 
 echo ""

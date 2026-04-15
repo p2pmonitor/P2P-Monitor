@@ -24,7 +24,7 @@ SS_PRIORITY_DROPS     = 1   # drop events (most time-sensitive)
 SS_PRIORITY_EVENT     = 2   # task, quest, chat, error, slayer events
 SS_PRIORITY_SCHEDULED = 3   # scheduled interval screenshots
 
-SCREENSHOT_DIR = Path('/tmp/screenshots')
+SCREENSHOT_DIR = Path.home() / '.p2p_monitor' / 'screenshots'
 
 # ── Paint button geometry ──────────────────────────────────────────────────────
 PAINT_BTN_X_OFFSET = 100
@@ -34,57 +34,104 @@ PAINT_BTN_CROP_H   = 20
 PAINT_REF_FILE     = Path.home() / ".p2p_monitor" / "paint_visible_ref.png"
 PAINT_DIFF_THRESH  = 0.15
 
-# ── xdotool helpers (from shared util) ─────────────────────────────────────────
-from py.util import xdotool as _xdotool, get_display_env, get_window_geom as _query_window_geom
+# ── Linux-only paint detection helpers ──────────────────────────────────────────
+# These functions only run on Linux (gated by supports_paint_detection()).
+# They use X11/xdotool/ImageMagick and must not be called on Windows.
 
-def _window_is_minimized(wid, env):
-    try:
-        r = subprocess.run(['xprop', '-id', wid, 'WM_STATE'],
-                           capture_output=True, text=True, timeout=3, env=env)
-        return 'Iconic' in r.stdout
-    except Exception:
-        return False
+def _get_linux_env():
+    """Return X11 display env for Linux-only operations."""
+    from py.util import get_display_env
+    return get_display_env()
+
+from py.platform_ops import (find_window_ids_by_name, capture_window_image,
+                             get_focused_window, get_window_geometry,
+                             is_window_minimized, restore_window,
+                             raise_and_focus_window, minimize_window,
+                             click_at, supports_paint_detection)
+
+def _window_is_minimized(wid, env=None):
+    """Delegates to platform_ops — env param kept for call-site compat."""
+    return is_window_minimized(wid)
 
 def get_focused_wid():
-    wid = _xdotool(['getactivewindow'], get_display_env())
-    return wid if wid else None
+    """Delegates to platform_ops."""
+    return get_focused_window()
 
-def _get_paint_btn_coords(wid, env):
-    geom = _query_window_geom(wid, env)
+def _get_paint_btn_coords(wid, env=None):
+    import sys
+    if sys.platform.startswith('linux'):
+        env  = env or _get_linux_env()
+        geom = _query_window_geom(wid, env)
+    else:
+        from py.platform_ops import get_window_geometry
+        geom = get_window_geometry(wid)
     if not geom:
         return None
     x, y, w, h = geom
     return (x + PAINT_BTN_X_OFFSET, y + h - PAINT_BTN_Y_OFFSET)
 
 # ── Paint state detection ──────────────────────────────────────────────────────
-def _capture_btn_crop(btn_coords, env):
+def _capture_btn_crop(btn_coords, env=None):
+    """Capture a crop of the paint button area. Returns path to temp file or None."""
+    import sys
     bx, by = btn_coords
     x0 = bx - PAINT_BTN_CROP_W // 2
     y0 = by - PAINT_BTN_CROP_H // 2
     tmp = str(Path.home() / ".p2p_monitor" / "_paint_btn_cmp.png")
-    subprocess.run(
-        ['import', '-window', 'root',
-         '-crop', f'{PAINT_BTN_CROP_W}x{PAINT_BTN_CROP_H}+{x0}+{y0}', '+repage', tmp],
-        capture_output=True, timeout=5, env=env)
-    return tmp if Path(tmp).exists() else None
+    if sys.platform.startswith('linux'):
+        env = env or _get_linux_env()
+        subprocess.run(
+            ['import', '-window', 'root',
+             '-crop', f'{PAINT_BTN_CROP_W}x{PAINT_BTN_CROP_H}+{x0}+{y0}', '+repage', tmp],
+            capture_output=True, timeout=5, env=env)
+        return tmp if Path(tmp).exists() else None
+    else:
+        # Windows: use Pillow ImageGrab for screen region capture
+        try:
+            from PIL import ImageGrab
+            bbox = (x0, y0, x0 + PAINT_BTN_CROP_W, y0 + PAINT_BTN_CROP_H)
+            img  = ImageGrab.grab(bbox=bbox)
+            img.save(tmp)
+            return tmp if Path(tmp).exists() else None
+        except Exception:
+            return None
 
-def _paint_is_visible(btn_coords, env):
+def _paint_is_visible(btn_coords, env=None):
+    """Return True if paint overlay is currently visible.
+    Falls back to True (assume visible) on any failure so capture always proceeds.
+    Linux: ImageMagick compare. Windows: Pillow ImageChops.difference.
+    """
+    import sys
     if not PAINT_REF_FILE.exists():
         return True
     crop = _capture_btn_crop(btn_coords, env)
     if not crop:
-        return True
+        return True  # capture failed — assume visible, fail safe
     try:
-        r = subprocess.run(
-            ['compare', '-metric', 'RMSE', crop, str(PAINT_REF_FILE), '/dev/null'],
-            capture_output=True, text=True, timeout=5, env=env)
-        out = (r.stdout + r.stderr).strip()
-        m   = re.search(r'\(([\d.]+)\)', out)
-        if m:
-            diff = float(m.group(1))
-            return diff < PAINT_DIFF_THRESH
+        if sys.platform.startswith('linux'):
+            env = env or _get_linux_env()
+            r = subprocess.run(
+                ['compare', '-metric', 'RMSE', crop, str(PAINT_REF_FILE), os.devnull],
+                capture_output=True, text=True, timeout=5, env=env)
+            out = (r.stdout + r.stderr).strip()
+            m   = re.search(r'\(([\d.]+)\)', out)
+            if m:
+                diff = float(m.group(1))
+                return diff < PAINT_DIFF_THRESH
+        else:
+            # Windows: pure Pillow comparison — no ImageMagick needed
+            from PIL import Image, ImageChops
+            img_curr = Image.open(crop).convert('RGB')
+            img_ref  = Image.open(str(PAINT_REF_FILE)).convert('RGB')
+            if img_curr.size != img_ref.size:
+                img_curr = img_curr.resize(img_ref.size, Image.LANCZOS)
+            diff = ImageChops.difference(img_curr, img_ref)
+            pixels   = list(diff.getdata())
+            # Normalise to 0.0–1.0 range matching PAINT_DIFF_THRESH
+            avg_diff = sum(max(r,g,b) for r,g,b in pixels) / (len(pixels) * 255.0)
+            return avg_diff < PAINT_DIFF_THRESH
     except Exception:
-        pass
+        pass  # comparison failed — assume visible, fail safe
     finally:
         try:
             Path(crop).unlink(missing_ok=True)
@@ -92,7 +139,7 @@ def _paint_is_visible(btn_coords, env):
             pass
     return True
 
-def _save_paint_reference(btn_coords, env, log=None, debug=False):
+def _save_paint_reference(btn_coords, env=None, log=None, debug=False):
     crop = _capture_btn_crop(btn_coords, env)
     if crop:
         try:
@@ -101,13 +148,12 @@ def _save_paint_reference(btn_coords, env, log=None, debug=False):
             if debug and log:
                 log(f'[DEBUG] _save_paint_reference failed: {e}')
 
-def _click_paint_button(coords, env):
+def _click_paint_button(coords, env=None):
+    """Click the paint toggle button. env param kept for call-site compat."""
     bx, by = coords
-    _xdotool(['mousemove', '--', str(bx), str(by)], env, timeout=2)
-    time.sleep(0.05)
-    _xdotool(['click', '--clearmodifiers', '1'], env, timeout=2)
+    click_at(bx, by)
 
-# ── Screenshot service ────────────────────────────────────────────────────────
+
 class ScreenshotService:
     """Owns the screenshot queue, worker thread, and capture execution.
     Watcher decides *when* and *why* — this class decides *how*.
@@ -150,7 +196,6 @@ class ScreenshotService:
 
     def stop(self):
         self._stop.set()
-        # Drain queue so worker can exit cleanly
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -202,7 +247,6 @@ class ScreenshotService:
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.1)
-                # Fixed 10-field tuple — see enqueue()
                 _priority, _seq, account, trigger, _is_last, \
                     url_override, payload_override, bot_channel_id, bot_token, restore_wid = item
             except queue.Empty:
@@ -221,8 +265,6 @@ class ScreenshotService:
                 else:
                     try:
                         if bot_channel_id and bot_token:
-                            # Wait for gateway to be ready before bot delivery
-                            # (max 60s — if not ready by then, drop the screenshot)
                             bot_ready = self._cb.get('bot_ready')
                             if bot_ready and not bot_ready.is_set():
                                 self._cb['log'](f"  ⏳ [{account}] Waiting for gateway before screenshot...")
@@ -258,18 +300,16 @@ class ScreenshotService:
             finally:
                 self._queue.task_done()
 
+
 def take_screenshot(account_name, restore_wid=None, hide_paint=False):
     """
     Capture DreamBot window for account. Returns (path, err).
     restore_wid: window to raise after capture (pass for batch sequences).
     """
-    env = get_display_env()
     try:
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-        r = subprocess.run(['xdotool', 'search', '--name', account_name.lower()],
-                           capture_output=True, text=True, timeout=5, env=env)
-        wids = r.stdout.strip().split()
+        wids = find_window_ids_by_name(account_name)
         if not wids:
             return None, f"No window found for account: {account_name}"
         target_wid = wids[0]
@@ -279,67 +319,64 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
         out_path  = str(SCREENSHOT_DIR / f"{safe_name}_{ts}.png")
 
         if restore_wid is None:
-            restore_wid = _xdotool(['getactivewindow'], env) or None
+            restore_wid = get_focused_window()
 
-        target_was_minimized = _window_is_minimized(target_wid, env)
+        target_was_minimized = _window_is_minimized(target_wid)
 
         try:
             if target_was_minimized:
-                _xdotool(['windowmap', target_wid], env)
+                restore_window(target_wid)
                 time.sleep(0.15)
-            _xdotool(['windowraise',  target_wid], env)
-            _xdotool(['windowfocus',  '--sync', target_wid], env)
+            raise_and_focus_window(target_wid)
             # If we had to bring the window into focus, give it extra time to
             # fully render before reading the paint button state.
             time.sleep(0.6 if target_was_minimized else 0.3)
 
-            btn_coords = _get_paint_btn_coords(target_wid, env)
+            btn_coords = _get_paint_btn_coords(target_wid) if supports_paint_detection() else None
             did_hide   = False
-            if btn_coords:
+            if btn_coords and supports_paint_detection():
                 if not PAINT_REF_FILE.exists():
-                    _save_paint_reference(btn_coords, env)
-                paint_visible = _paint_is_visible(btn_coords, env)
+                    _save_paint_reference(btn_coords)
+                paint_visible = _paint_is_visible(btn_coords)
                 if hide_paint and paint_visible:
-                    _click_paint_button(btn_coords, env)
+                    _click_paint_button(btn_coords)
                     time.sleep(0.2)
                     # Verify the click had the intended effect — self-correct if not
-                    if _paint_is_visible(btn_coords, env):
-                        _click_paint_button(btn_coords, env)
+                    if _paint_is_visible(btn_coords):
+                        _click_paint_button(btn_coords)
                         time.sleep(0.2)
                     did_hide = True
                 elif not hide_paint and not paint_visible:
-                    _click_paint_button(btn_coords, env)
+                    _click_paint_button(btn_coords)
                     time.sleep(0.2)
                     # Verify paint is now visible — self-correct if still hidden
-                    if not _paint_is_visible(btn_coords, env):
-                        _click_paint_button(btn_coords, env)
+                    if not _paint_is_visible(btn_coords):
+                        _click_paint_button(btn_coords)
                         time.sleep(0.2)
 
-            result = subprocess.run(
-                ['import', '-window', target_wid, out_path],
-                capture_output=True, timeout=15, env=env)
+            ok_cap, err_cap = capture_window_image(target_wid, out_path)
 
             if did_hide and btn_coords:
-                _click_paint_button(btn_coords, env)
+                _click_paint_button(btn_coords)
         finally:
             if target_was_minimized:
                 try:
-                    _xdotool(['windowminimize', target_wid], env)
+                    minimize_window(target_wid)
                     time.sleep(0.1)
                 except Exception:
                     pass
             if restore_wid and restore_wid != target_wid:
                 try:
-                    _xdotool(['windowraise', restore_wid], env)
-                    _xdotool(['windowfocus', '--sync', restore_wid], env)
+                    raise_and_focus_window(restore_wid)
                 except Exception:
                     pass
 
         if Path(out_path).exists() and Path(out_path).stat().st_size > 0:
             return out_path, ''
-        err = result.stderr.decode(errors='replace').strip()
-        return None, f"Screenshot failed (rc={result.returncode}): {err}"
+        return None, f'Screenshot failed: {err_cap}'
     except FileNotFoundError as e:
-        return None, f"Tool missing: {e} — run: sudo apt-get install xdotool imagemagick"
+        if supports_paint_detection():
+            return None, f"Tool missing: {e} — run: sudo apt-get install xdotool imagemagick"
+        return None, f"Tool missing: {e}"
     except Exception as e:
         return None, str(e)

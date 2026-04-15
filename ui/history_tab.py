@@ -4,6 +4,7 @@ import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import ttk
 
+from py.platform_ops import open_path as _open_path
 from py.history import (load_history_accounts, load_history_for,
                          load_history_tail, HISTORY_DIR)
 from py.config  import save_config
@@ -47,7 +48,7 @@ class HistoryTab:
             command=self._collapse_all).pack(side='left', padx=(0, 6))
         hist_folder_btn = tk.Button(tb, text="📂 History Folder", font=app.MONO,
             bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=3, cursor='hand2',
-            command=lambda: subprocess.Popen(['xdg-open', str(HISTORY_DIR)]))
+            command=lambda: _open_path(HISTORY_DIR))
         hist_folder_btn.pack(side='left', padx=(0, 6))
         self._date_btn = tk.Button(tb, text="📅 Filter Date", font=app.MONO,
             bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=3, cursor='hand2',

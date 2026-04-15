@@ -4,10 +4,10 @@ Owns hide/show paint and all click-based interactions.
 All coordinates are offsets from the bottom-left of the DreamBot window.
 """
 
-import subprocess
 import time
 
-from py.util import xdotool as _xdotool, get_display_env as _get_env, get_window_geom as _get_window_geom
+from py.platform_ops import (find_window_ids_by_name, get_focused_window,
+                             get_window_geometry, raise_and_focus_window, click_at)
 
 # ── Paint button (hide/show toggle) ───────────────────────────────────────────
 PAINT_BTN_X_OFFSET = 100   # right from window left edge
@@ -58,17 +58,12 @@ AMOUNT_ACTIONS = {'-10m', '+10m'}
 # ── Window helpers ─────────────────────────────────────────────────────────────
 def _find_window(account):
     """Find DreamBot window ID for account. Returns wid string or None."""
-    env = _get_env()
-    r   = subprocess.run(['xdotool', 'search', '--name', account.lower()],
-                         capture_output=True, text=True, timeout=5, env=env)
-    wids = r.stdout.strip().split()
+    wids = find_window_ids_by_name(account)
     return wids[0] if wids else None
 
-def _click(x, y, env):
-    """Move mouse to absolute screen coords and click."""
-    _xdotool(['mousemove', '--', str(x), str(y)], env, timeout=2)
-    time.sleep(0.05)
-    _xdotool(['click', '--clearmodifiers', '1'], env, timeout=2)
+def _click(x, y, env=None):
+    """Move mouse to absolute screen coords and click. env param kept for compat."""
+    click_at(x, y)
 
 def click_at_offset(account, offset_x, offset_y):
     """
@@ -76,30 +71,27 @@ def click_at_offset(account, offset_x, offset_y):
     from the bottom-left corner, then restore the previously focused window.
     Returns (True, '') on success or (False, error_msg) on failure.
     """
-    env = _get_env()
     wid = _find_window(account)
     if not wid:
         return False, f"No window found for account: {account}"
-    geom = _get_window_geom(wid, env)
+    geom = get_window_geometry(wid)
     if not geom:
         return False, f"Could not get window geometry for: {account}"
 
     # Remember what was focused before
-    restore_wid = _xdotool(['getactivewindow'], env) or None
+    restore_wid = get_focused_window()
 
     try:
-        _xdotool(['windowraise', wid], env)
-        _xdotool(['windowfocus', '--sync', wid], env)
+        raise_and_focus_window(wid)
         time.sleep(0.3)
 
         x, y, w, h = geom
         click_x = x + offset_x
         click_y = y + h - offset_y
-        _click(click_x, click_y, env)
+        _click(click_x, click_y)
     finally:
         if restore_wid and restore_wid != wid:
-            _xdotool(['windowraise', restore_wid], env)
-            _xdotool(['windowfocus', '--sync', restore_wid], env)
+            raise_and_focus_window(restore_wid)
 
     return True, ''
 
@@ -116,13 +108,12 @@ def do_force_skill(account, action, log=None, window_lock=None):
             log(f"  ⚠ [{account}] Unknown action: {action}")
         return
     offset_x, offset_y = offsets
-    env = _get_env()
     wid = _find_window(account)
     if not wid:
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = _get_window_geom(wid, env)
+    geom = get_window_geometry(wid)
     if not geom:
         if log:
             log(f"  ⚠ [{account}] Could not get window geometry")
@@ -134,20 +125,18 @@ def do_force_skill(account, action, log=None, window_lock=None):
     from contextlib import nullcontext
     ctx = window_lock if window_lock else nullcontext()
     with ctx:
-        restore_wid = _xdotool(['getactivewindow'], env) or None
+        restore_wid = get_focused_window()
         try:
-            _xdotool(['windowraise', wid], env)
-            _xdotool(['windowfocus', '--sync', wid], env)
+            raise_and_focus_window(wid)
             time.sleep(0.3)
 
             x, y, w, h = geom
             click_x = x + offset_x
             click_y = y + h - offset_y
-            _click(click_x, click_y, env)
+            _click(click_x, click_y)
         finally:
             if restore_wid and restore_wid != wid:
-                _xdotool(['windowraise', restore_wid], env)
-                _xdotool(['windowfocus', '--sync', restore_wid], env)
+                raise_and_focus_window(restore_wid)
 
     if log:
         log(f"✅ [{account}] {action} forced")
@@ -167,13 +156,12 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
             log(f"  ⚠ [{account}] Unknown panel action: {action}")
         return
     offset_x, offset_y = offsets
-    env = _get_env()
     wid = _find_window(account)
     if not wid:
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = _get_window_geom(wid, env)
+    geom = get_window_geometry(wid)
     if not geom:
         if log:
             log(f"  ⚠ [{account}] Could not get window geometry")
@@ -185,10 +173,9 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
     from contextlib import nullcontext
     ctx = window_lock if window_lock else nullcontext()
     with ctx:
-        restore_wid = _xdotool(['getactivewindow'], env) or None
+        restore_wid = get_focused_window()
         try:
-            _xdotool(['windowraise', wid], env)
-            _xdotool(['windowfocus', '--sync', wid], env)
+            raise_and_focus_window(wid)
             time.sleep(0.3)
 
             x, y, w, h = geom
@@ -196,7 +183,7 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
             click_y = y + h - offset_y
 
             # Open panel
-            _click(click_x, click_y, env)
+            _click(click_x, click_y)
             time.sleep(0.15)
 
             # Screenshot while panel is open (full window) — runs inside the lock
@@ -204,11 +191,10 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
                 screenshot_cb()
 
             # Close panel immediately
-            _click(click_x, click_y, env)
+            _click(click_x, click_y)
         finally:
             if restore_wid and restore_wid != wid:
-                _xdotool(['windowraise', restore_wid], env)
-                _xdotool(['windowfocus', '--sync', restore_wid], env)
+                raise_and_focus_window(restore_wid)
 
     if log:
         log(f"✅ [{account}] {action} panel screenshot done")
@@ -227,13 +213,12 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
             log(f"  ⚠ [{account}] Unknown adjustment: {adjustment}")
         return
     offset_x, offset_y = offsets
-    env = _get_env()
     wid = _find_window(account)
     if not wid:
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = _get_window_geom(wid, env)
+    geom = get_window_geometry(wid)
     if not geom:
         if log:
             log(f"  ⚠ [{account}] Could not get window geometry")
@@ -245,10 +230,9 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
     from contextlib import nullcontext
     ctx = window_lock if window_lock else nullcontext()
     with ctx:
-        restore_wid = _xdotool(['getactivewindow'], env) or None
+        restore_wid = get_focused_window()
         try:
-            _xdotool(['windowraise', wid], env)
-            _xdotool(['windowfocus', '--sync', wid], env)
+            raise_and_focus_window(wid)
             time.sleep(0.3)
 
             x, y, w, h = geom
@@ -256,13 +240,12 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
             click_y = y + h - offset_y
 
             for i in range(amount):
-                _click(click_x, click_y, env)
+                _click(click_x, click_y)
                 if i < amount - 1:
                     time.sleep(0.15)
         finally:
             if restore_wid and restore_wid != wid:
-                _xdotool(['windowraise', restore_wid], env)
-                _xdotool(['windowfocus', '--sync', restore_wid], env)
+                raise_and_focus_window(restore_wid)
 
     if log:
         log(f"✅ [{account}] {adjustment} × {amount} done")

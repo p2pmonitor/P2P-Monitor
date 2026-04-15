@@ -4,6 +4,7 @@
 
 p2p_monitor.py
 py/__init__.py
+py/platform_ops.py
 py/reader.py
 py/history.py
 py/config.py

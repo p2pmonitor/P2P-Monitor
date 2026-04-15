@@ -17,7 +17,9 @@ from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
 from py.history import (append_history, record_log_scanned, get_scanned_logs,
                         load_history_for, load_offsets, save_offsets)
-from py.paint import do_force, do_force_skill, do_force_panel, PANEL_ACTIONS, AMOUNT_ACTIONS
+from py.paint        import do_force, do_force_skill, do_force_panel, PANEL_ACTIONS, AMOUNT_ACTIONS
+from py.platform_ops import (get_open_log_handles, find_window_ids_by_name,
+                             normalize_path, capture_window_image)
 
 try:
     import psutil as _psutil
@@ -56,20 +58,6 @@ def _get_log_files(folder):
     files = list(p.glob("logfile-*.log")) + list(p.glob("logfile-*.log.*"))
     return sorted(files, key=lambda f: f.name)
 
-def _proc_open_files():
-    """
-    Return a set of file paths currently open by any process, using
-    readlink on /proc/*/fd/* — fast, no system-wide scan like lsof.
-    """
-    import subprocess
-    try:
-        result = subprocess.run(
-            'readlink /proc/*/fd/* 2>/dev/null',
-            shell=True, capture_output=True, text=True, timeout=5
-        )
-        return set(result.stdout.splitlines())
-    except Exception:
-        return set()
 
 
 def _get_active_log_file(folder):
@@ -78,7 +66,7 @@ def _get_active_log_file(folder):
     written to by a running DreamBot process.
 
     Strategy:
-      1. Use readlink /proc/*/fd/* to find files with open handles (fast).
+      1. Uses get_open_log_handles() from platform_ops — Linux: readlink /proc/*/fd/*
       2. If exactly one .log (no suffix) has an open handle — return it.
       3. If multiple have open handles (duplicate client) — return the one
          with the most recent mtime.
@@ -90,8 +78,11 @@ def _get_active_log_file(folder):
     if not log_files:
         return None
     try:
-        open_paths = _proc_open_files()
-        active_candidates = [f for f in log_files if str(f) in open_paths]
+        scan = get_open_log_handles()
+        if not scan.reliable:
+            # Cannot trust handle scan — fall through to name-based fallback
+            raise RuntimeError(f'handle scan unreliable: {scan.reason}')
+        active_candidates = [f for f in log_files if normalize_path(f) in scan.paths]
         if len(active_candidates) == 1:
             return active_candidates[0]
         elif len(active_candidates) > 1:
@@ -276,20 +267,25 @@ class LogWatcher:
             # Before saving offsets, EOF-pin any active log files whose DreamBot
             # client has already closed. This prevents backfill from re-reading
             # those lines on next startup and duplicating history entries.
-            open_paths = _proc_open_files()
-            for d in self._get_log_dirs():
-                log_files = _get_log_files(d)
-                active = next((f for f in reversed(log_files)
-                               if re.match(r'logfile-\d+\.log$', f.name)), None)
-                if not active:
-                    continue
-                fstr = str(active)
-                if fstr not in open_paths:
-                    # DreamBot already closed — pin to EOF
-                    try:
-                        self._offsets[fstr] = active.stat().st_size
-                    except Exception:
-                        pass
+            scan = get_open_log_handles()
+            # EOF-pin only when scan is reliable — skip if we can't trust
+            # the result, to avoid pinning files that are actually still open
+            if scan.reliable:
+                for d in self._get_log_dirs():
+                    log_files = _get_log_files(d)
+                    active = next((f for f in reversed(log_files)
+                                   if re.match(r'logfile-\d+\.log$', f.name)), None)
+                    if not active:
+                        continue
+                    fstr = str(active)
+                    if normalize_path(fstr) not in scan.paths:
+                        # DreamBot already closed — pin to EOF
+                        try:
+                            self._offsets[fstr] = active.stat().st_size
+                        except Exception:
+                            pass
+            else:
+                self._dbg(f'stop(): handle scan unreliable ({scan.reason}) — skipping EOF pin')
             save_offsets(dict(self._offsets))
 
     # ── Account row export ─────────────────────────────────────────────────────
@@ -499,18 +495,26 @@ class LogWatcher:
         Re-check open file handles for each tracked account. If a folder has no
         active file handle, flip script_running=False and clear break state.
         Called by the status tab on open and on manual refresh.
-        Calls _proc_open_files() once and reuses the result for all accounts.
+        Calls get_open_log_handles() once and reuses the result for all accounts.
         """
-        open_paths = _proc_open_files()
+        scan = get_open_log_handles()
+        if not scan.reliable:
+            # Cannot trust handle scan — skip all offline transitions
+            for d in self._get_log_dirs():
+                folder = os.path.basename(d)
+                self._dbg(f'handle scan unreliable ({scan.reason}) — '
+                          f'skipping offline check for {folder}')
+            self.on_status()
+            return
         for d in self._get_log_dirs():
             folder = os.path.basename(d)
             with self._accounts_lock:
                 state = self._accounts.get(folder)
             if state is None:
                 continue
-            folder_str = str(d)
-            is_active = any(p.startswith(folder_str + '/') or p == folder_str
-                            for p in open_paths)
+            norm_folder = normalize_path(str(d))
+            is_active = any(p.startswith(norm_folder + os.sep) or p == norm_folder
+                            for p in scan.paths)
             if not is_active:
                 if state.script_running or state.on_break or state._break_start_ts:
                     self.log(f'[proc] [{folder}] No active file handle — marking Offline')
@@ -523,15 +527,19 @@ class LogWatcher:
     def _is_folder_active(self, folder):
         """
         Check if any process has an open file handle in the given folder.
-        Uses readlink /proc/*/fd/* — fast, no system-wide scan.
+        Uses get_open_log_handles() from platform_ops (Linux: readlink /proc/*/fd/*)
         Returns True if DreamBot is actively writing to the folder.
         Returns False if no process has the folder open (stale/dead session).
         """
         try:
-            open_paths = _proc_open_files()
-            folder_str = str(folder)
-            return any(p.startswith(folder_str + '/') or p == folder_str
-                       for p in open_paths)
+            scan = get_open_log_handles()
+            if not scan.reliable:
+                self._dbg(f'handle scan unreliable ({scan.reason}) — '
+                          f'skipping offline check for {folder}')
+                return True  # Fail open — cannot confirm stale
+            norm_folder = normalize_path(str(folder))
+            return any(p.startswith(norm_folder + os.sep) or p == norm_folder
+                       for p in scan.paths)
         except Exception as e:
             self._dbg(f'proc fd check failed for {folder}: {e}')
             return True  # Fail open — assume active if unavailable
@@ -558,7 +566,7 @@ class LogWatcher:
             active = _get_active_log_file(d)
             for f in log_files:
                 with self._offsets_lock:
-                    if active and str(f) == str(active):
+                    if active and normalize_path(f) == normalize_path(active):
                         pass  # leave active file for _startup_catchup / poll loop
                     else:
                         self._offsets[str(f)] = f.stat().st_size  # rotated — skip
@@ -1460,6 +1468,18 @@ class LogWatcher:
             for tid in acct_threads.values():
                 self._bot_add_user_to_thread(tid, token)
 
+    def _bot_add_user_to_thread(self, thread_id, token):
+        """Best-effort: add configured mention user to a Discord thread."""
+        user_id = self.cfg.get('mention_id', '').strip()
+        if not user_id or not thread_id:
+            return
+        _, err = bot_api(token, 'PUT',
+                         f'/channels/{thread_id}/thread-members/{user_id}')
+        if err:
+            self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
+        else:
+            self.log(f"🤖 Added user to thread {thread_id}")
+
     # ── Bot screenshot helpers (called by GatewayRunner via callbacks) ──────────
     def _bot_screenshot_to_channel(self, account, channel_id, token):
         # Capture the currently focused window NOW (before DreamBot steals focus)
@@ -1477,24 +1497,18 @@ class LogWatcher:
         thread, then close the panel.
         Runs in a daemon thread (called by GatewayRunner).
         """
-        import subprocess
         from datetime import datetime
         from pathlib  import Path
         from py.screenshot import SCREENSHOT_DIR
         from py.discord    import post_bot_image
-        from py.util       import get_display_env
 
         captured = {}
 
         def _do_capture():
-            env = get_display_env()
             try:
                 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
                 # Find window — same technique as paint.py
-                r = subprocess.run(
-                    ['xdotool', 'search', '--name', account.lower()],
-                    capture_output=True, text=True, timeout=5, env=env)
-                wids = r.stdout.strip().split()
+                wids = find_window_ids_by_name(account)
                 if not wids:
                     self.log(f"  ⚠ [{account}] {action} panel: no window found for capture")
                     return
@@ -1502,14 +1516,11 @@ class LogWatcher:
                 ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
                 safe     = re.sub(r'[^a-zA-Z0-9_-]', '_', account)
                 out_path = str(SCREENSHOT_DIR / f"{safe}_{action}_{ts}.png")
-                result   = subprocess.run(
-                    ['import', '-window', wid, out_path],
-                    capture_output=True, timeout=15, env=env)
-                if Path(out_path).exists() and Path(out_path).stat().st_size > 0:
+                ok_cap, err_cap = capture_window_image(wid, out_path)
+                if ok_cap and Path(out_path).exists() and Path(out_path).stat().st_size > 0:
                     captured['path'] = out_path
                 else:
-                    err = result.stderr.decode(errors='replace').strip()
-                    self.log(f"  ⚠ [{account}] {action} panel capture failed: {err}")
+                    self.log(f"  ⚠ [{account}] {action} panel capture failed: {err_cap}")
             except Exception as e:
                 self.log(f"  ⚠ [{account}] {action} panel capture error: {e}")
 
@@ -1532,15 +1543,6 @@ class LogWatcher:
                 os.remove(path)
             except Exception:
                 pass
-
-        user_id = self.cfg.get('mention_id', '').strip()
-        if not user_id or not thread_id:
-            return
-        _, err = bot_api(token, 'PUT',
-                         f'/channels/{thread_id}/thread-members/{user_id}')
-        if err:
-            self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
-        else:
-            self.log(f"🤖 Added user to thread {thread_id}")
+            self._bot_add_user_to_thread(channel_id, token)
 
 

@@ -481,10 +481,19 @@ class SettingsTab:
             try:
                 import discord  # noqa: F401
             except ImportError:
+                from py.util import is_frozen
+                if is_frozen():
+                    # Packaged build — cannot pip-install at runtime.
+                    def _frozen_fail():
+                        self._bot_setup_lbl.configure(
+                            text="❌ discord.py not bundled — reinstall the app",
+                            fg=app.RED)
+                    app.after(0, _frozen_fail)
+                    return
                 app.after(0, lambda: self._bot_setup_lbl.configure(
                     text="⏳ Installing discord.py...", fg=app.YEL))
                 try:
-                    import subprocess, sys
+                    import subprocess
                     subprocess.check_call(
                         [sys.executable, '-m', 'pip', 'install', 'discord.py',
                          '--break-system-packages', '--quiet'],
@@ -504,7 +513,8 @@ class SettingsTab:
                 try:
                     result = bot_setup_discord(token, server_id, log_fn=app._log)
                     app.cfg.update(result)
-                    self.save()
+                    # Marshal save() to main thread — Tkinter is not thread-safe
+                    app.after(0, self.save)
                     ok, msg = True, "OK"
                 except Exception as e:
                     msg = str(e)

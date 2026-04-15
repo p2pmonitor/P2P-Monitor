@@ -830,9 +830,16 @@ class GatewayRunner:
             return True
         except ImportError:
             pass
+        from py.util import is_frozen
+        if is_frozen():
+            # Packaged build — pip is not available. discord.py must be bundled.
+            self.cb['log'](
+                '🤖 discord.py is not bundled in this build — '
+                'please reinstall or update to a build that includes it')
+            return False
         self.cb['log']("🤖 discord.py not found — installing...")
         try:
-            import subprocess, sys
+            import subprocess
             subprocess.check_call(
                 [sys.executable, '-m', 'pip', 'install', 'discord.py',
                  '--break-system-packages', '--quiet'],
