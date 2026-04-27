@@ -133,63 +133,26 @@ def _get_open_log_handles_windows():
 
 def is_account_process_running(account, jar_path=''):
     """
-    Return True if a DreamBot process for the given account appears to be running.
+    Return True if a DreamBot window for the given account is already open.
 
-    Checks for a java process with:
-      - 'java' in the process name
-      - '-jar' in the command line
-      - account name in the command line
+    Uses find_window_ids_by_name which we know works on both platforms:
+      - Linux: xdotool search --name
+      - Windows: EnumWindows + title matching (requires "dreambot" AND account name)
 
-    Optionally also matches jar_path if provided.
+    This is more reliable than psutil cmdline inspection which can fail due to
+    process access restrictions on both Linux and Windows.
 
-    Used by the launcher to prevent duplicate client launches.
+    jar_path param kept for API compatibility but not used — window detection
+    is sufficient and more reliable.
 
     Returns: bool
     """
-    if sys.platform.startswith('linux') or sys.platform == 'win32':
-        return _is_account_process_running_psutil(account, jar_path)
-    else:
-        return _is_account_process_running_psutil(account, jar_path)
-
-
-def _is_account_process_running_psutil(account, jar_path=''):
     try:
-        import psutil
-        for proc in psutil.process_iter(['name']):
-            try:
-                name = (proc.info.get('name') or '').lower()
-                if 'java' not in name:
-                    continue
-                # Fetch cmdline separately — can raise on Windows due to access
-                try:
-                    cmdline = proc.cmdline()
-                except (psutil.NoSuchProcess, psutil.AccessDenied,
-                        psutil.ZombieProcess, OSError):
-                    continue
-                cmdline_str = ' '.join(cmdline)
-                if ('-jar' in cmdline_str and account in cmdline_str):
-                    if jar_path and jar_path not in cmdline_str:
-                        continue
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-    except ImportError:
-        pass  # psutil unavailable — cannot detect duplicate launch
-    return False
-
-
-def _is_account_process_running_pgrep(account):
-    try:
-        result = subprocess.run(
-            ['pgrep', '-f', account],
-            capture_output=True, text=True
-        )
-        return bool(result.stdout.strip())
+        wids = find_window_ids_by_name(account)
+        return len(wids) > 0
     except Exception:
         return False
 
-
-# ── Folder / path opening ──────────────────────────────────────────────────────
 
 def open_path(path):
     """
@@ -425,6 +388,11 @@ def _capture_window_image_windows(window_id, out_path):
         try:
             # PW_CLIENTONLY=1, PW_RENDERFULLCONTENT=2 — use 3 for hardware-accelerated apps
             user32.PrintWindow(hwnd, hdc_mem, 3)
+
+            # Wait for GPU compositing before reading bitmap.
+            # DreamBot uses hardware-accelerated Java2D — without this
+            # the captured bitmap may be black mid-frame.
+            import time as _t; _t.sleep(0.15)
 
             class BITMAPINFOHEADER(ctypes.Structure):
                 _fields_ = [
@@ -753,27 +721,48 @@ def _click_at_linux(x, y):
 
 
 def _click_at_windows(x, y):
+    """
+    Click at absolute screen coordinates on Windows.
+
+    Uses WindowFromPoint to find the window under the target coordinates,
+    converts to client-relative coords and sends WM_LBUTTONDOWN/UP directly
+    to that window via PostMessage.
+
+    Works correctly across multiple monitors and any DPI scaling because:
+    - No coordinate normalization needed
+    - No virtual desktop math
+    - Cursor does not physically move
+    - Works regardless of which monitor the window is on
+    """
     try:
         import ctypes
+        from ctypes import wintypes
+
         try:
             ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
         except Exception:
             pass
-        MOUSEEVENTF_MOVE      = 0x0001
-        MOUSEEVENTF_ABSOLUTE  = 0x8000
-        MOUSEEVENTF_LEFTDOWN  = 0x0002
-        MOUSEEVENTF_LEFTUP    = 0x0004
-        # Normalize to 0–65535 range for MOUSEEVENTF_ABSOLUTE
-        # SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN = physical pixels when DPI-aware
-        sm_cx = ctypes.windll.user32.GetSystemMetrics(78) or ctypes.windll.user32.GetSystemMetrics(0)
-        sm_cy = ctypes.windll.user32.GetSystemMetrics(79) or ctypes.windll.user32.GetSystemMetrics(1)
-        ax = int(x * 65535 / max(sm_cx, 1))
-        ay = int(y * 65535 / max(sm_cy, 1))
-        ctypes.windll.user32.SetCursorPos(x, y)
-        ctypes.windll.user32.mouse_event(
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay, 0, 0)
-        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-        ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP,   0, 0, 0, 0)
+
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+
+        class POINT(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+
+        pt = POINT(x, y)
+        hwnd = user32.WindowFromPoint(pt)
+        if not hwnd:
+            return
+
+        # Convert screen coords to client-relative
+        user32.ScreenToClient(hwnd, ctypes.byref(pt))
+        lParam = ctypes.c_long((pt.y << 16) | (pt.x & 0xFFFF))
+
+        WM_LBUTTONDOWN = 0x0201
+        WM_LBUTTONUP   = 0x0202
+        MK_LBUTTON     = 0x0001
+
+        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam)
+        user32.PostMessageW(hwnd, WM_LBUTTONUP,   0,          lParam)
     except Exception:
         pass
 

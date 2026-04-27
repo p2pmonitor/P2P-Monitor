@@ -70,8 +70,10 @@ def _get_active_log_file(folder):
       2. If exactly one .log (no suffix) has an open handle — return it.
       3. If multiple have open handles (duplicate client) — return the one
          with the most recent mtime.
-      4. If none have open handles (client closed) — fall back to newest
-         by filename (existing behaviour).
+      4. If none have open handles or scan is unreliable (Windows) — fall back
+         to most recently modified .log file. This correctly identifies the file
+         DreamBot is actively writing to regardless of filename order, and
+         naturally ignores rotated .log.1 files which won't be touched after rotation.
     """
     log_files = [f for f in _get_log_files(folder)
                  if re.match(r'logfile-\d+\.log$', f.name)]
@@ -91,8 +93,14 @@ def _get_active_log_file(folder):
         # No open handles — fall through to name-based fallback
     except Exception:
         pass
-    # Fallback: newest by filename (highest number = most recent session)
-    return log_files[-1]
+    # Fallback: most recently modified .log file — the one DreamBot is
+    # actively writing to. More reliable than newest-by-filename on Windows
+    # where handle scanning is disabled, and correctly ignores rotated
+    # .log.1 files which won't have been touched since rotation.
+    try:
+        return max(log_files, key=lambda f: f.stat().st_mtime)
+    except Exception:
+        return log_files[-1]
 
 def _fmt_duration(secs):
     """Format a duration in seconds as 'Xh YYm', or '—' if zero/negative."""

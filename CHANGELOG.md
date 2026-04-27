@@ -1,6 +1,45 @@
 # Changelog
 
+## v1.3.7
+### Windows Core Fixes
+- Fixed monitor not detecting script activity on Windows — active log file selection was using newest-by-filename as fallback when handle scan is unreliable; DreamBot creates a new log file on each launch so the newest filename is often a nearly-empty new session file while the real active file is older; now uses most-recently-modified file (mtime) which correctly identifies the file DreamBot is actively writing to
+- Fixed clicks landing on wrong window/monitor — replaced `mouse_event` with `MOUSEEVENTF_ABSOLUTE` with `PostMessage(WM_LBUTTONDOWN/UP)` sent directly to the target window handle; coordinates are client-relative via `ScreenToClient`, no normalization math, works correctly on any monitor layout and any DPI scaling
+- Fixed intermittent black screenshots — added 150ms sleep after `PrintWindow` before reading the bitmap; DreamBot uses hardware-accelerated Java2D (DirectX) and the GPU needs time to composite the frame into the capture buffer
+
+### Duplicate Launch Fix
+- Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
+
 ## v1.3.6
+### Critical Windows Fix — Active Log File Detection
+- Fixed monitor not detecting any script activity on Windows — the fallback log file selection was using newest-by-filename which picked a newly created empty file instead of the file DreamBot was actively writing to; fallback now uses most-recently-modified mtime which correctly identifies the actively-written file regardless of filename order; also naturally ignores rotated .log.1 files which are not touched after rotation
+
+### Windows Click Fix — Multi-Monitor and DPI
+- Replaced mouse_event(MOUSEEVENTF_ABSOLUTE) with PostMessage(WM_LBUTTONDOWN/UP) for all Windows clicks — old approach required coordinate normalization across the virtual desktop which broke on multi-monitor setups; new approach uses WindowFromPoint to find the exact window under the target coordinates, converts to client-relative coords, and sends directly to the window message queue; works correctly on any monitor layout and any DPI scaling, cursor does not physically move
+
+### Windows Screenshot Fix
+- Added 150ms sleep after PrintWindow before reading the bitmap — DreamBot uses hardware-accelerated Java2D rendering; without the sleep the captured bitmap was black mid-frame while the GPU was still compositing
+
+### History Duplicate Fix
+- Fixed duplicate history entries after log rotation — scanned records now use base filename without rotation suffix
+
+### Startup Fix  
+- Fixed startup task appearing for offline accounts — offline accounts now have _startup_done=True set immediately
+
+### Force Command Fixes
+- Fixed all three force commands failing when DreamBot window was minimized — now restores before getting geometry
+- Fixed PrintWindow returning 0x0 client area for minimized windows
+
+### Duplicate Launch Fix
+- Fixed duplicate DreamBot client detection on both Linux and Windows
+
+### Screenshot During Break Fix
+- Fixed scheduled screenshots firing during breaks or for offline accounts
+
+### UI Fixes
+- Launcher tab: selection persists on account rows for Launch Selected; deselects only on action clicks
+- History tab: deselects when clicking empty space
+- Path browse dialogs normalize separators on Windows
+
 ### Bug Fixes
 - Fixed duplicate history entries after log rotation — `logfile-X.log.1` was not recognised as already scanned after rotating from `logfile-X.log`; scanned records now use the base filename (without rotation suffix) so rotated files are correctly skipped
 - Fixed startup task appearing for offline accounts — `get_account_rows` was calling `_startup_catchup` on accounts where `_startup_done=False` because they were skipped at startup; offline accounts now have `_startup_done=True` set immediately
