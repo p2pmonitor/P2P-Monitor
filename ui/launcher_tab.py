@@ -171,9 +171,14 @@ class LauncherTab:
 
         def _run():
             try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL,
-                                 start_new_session=True)
+                import sys
+                kwargs = dict(stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+                if sys.platform == 'win32':
+                    # Suppress the blank CMD window that appears on Windows
+                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                subprocess.Popen(cmd, **kwargs)
                 self.app.after(0, lambda: self.app._log(f'✅ [{account}] Launch started.'))
             except Exception as e:
                 self.app.after(0, lambda: self.app._log(f'❌ [{account}] Launch failed: {e}'))

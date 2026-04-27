@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.3.3
+### Discord Rate Limit Fix
+- Fixed HTTP 429 rate limit errors when adding the mention user to multiple Discord threads on startup — now checks thread membership first (GET before PUT) and skips the add if already a member; on subsequent startups where the user is already in all threads, no PUT requests are made at all
+- If a PUT does hit a 429, waits the `retry_after` duration from the response and retries once before logging failure
+
+### Windows Launcher Fix
+- Fixed blank CMD window appearing when launching DreamBot from the Launcher tab on Windows — added `CREATE_NO_WINDOW` creation flag on Windows so the process launches silently in the background; closing the CMD no longer kills DreamBot; Linux behavior unchanged
+
 ## v1.3.2
 ### Windows Performance Fix
 - Fixed severe Windows lag on monitor start — `open_files()` on Windows queries NtQueryObject for every handle in every Java process; a running DreamBot JVM keeps hundreds of handles open, causing psutil to block for minutes even when filtering to java processes only

@@ -1481,12 +1481,31 @@ class LogWatcher:
                 self._bot_add_user_to_thread(tid, token)
 
     def _bot_add_user_to_thread(self, thread_id, token):
-        """Best-effort: add configured mention user to a Discord thread."""
+        """Best-effort: add configured mention user to a Discord thread.
+        Checks membership first to avoid redundant PUTs.
+        Handles 429 rate limits with a single retry after retry_after delay.
+        """
+        import re as _re, time as _time
         user_id = self.cfg.get('mention_id', '').strip()
         if not user_id or not thread_id:
             return
-        _, err = bot_api(token, 'PUT',
-                         f'/channels/{thread_id}/thread-members/{user_id}')
+        # Check if user is already a member — skip PUT if so
+        data, err = bot_api(token, 'GET',
+                            f'/channels/{thread_id}/thread-members/{user_id}')
+        if data is not None:
+            return  # already a member
+        # Not a member (404) or other error — attempt to add
+        def _put():
+            return bot_api(token, 'PUT',
+                           f'/channels/{thread_id}/thread-members/{user_id}')
+        _, err = _put()
+        if err and '429' in err:
+            # Rate limited — parse retry_after and wait once
+            m = _re.search(r'"retry_after"\s*:\s*([\d.]+)', err)
+            wait = float(m.group(1)) if m else 5.0
+            self._dbg(f'Rate limited adding user to thread {thread_id} — retrying after {wait:.1f}s')
+            _time.sleep(wait)
+            _, err = _put()
         if err:
             self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
         else:
