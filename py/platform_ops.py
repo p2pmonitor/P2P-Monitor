@@ -722,47 +722,57 @@ def _click_at_linux(x, y):
 
 def _click_at_windows(x, y):
     """
-    Click at absolute screen coordinates on Windows.
+    Click at absolute screen coordinates on Windows using mouse_event.
 
-    Uses WindowFromPoint to find the window under the target coordinates,
-    converts to client-relative coords and sends WM_LBUTTONDOWN/UP directly
-    to that window via PostMessage.
+    Java AWT/Swing does not process WM_LBUTTONDOWN/UP sent via PostMessage —
+    Java intercepts raw input at a lower level. We must use mouse_event to
+    simulate real hardware input that Java's event system will receive.
 
-    Works correctly across multiple monitors and any DPI scaling because:
-    - No coordinate normalization needed
-    - No virtual desktop math
-    - Cursor does not physically move
-    - Works regardless of which monitor the window is on
+    Uses MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK for correct coordinate
+    normalization across multiple monitors and any DPI scaling:
+    - SetThreadDpiAwarenessContext(-4) ensures physical pixel coordinates
+    - SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN give the full virtual desktop size
+    - MOUSEEVENTF_VIRTUALDESK normalizes against the full virtual desktop,
+      not just the primary monitor — critical for multi-monitor setups
     """
     try:
         import ctypes
-        from ctypes import wintypes
 
+        # Physical pixel coordinates
         try:
             ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
         except Exception:
             pass
 
-        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        MOUSEEVENTF_MOVE        = 0x0001
+        MOUSEEVENTF_LEFTDOWN    = 0x0002
+        MOUSEEVENTF_LEFTUP      = 0x0004
+        MOUSEEVENTF_ABSOLUTE    = 0x8000
+        MOUSEEVENTF_VIRTUALDESK = 0x4000  # normalize against virtual desktop
 
-        class POINT(ctypes.Structure):
-            _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+        # SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77 — virtual desktop origin
+        # SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79 — virtual desktop size
+        vx = ctypes.windll.user32.GetSystemMetrics(76)  # virtual desktop left
+        vy = ctypes.windll.user32.GetSystemMetrics(77)  # virtual desktop top
+        vw = ctypes.windll.user32.GetSystemMetrics(78)  # virtual desktop width
+        vh = ctypes.windll.user32.GetSystemMetrics(79)  # virtual desktop height
 
-        pt = POINT(x, y)
-        hwnd = user32.WindowFromPoint(pt)
-        if not hwnd:
-            return
+        if vw <= 0: vw = ctypes.windll.user32.GetSystemMetrics(0)
+        if vh <= 0: vh = ctypes.windll.user32.GetSystemMetrics(1)
 
-        # Convert screen coords to client-relative
-        user32.ScreenToClient(hwnd, ctypes.byref(pt))
-        lParam = ctypes.c_long((pt.y << 16) | (pt.x & 0xFFFF))
+        # Normalize to 0-65535 relative to virtual desktop origin
+        ax = int((x - vx) * 65535 / max(vw, 1))
+        ay = int((y - vy) * 65535 / max(vh, 1))
 
-        WM_LBUTTONDOWN = 0x0201
-        WM_LBUTTONUP   = 0x0202
-        MK_LBUTTON     = 0x0001
-
-        user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lParam)
-        user32.PostMessageW(hwnd, WM_LBUTTONUP,   0,          lParam)
+        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+        ctypes.windll.user32.SetCursorPos(x, y)
+        ctypes.windll.user32.mouse_event(flags, ax, ay, 0, 0)
+        ctypes.windll.user32.mouse_event(
+            MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            ax, ay, 0, 0)
+        ctypes.windll.user32.mouse_event(
+            MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            ax, ay, 0, 0)
     except Exception:
         pass
 

@@ -9,6 +9,18 @@
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
 
+## v1.3.7
+### Windows Click & Force Command Fixes
+- Fixed force commands and paint hide/show not working — PostMessage (WM_LBUTTONDOWN/UP) does not work for Java windows; Java AWT/Swing intercepts raw input at a lower level and ignores standard Windows messages; reverted to mouse_event with correct multi-monitor coordinate math
+- Fixed clicks landing on wrong monitor — added MOUSEEVENTF_VIRTUALDESK flag and normalize coordinates against full virtual desktop dimensions (SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN) rather than primary monitor only; also added SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN offsets for virtual desktop origin
+- Fixed triple-click on paint hide/show — removed self-correction logic that re-clicked when detection result was uncertain; with a correct reference snap, one click is sufficient and the self-correction was causing extra clicks when detection was unreliable
+
+### Windows Core Fix
+- Fixed monitor not detecting script activity — active log file fallback now uses most-recently-modified file (mtime) instead of newest by filename; DreamBot creates new log files per launch so newest filename is often an empty new session while activity continues in an older file
+
+### Duplicate Launch Fix
+- Replaced psutil cmdline inspection with window title lookup for duplicate launch detection; psutil cmdline access fails silently on both platforms; window title matching via find_window_ids_by_name is proven to work on both Linux and Windows
+
 ## v1.3.6
 ### Critical Windows Fix — Active Log File Detection
 - Fixed monitor not detecting any script activity on Windows — the fallback log file selection was using newest-by-filename which picked a newly created empty file instead of the file DreamBot was actively writing to; fallback now uses most-recently-modified mtime which correctly identifies the actively-written file regardless of filename order; also naturally ignores rotated .log.1 files which are not touched after rotation

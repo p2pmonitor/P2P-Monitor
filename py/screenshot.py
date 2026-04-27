@@ -427,19 +427,11 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
                 paint_visible = _paint_is_visible(btn_coords, wid=target_wid)
                 if hide_paint and paint_visible:
                     _click_paint_button(btn_coords)
-                    time.sleep(0.2)
-                    # Verify the click had the intended effect — self-correct if not
-                    if _paint_is_visible(btn_coords, wid=target_wid):
-                        _click_paint_button(btn_coords)
-                        time.sleep(0.2)
+                    time.sleep(0.3)
                     did_hide = True
                 elif not hide_paint and not paint_visible:
                     _click_paint_button(btn_coords)
-                    time.sleep(0.2)
-                    # Verify paint is now visible — self-correct if still hidden
-                    if not _paint_is_visible(btn_coords, wid=target_wid):
-                        _click_paint_button(btn_coords)
-                        time.sleep(0.2)
+                    time.sleep(0.3)
 
             ok_cap, err_cap = capture_window_image(target_wid, out_path)
 
