@@ -298,7 +298,7 @@ def _find_window_ids_windows(name):
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = (buf.value or '').lower()
-            if needle in title:
+            if needle in title and 'dreambot' in title:
                 matches.append(str(int(hwnd)))
         except Exception:
             pass
@@ -359,12 +359,14 @@ def _capture_window_image_linux(window_id, out_path):
 
 def _capture_window_image_windows(window_id, out_path):
     """
-    Windows screenshot via PIL.ImageGrab + Win32 GetWindowRect.
-    Both Pillow (for ImageGrab) and ctypes (stdlib) are used.
+    Windows screenshot via PrintWindow Win32 API.
+    Captures the window's own render buffer — works even when the window
+    is in the background, partially covered, or on another monitor.
+    Does NOT require the window to be focused or on screen.
     pywin32 is NOT required — all Win32 calls go through ctypes.
     """
     try:
-        from PIL import ImageGrab
+        from PIL import Image
     except ImportError:
         return False, 'Pillow not installed — run: pip install pillow'
     try:
@@ -379,29 +381,75 @@ def _capture_window_image_windows(window_id, out_path):
         return False, f'invalid window id: {window_id!r}'
 
     try:
+        # DPI awareness so dimensions are in physical pixels
+        try:
+            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            pass
+
         user32 = ctypes.WinDLL('user32', use_last_error=True)
-        user32.IsWindow.argtypes     = [wintypes.HWND]
-        user32.IsWindow.restype      = wintypes.BOOL
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        user32.GetWindowRect.restype  = wintypes.BOOL
+        gdi32  = ctypes.WinDLL('gdi32',  use_last_error=True)
 
         if not user32.IsWindow(hwnd):
             return False, f'window {hwnd} does not exist'
 
         rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-            return False, 'GetWindowRect failed'
+        user32.GetClientRect(hwnd, ctypes.byref(rect))
+        w = rect.right  - rect.left
+        h = rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return False, f'window has no client area ({w}x{h})'
 
-        bbox = (rect.left, rect.top, rect.right, rect.bottom)
-        img  = ImageGrab.grab(bbox=bbox)
+        hdc_screen = user32.GetDC(None)
+        hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
+        hbmp       = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+        gdi32.SelectObject(hdc_mem, hbmp)
+        user32.ReleaseDC(None, hdc_screen)
 
-        p = Path(out_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        img.save(str(p))
+        try:
+            # PW_CLIENTONLY=1, PW_RENDERFULLCONTENT=2 — use 3 for hardware-accelerated apps
+            user32.PrintWindow(hwnd, hdc_mem, 3)
 
-        if p.exists() and p.stat().st_size > 0:
-            return True, ''
-        return False, 'captured image is empty'
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ('biSize',          ctypes.c_uint32),
+                    ('biWidth',         ctypes.c_int32),
+                    ('biHeight',        ctypes.c_int32),
+                    ('biPlanes',        ctypes.c_uint16),
+                    ('biBitCount',      ctypes.c_uint16),
+                    ('biCompression',   ctypes.c_uint32),
+                    ('biSizeImage',     ctypes.c_uint32),
+                    ('biXPelsPerMeter', ctypes.c_int32),
+                    ('biYPelsPerMeter', ctypes.c_int32),
+                    ('biClrUsed',       ctypes.c_uint32),
+                    ('biClrImportant',  ctypes.c_uint32),
+                ]
+
+            bmi           = BITMAPINFOHEADER()
+            bmi.biSize    = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.biWidth   =  w
+            bmi.biHeight  = -h  # negative = top-down
+            bmi.biPlanes  = 1
+            bmi.biBitCount    = 32
+            bmi.biCompression = 0  # BI_RGB
+
+            buf = ctypes.create_string_buffer(w * h * 4)
+            gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+
+            img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1)
+            img = img.convert('RGB')
+
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            img.save(str(p))
+
+            if p.exists() and p.stat().st_size > 0:
+                return True, ''
+            return False, 'captured image is empty'
+        finally:
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(hdc_mem)
+
     except Exception as e:
         return False, str(e)
 
@@ -483,6 +531,10 @@ def _get_window_geometry_windows(wid):
     try:
         import ctypes
         from ctypes import wintypes
+        try:
+            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            pass
         hwnd  = int(str(wid), 0)
         user32 = ctypes.WinDLL('user32', use_last_error=True)
         user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -687,14 +739,18 @@ def _click_at_linux(x, y):
 def _click_at_windows(x, y):
     try:
         import ctypes
-        # MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_LEFTDOWN | LEFTUP
+        try:
+            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            pass
         MOUSEEVENTF_MOVE      = 0x0001
         MOUSEEVENTF_ABSOLUTE  = 0x8000
         MOUSEEVENTF_LEFTDOWN  = 0x0002
         MOUSEEVENTF_LEFTUP    = 0x0004
         # Normalize to 0–65535 range for MOUSEEVENTF_ABSOLUTE
-        sm_cx = ctypes.windll.user32.GetSystemMetrics(0)  # screen width
-        sm_cy = ctypes.windll.user32.GetSystemMetrics(1)  # screen height
+        # SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN = physical pixels when DPI-aware
+        sm_cx = ctypes.windll.user32.GetSystemMetrics(78) or ctypes.windll.user32.GetSystemMetrics(0)
+        sm_cy = ctypes.windll.user32.GetSystemMetrics(79) or ctypes.windll.user32.GetSystemMetrics(1)
         ax = int(x * 65535 / max(sm_cx, 1))
         ay = int(y * 65535 / max(sm_cy, 1))
         ctypes.windll.user32.SetCursorPos(x, y)

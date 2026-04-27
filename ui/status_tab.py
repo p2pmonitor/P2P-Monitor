@@ -87,7 +87,7 @@ class StatusTab:
             relief='flat', padx=8, pady=4, cursor='hand2',
             command=self.refresh).pack(side='right')
 
-        cols = ('account', 'task', 'activity', 'uptime', 'break_time', 'status', 'action')
+        cols = ('account', 'task', 'activity', 'uptime', 'break_time', 'status', 'mute', 'screenshot')
         app._st_tree = ttk.Treeview(f, columns=cols, show='headings', height=22)
         for col, w, lbl in [
             ('account',    160, 'Account'),
@@ -96,7 +96,8 @@ class StatusTab:
             ('uptime',      90, 'Uptime'),
             ('break_time',  90, 'Break Time'),
             ('status',     120, 'Status'),
-            ('action',     180, 'Action'),
+            ('mute',        80, 'Mute'),
+            ('screenshot',  90, 'Screenshot'),
         ]:
             app._st_tree.heading(col, text=lbl)
             app._st_tree.column(col, width=w, minwidth=w if col == 'action' else 40, anchor='w')
@@ -123,6 +124,8 @@ class StatusTab:
         Avoids full delete+insert on every event which is expensive on Windows."""
         app  = self.app
         tree = app._st_tree
+        # Deselect any selected row — no persistent highlight
+        tree.selection_remove(tree.selection())
         # Build current state
         existing = {tree.item(i, 'values')[0]: i
                     for i in tree.get_children()
@@ -139,7 +142,7 @@ class StatusTab:
             mute_lbl = '[ Unmute ]' if r.get('muted') else '[  Mute  ]'
             vals     = (r['account'], r['task'], r['activity'],
                         r.get('uptime', '—'), r.get('break_time', '—'),
-                        r['status'], f"{mute_lbl}  [Screenshot]")
+                        r['status'], mute_lbl, '[Screenshot]')
             if r['account'] in existing:
                 # Update in place — no delete/insert
                 tree.item(existing[r['account']], values=vals, tags=(tag,))
@@ -151,31 +154,30 @@ class StatusTab:
         app = self.app
         if app._st_tree.identify_region(event.x, event.y) != 'cell':
             return None
-        if app._st_tree.identify_column(event.x) != required_col:
-            return None
         item = app._st_tree.identify_row(event.y)
         if not item:
             return None
         return app._st_tree.item(item, 'values')[0], item
 
     def _on_click(self, event):
-        app    = self.app
-        result = self._get_tree_account(event, '#7')
-        if not result:
-            return
-        account, item = result
-        col_bbox = app._st_tree.bbox(item, '#7')
-        if col_bbox:
-            rel_x  = event.x - col_bbox[0]
-            cell_w = col_bbox[2]
-            if rel_x < cell_w * 0.5:
-                app.watcher.toggle_mute(account)
-                self._flash_row(item)
-                self.refresh()
-                return
-        app.watcher.trigger_screenshot(account)
-        self._flash_row(item)
-        self.refresh()
+        app  = self.app
+        # Deselect immediately on any click
+        app._st_tree.selection_remove(app._st_tree.selection())
+        col = app._st_tree.identify_column(event.x)
+        if col == '#7':  # Mute column
+            result = self._get_tree_account(event, '#7')
+            if not result: return
+            account, item = result
+            app.watcher.toggle_mute(account)
+            self._flash_row(item)
+            self.refresh()
+        elif col == '#8':  # Screenshot column
+            result = self._get_tree_account(event, '#8')
+            if not result: return
+            account, item = result
+            app.watcher.trigger_screenshot(account)
+            self._flash_row(item)
+            self.refresh()
 
     def _on_double_click(self, event):
         app    = self.app

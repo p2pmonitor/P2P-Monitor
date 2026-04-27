@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.5
+### Window Matching & Screenshot Fixes
+- Fixed wrong window being captured on Windows — `find_window_ids_by_name` now requires both "DreamBot" AND the account name in the window title, preventing false matches against Discord threads or other windows containing the account name
+- Replaced `ImageGrab.grab()` with `PrintWindow` Win32 API for window capture — captures the window's own render buffer regardless of whether it's in the background, minimized, or covered; eliminates black screenshots
+- Paint button crop on Windows now uses `PrintWindow` + client-relative coordinate crop instead of screen region grab — works correctly regardless of window position or occlusion
+- Added `SetThreadDpiAwarenessContext` to window geometry and click operations — coordinates are physical pixels on all DPI scaling settings; fixes click positions on 125%, 150%, 200% scaled displays
+
+### Paint Reference
+- Added "Snap Paint Reference" button in Settings → Paint Reference — focuses a DreamBot window, captures the paint button region, saves as reference, restores focus; includes instructions for correct state
+- Paint reference capture now passes window handle (`wid`) through the detection chain so crops use `PrintWindow` rather than screen grabs
+
+### UI Polish
+- Split status tab action column into separate Mute and Screenshot columns — each has its own click zone, no more guessing the midpoint
+- Split launcher tab action column into separate Launch, Edit, and Delete columns — same fix
+- Treeview rows deselect on click and on refresh — no persistent blue highlight
+
 ## v1.3.4
 ### Windows Debug Noise Fix
 - Fixed repeated `[DEBUG] handle scan unreliable` messages appearing in the monitor log on Windows — the message now only logs once per session on first occurrence instead of every time `check_active_sessions` or `_is_folder_active` runs

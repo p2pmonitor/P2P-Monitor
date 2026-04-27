@@ -66,7 +66,7 @@ def _get_paint_btn_coords(wid, env=None):
     return (x + PAINT_BTN_X_OFFSET, y + h - PAINT_BTN_Y_OFFSET)
 
 # ── Paint state detection ──────────────────────────────────────────────────────
-def _capture_btn_crop(btn_coords, env=None):
+def _capture_btn_crop(btn_coords, env=None, wid=None):
     """Capture a crop of the paint button area. Returns path to temp file or None."""
     import sys
     bx, by = btn_coords
@@ -81,17 +81,37 @@ def _capture_btn_crop(btn_coords, env=None):
             capture_output=True, timeout=5, env=env)
         return tmp if Path(tmp).exists() else None
     else:
-        # Windows: use Pillow ImageGrab for screen region capture
+        # Windows: capture full window via PrintWindow then crop the button region.
+        # Works regardless of window occlusion or focus state.
+        # Requires wid to be passed through from the caller.
+        if wid is None:
+            return None
         try:
-            from PIL import ImageGrab
-            bbox = (x0, y0, x0 + PAINT_BTN_CROP_W, y0 + PAINT_BTN_CROP_H)
-            img  = ImageGrab.grab(bbox=bbox)
-            img.save(tmp)
+            from PIL import Image
+            from py.platform_ops import capture_window_image, get_window_geometry
+            tmp_full = str(Path.home() / ".p2p_monitor" / "_paint_full_cap.png")
+            ok, err  = capture_window_image(wid, tmp_full)
+            if not ok or not Path(tmp_full).exists():
+                return None
+            # Convert absolute screen coords to window-client-relative coords
+            geom = get_window_geometry(wid)
+            if not geom:
+                return None
+            win_x, win_y, win_w, win_h = geom
+            rel_x0 = x0 - win_x
+            rel_y0 = y0 - win_y
+            img  = Image.open(tmp_full)
+            crop = img.crop((rel_x0, rel_y0,
+                             rel_x0 + PAINT_BTN_CROP_W,
+                             rel_y0 + PAINT_BTN_CROP_H))
+            crop.save(tmp)
+            try: Path(tmp_full).unlink(missing_ok=True)
+            except Exception: pass
             return tmp if Path(tmp).exists() else None
         except Exception:
             return None
 
-def _paint_is_visible(btn_coords, env=None):
+def _paint_is_visible(btn_coords, env=None, wid=None):
     """Return True if paint overlay is currently visible.
     Falls back to True (assume visible) on any failure so capture always proceeds.
     Linux: ImageMagick compare. Windows: Pillow ImageChops.difference.
@@ -99,7 +119,7 @@ def _paint_is_visible(btn_coords, env=None):
     import sys
     if not PAINT_REF_FILE.exists():
         return True
-    crop = _capture_btn_crop(btn_coords, env)
+    crop = _capture_btn_crop(btn_coords, env, wid=wid)
     if not crop:
         return True  # capture failed — assume visible, fail safe
     try:
@@ -134,8 +154,8 @@ def _paint_is_visible(btn_coords, env=None):
             pass
     return True
 
-def _save_paint_reference(btn_coords, env=None, log=None, debug=False):
-    crop = _capture_btn_crop(btn_coords, env)
+def _save_paint_reference(btn_coords, env=None, log=None, debug=False, wid=None):
+    crop = _capture_btn_crop(btn_coords, env, wid=wid)
     if crop:
         try:
             shutil.move(crop, str(PAINT_REF_FILE))
@@ -296,6 +316,78 @@ class ScreenshotService:
                 self._queue.task_done()
 
 
+
+
+def snap_paint_reference(log=None):
+    """
+    Capture a fresh paint reference image from the first available DreamBot window.
+    Focuses the window briefly, captures the paint button region, saves reference,
+    then restores focus to the monitor.
+    Returns (ok: bool, msg: str).
+    """
+    import sys
+    from py.platform_ops import find_window_ids_by_name, get_focused_window
+    from py.platform_ops import raise_and_focus_window
+
+    # Find any DreamBot window
+    # Try common account patterns — find_window_ids_by_name with just "dreambot"
+    import ctypes
+    wids = []
+    if sys.platform == 'win32':
+        # On Windows enumerate all DreamBot windows directly
+        try:
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL('user32')
+            results = []
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _):
+                try:
+                    if not user32.IsWindowVisible(hwnd): return True
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length <= 0: return True
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    if 'dreambot' in (buf.value or '').lower():
+                        results.append(str(int(hwnd)))
+                except Exception: pass
+                return True
+            user32.EnumWindows(_enum, 0)
+            wids = results
+        except Exception:
+            pass
+    else:
+        from py.platform_ops import find_window_ids_by_name
+        wids = find_window_ids_by_name('dreambot')
+
+    if not wids:
+        return False, 'No DreamBot window found — make sure DreamBot is running'
+
+    wid = wids[0]
+    restore_wid = get_focused_window()
+
+    try:
+        import time
+        raise_and_focus_window(wid)
+        time.sleep(0.4)  # wait for window to render
+
+        btn_coords = _get_paint_btn_coords(wid)
+        if not btn_coords:
+            return False, 'Could not determine paint button position'
+
+        _save_paint_reference(btn_coords, wid=wid, log=log)
+
+        if PAINT_REF_FILE.exists() and PAINT_REF_FILE.stat().st_size > 0:
+            if log: log('✅ Paint reference snapped successfully')
+            return True, 'Paint reference saved'
+        else:
+            return False, 'Snap failed — reference file not created'
+    finally:
+        if restore_wid:
+            try:
+                raise_and_focus_window(restore_wid)
+            except Exception:
+                pass
+
 def take_screenshot(account_name, restore_wid=None, hide_paint=False):
     """
     Capture DreamBot window for account. Returns (path, err).
@@ -331,13 +423,13 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
             did_hide   = False
             if btn_coords and supports_paint_detection():
                 if not PAINT_REF_FILE.exists():
-                    _save_paint_reference(btn_coords)
-                paint_visible = _paint_is_visible(btn_coords)
+                    _save_paint_reference(btn_coords, wid=target_wid)
+                paint_visible = _paint_is_visible(btn_coords, wid=target_wid)
                 if hide_paint and paint_visible:
                     _click_paint_button(btn_coords)
                     time.sleep(0.2)
                     # Verify the click had the intended effect — self-correct if not
-                    if _paint_is_visible(btn_coords):
+                    if _paint_is_visible(btn_coords, wid=target_wid):
                         _click_paint_button(btn_coords)
                         time.sleep(0.2)
                     did_hide = True
@@ -345,7 +437,7 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
                     _click_paint_button(btn_coords)
                     time.sleep(0.2)
                     # Verify paint is now visible — self-correct if still hidden
-                    if not _paint_is_visible(btn_coords):
+                    if not _paint_is_visible(btn_coords, wid=target_wid):
                         _click_paint_button(btn_coords)
                         time.sleep(0.2)
 

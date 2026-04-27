@@ -387,6 +387,32 @@ class SettingsTab:
         tk.Label(stats_row, text="  (sends version + OS on startup, no personal data)",
             font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
 
+        # ── Paint reference snap ───────────────────────────────────────────────
+        section("PAINT REFERENCE")
+        snap_info = tk.Frame(inner, bg=app.BG2); snap_info.pack(fill='x', padx=16, pady=(4,2))
+        tk.Label(snap_info,
+            text="Make sure paint is VISIBLE (Hide button showing) on a DreamBot client, then click Snap.",
+            font=app.MONO, bg=app.BG2, fg=app.FG2, wraplength=600, justify='left').pack(side='left')
+        snap_row = tk.Frame(inner, bg=app.BG2); snap_row.pack(fill='x', padx=16, pady=(0,8))
+        self._snap_lbl = tk.Label(snap_row, text="", font=app.MONO, bg=app.BG2, fg=app.GREEN)
+        def _do_snap():
+            self._snap_lbl.configure(text="⏳ Snapping...", fg=app.YEL)
+            app.update_idletasks()
+            def _snap():
+                from py.screenshot import snap_paint_reference
+                ok, msg = snap_paint_reference(log=app._log)
+                def _done():
+                    self._snap_lbl.configure(
+                        text=f"✅ {msg}" if ok else f"❌ {msg}",
+                        fg=app.GREEN if ok else app.RED)
+                app.after(0, _done)
+            import threading
+            threading.Thread(target=_snap, daemon=True).start()
+        tk.Button(snap_row, text="📸  Snap Paint Reference", font=app.MONOL,
+            bg=app.BG3, fg=app.ACC, relief='flat', padx=14, pady=6,
+            cursor='hand2', command=_do_snap).pack(side='left')
+        self._snap_lbl.pack(side='left', padx=12)
+
         tk.Frame(inner, bg=app.BG2, height=8).pack()
         tk.Button(inner, text="💾  SAVE SETTINGS", font=app.MONOL,
             bg=app.ACC, fg=app.BG, relief='flat', padx=20, pady=8,

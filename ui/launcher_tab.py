@@ -47,13 +47,17 @@ class LauncherTab:
         list_frame = tk.Frame(f, bg=app.BG)
         list_frame.pack(fill='both', expand=True, padx=10, pady=4)
 
-        cols = ('account', 'actions')
+        cols = ('account', 'launch', 'edit', 'delete')
         self._tree = ttk.Treeview(list_frame, columns=cols, show='headings',
                                   selectmode='extended', height=16)
         self._tree.heading('account', text='Account')
-        self._tree.heading('actions', text='')
+        self._tree.heading('launch',  text='')
+        self._tree.heading('edit',    text='')
+        self._tree.heading('delete',  text='')
         self._tree.column('account', width=400, anchor='w')
-        self._tree.column('actions', width=260, anchor='center')
+        self._tree.column('launch',  width=90,  anchor='center')
+        self._tree.column('edit',    width=80,  anchor='center')
+        self._tree.column('delete',  width=80,  anchor='center')
 
         vsb = ttk.Scrollbar(list_frame, orient='vertical', command=self._tree.yview)
         self._tree.configure(yscrollcommand=vsb.set)
@@ -104,31 +108,24 @@ class LauncherTab:
         for i, p in enumerate(presets):
             self._tree.insert('', 'end', iid=str(i),
                               values=(p.get('account', '—'),
-                                      '[ Launch ]    [ Edit ]    [ Delete ]'))
+                                      '[ Launch ]', '[ Edit ]', '[ Delete ]'))
 
     def _on_tree_click(self, event):
+        # Deselect on any click for clean UI
+        self._tree.selection_remove(self._tree.selection())
         region = self._tree.identify_region(event.x, event.y)
         if region != 'cell':
             return
-        col = self._tree.identify_column(event.x)
-        if col != '#2':
-            return
+        col  = self._tree.identify_column(event.x)
         item = self._tree.identify_row(event.y)
         if not item:
             return
         idx = int(item)
-        bbox = self._tree.bbox(item, '#2')
-        if not bbox:
-            return
-        rel_x = event.x - bbox[0]
-        w     = bbox[2]
-        # Divide the actions column into three equal zones
-        zone = rel_x / w
-        if zone < 0.33:
+        if col == '#2':   # Launch
             self._launch_one(idx)
-        elif zone < 0.66:
+        elif col == '#3': # Edit
             self._edit_preset(idx)
-        else:
+        elif col == '#4': # Delete
             self._delete_preset(idx)
 
     def _launch_one(self, idx):
