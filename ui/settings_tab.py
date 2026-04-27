@@ -159,7 +159,7 @@ class SettingsTab:
         inst_btn.pack(side='left', fill='x', expand=True)
         tk.Label(inst_inner,
             text="  Setup:\n"
-                 "  1. discord.com/developers → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
+                 "  1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
                  "  2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
                  "  3. OAuth2 → URL Generator → Scope: bot → Permissions: Send Messages,\n"
                  "     Read Message History, Manage Channels, Manage Webhooks,\n"

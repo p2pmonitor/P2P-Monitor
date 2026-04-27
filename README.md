@@ -116,7 +116,7 @@ Set your DreamBot log folder path in **Settings → Log Folder**. Each subfolder
 4. Hit **Save**
 
 ### Discord — bot mode
-1. Go to [discord.com/developers](https://discord.com/developers) → New Application → Bot → Reset Token → copy token
+1. Go to [discord.com/developers/home](https://discord.com/developers/home) → New Application → Bot → Reset Token → copy token
 2. Enable **Message Content Intent** under Privileged Gateway Intents
 3. OAuth2 → URL Generator → Scope: `bot` → Permissions: Send Messages, Read Message History, Manage Channels, Manage Webhooks, View Channels, Embed Links, Attach Files, Create Public Threads, Send Messages in Threads, Manage Threads, Use Slash Commands
 4. Open the generated URL → select your server → Authorize

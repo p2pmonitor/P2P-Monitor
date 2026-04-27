@@ -7,6 +7,7 @@ from tkinter import ttk
 class StatusTab:
     def __init__(self, app, parent_frame):
         self.app = app
+        self._refresh_in_flight = False  # prevents thread accumulation
         self._build(parent_frame)
         self._tick_uptime()  # start lightweight minute ticker
 
@@ -54,13 +55,21 @@ class StatusTab:
         threading.Thread(target=_do, daemon=True).start()
 
     def push_refresh(self):
-        """Lightweight push from watcher events — no check_active_sessions."""
+        """Lightweight push from watcher events — no check_active_sessions.
+        Guarded by _refresh_in_flight to prevent thread accumulation on Windows
+        where each thread takes long enough that multiple can pile up."""
         app = self.app
         if not app.watcher:
             return
+        if self._refresh_in_flight:
+            return
+        self._refresh_in_flight = True
         def _do():
-            rows = app.watcher.get_account_rows()
-            app.after(0, lambda: self._update_tree(rows))
+            try:
+                rows = app.watcher.get_account_rows()
+                app.after(0, lambda: self._update_tree(rows))
+            finally:
+                self._refresh_in_flight = False
         threading.Thread(target=_do, daemon=True).start()
 
     def on_tab_shown(self):
@@ -110,18 +119,32 @@ class StatusTab:
             font=app.MONO, bg=app.BG2, fg=app.FG2).pack(pady=4)
 
     def _update_tree(self, rows):
-        app = self.app
-        for item in app._st_tree.get_children():
-            app._st_tree.delete(item)
+        """Update status tree in place — only rebuild if accounts changed.
+        Avoids full delete+insert on every event which is expensive on Windows."""
+        app  = self.app
+        tree = app._st_tree
+        # Build current state
+        existing = {tree.item(i, 'values')[0]: i
+                    for i in tree.get_children()
+                    if tree.item(i, 'values')}
+        new_accounts = [r['account'] for r in rows]
+        # If account set changed, full rebuild is unavoidable
+        if set(existing.keys()) != set(new_accounts):
+            for item in tree.get_children():
+                tree.delete(item)
+            existing = {}
         for r in rows:
-            s   = r['status']
-            tag = 'silent' if '🔴' in s else ('quiet' if '🟡' in s else 'ok')
+            s        = r['status']
+            tag      = 'silent' if '🔴' in s else ('quiet' if '🟡' in s else 'ok')
             mute_lbl = '[ Unmute ]' if r.get('muted') else '[  Mute  ]'
-            app._st_tree.insert('', 'end',
-                values=(r['account'], r['task'], r['activity'],
+            vals     = (r['account'], r['task'], r['activity'],
                         r.get('uptime', '—'), r.get('break_time', '—'),
-                        r['status'], f"{mute_lbl}  [Screenshot]"),
-                tags=(tag,))
+                        r['status'], f"{mute_lbl}  [Screenshot]")
+            if r['account'] in existing:
+                # Update in place — no delete/insert
+                tree.item(existing[r['account']], values=vals, tags=(tag,))
+            else:
+                tree.insert('', 'end', values=vals, tags=(tag,))
 
     def _get_tree_account(self, event, required_col):
         """Return (account, item) tuple if event is a cell click on required_col, else None."""

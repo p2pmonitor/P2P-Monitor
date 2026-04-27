@@ -805,6 +805,18 @@ class LogWatcher:
                     display = last_task or last_activity or '?'
                     self.log(f"📋 [{folder}] Startup task: {display}" +
                              (f" / {last_activity}" if last_activity and last_task else ''))
+                elif state.on_break:
+                    # Mid-break restart: slice_last_task returns empty because
+                    # the last NEW TASK block is followed by BREAK START.
+                    # Show the break with its length so the status tab is useful.
+                    from py.util import format_break_duration
+                    state.last_task = 'Break'
+                    if 'break_length_ms' in dir() and break_length_ms:
+                        state.last_activity = format_break_duration(break_length_ms)
+                    else:
+                        state.last_activity = ''
+                    self.log(f"📋 [{folder}] Startup task: Break" +
+                             (f" / {state.last_activity}" if state.last_activity else ''))
                 else:
                     if state.script_running:
                         self.log(f"⚠ [{folder}] No task found in active log")
