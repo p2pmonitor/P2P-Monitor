@@ -257,10 +257,13 @@ class HistoryTab:
     def _on_click(self, event):
         region = self._tree.identify_region(event.x, event.y)
         if region != 'cell':
+            # Click outside any row — deselect
+            self._tree.selection_remove(self._tree.selection())
             return
         col  = self._tree.identify_column(event.x)
         item = self._tree.identify_row(event.y)
         if not item or self._tree.parent(item):
+            self._tree.selection_remove(self._tree.selection())
             return
         if col != '#4':
             return

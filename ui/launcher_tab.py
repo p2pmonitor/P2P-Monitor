@@ -99,7 +99,8 @@ class LauncherTab:
             filetypes=[('JAR files', '*.jar'), ('All files', '*.*')]
         )
         if path:
-            self._jar_var.set(path)
+            import os
+            self._jar_var.set(os.path.normpath(path))
 
     def _refresh_tree(self):
         for item in self._tree.get_children():
@@ -111,10 +112,10 @@ class LauncherTab:
                                       '[ Launch ]', '[ Edit ]', '[ Delete ]'))
 
     def _on_tree_click(self, event):
-        # Deselect on any click for clean UI
-        self._tree.selection_remove(self._tree.selection())
         region = self._tree.identify_region(event.x, event.y)
         if region != 'cell':
+            # Click outside rows — deselect
+            self._tree.selection_remove(self._tree.selection())
             return
         col  = self._tree.identify_column(event.x)
         item = self._tree.identify_row(event.y)
@@ -122,11 +123,15 @@ class LauncherTab:
             return
         idx = int(item)
         if col == '#2':   # Launch
+            self._tree.selection_remove(self._tree.selection())
             self._launch_one(idx)
         elif col == '#3': # Edit
+            self._tree.selection_remove(self._tree.selection())
             self._edit_preset(idx)
         elif col == '#4': # Delete
+            self._tree.selection_remove(self._tree.selection())
             self._delete_preset(idx)
+        # Account column (#1) — allow selection to persist for Launch Selected
 
     def _launch_one(self, idx):
         presets = self.app.cfg.get('launcher_presets', [])

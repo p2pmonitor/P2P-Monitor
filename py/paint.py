@@ -7,7 +7,8 @@ All coordinates are offsets from the bottom-left of the DreamBot window.
 import time
 
 from py.platform_ops import (find_window_ids_by_name, get_focused_window,
-                             get_window_geometry, raise_and_focus_window, click_at)
+                             get_window_geometry, raise_and_focus_window, click_at,
+                             is_window_minimized, restore_window)
 
 # ── Paint button (hide/show toggle) ───────────────────────────────────────────
 PAINT_BTN_X_OFFSET = 100   # right from window left edge
@@ -113,11 +114,6 @@ def do_force_skill(account, action, log=None, window_lock=None):
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = get_window_geometry(wid)
-    if not geom:
-        if log:
-            log(f"  ⚠ [{account}] Could not get window geometry")
-        return
 
     if log:
         log(f"🎯 [{account}] Forcing {action}")
@@ -127,9 +123,18 @@ def do_force_skill(account, action, log=None, window_lock=None):
     with ctx:
         restore_wid = get_focused_window()
         try:
+            was_minimized = is_window_minimized(wid)
+            if was_minimized:
+                restore_window(wid)
+                time.sleep(0.5)
             raise_and_focus_window(wid)
-            time.sleep(0.3)
+            time.sleep(0.4 if was_minimized else 0.3)
 
+            geom = get_window_geometry(wid)
+            if not geom:
+                if log:
+                    log(f"  ⚠ [{account}] Could not get window geometry")
+                return
             x, y, w, h = geom
             click_x = x + offset_x
             click_y = y + h - offset_y
@@ -161,11 +166,6 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = get_window_geometry(wid)
-    if not geom:
-        if log:
-            log(f"  ⚠ [{account}] Could not get window geometry")
-        return
 
     if log:
         log(f"📊 [{account}] Opening {action} panel for screenshot")
@@ -175,8 +175,21 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
     with ctx:
         restore_wid = get_focused_window()
         try:
+            # Restore if minimized, then focus — do this BEFORE getting geometry
+            # so GetWindowRect/GetClientRect return valid dimensions
+            was_minimized = is_window_minimized(wid)
+            if was_minimized:
+                restore_window(wid)
+                time.sleep(0.5)
             raise_and_focus_window(wid)
-            time.sleep(0.3)
+            time.sleep(0.4 if was_minimized else 0.3)
+
+            # Get geometry after window is visible and focused
+            geom = get_window_geometry(wid)
+            if not geom:
+                if log:
+                    log(f"  ⚠ [{account}] Could not get window geometry")
+                return
 
             x, y, w, h = geom
             click_x = x + offset_x
@@ -184,20 +197,17 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
 
             # Open panel
             _click(click_x, click_y)
-            time.sleep(0.15)
+            time.sleep(0.2)
 
             # Screenshot while panel is open (full window) — runs inside the lock
             if screenshot_cb:
                 screenshot_cb()
 
-            # Close panel immediately
+            # Close panel
             _click(click_x, click_y)
         finally:
             if restore_wid and restore_wid != wid:
                 raise_and_focus_window(restore_wid)
-
-    if log:
-        log(f"✅ [{account}] {action} panel screenshot done")
 
 
 # ── Force: time adjustment (click N times) ────────────────────────────────────
@@ -218,11 +228,6 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
         if log:
             log(f"  ⚠ [{account}] No window found")
         return
-    geom = get_window_geometry(wid)
-    if not geom:
-        if log:
-            log(f"  ⚠ [{account}] Could not get window geometry")
-        return
 
     if log:
         log(f"⏱ [{account}] Clicking {adjustment} × {amount}")
@@ -232,9 +237,18 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
     with ctx:
         restore_wid = get_focused_window()
         try:
+            was_minimized = is_window_minimized(wid)
+            if was_minimized:
+                restore_window(wid)
+                time.sleep(0.5)
             raise_and_focus_window(wid)
-            time.sleep(0.3)
+            time.sleep(0.4 if was_minimized else 0.3)
 
+            geom = get_window_geometry(wid)
+            if not geom:
+                if log:
+                    log(f"  ⚠ [{account}] Could not get window geometry")
+                return
             x, y, w, h = geom
             click_x = x + offset_x
             click_y = y + h - offset_y

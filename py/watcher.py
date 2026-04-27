@@ -415,8 +415,10 @@ class LogWatcher:
         with self._accounts_lock:
             snapshot = list(self._accounts.items())
         for name, state in snapshot:
-            if state.on_break:
-                continue
+            if state.on_break or state._break_start_ts:
+                continue  # account is on break
+            if not state.script_running:
+                continue  # account is offline
             if time.time() - state.last_screenshot_ts >= threshold:
                 state.last_screenshot_ts = time.time()
                 due.append(name)
@@ -595,6 +597,9 @@ class LogWatcher:
                 with self._accounts_lock:
                     if folder_name not in self._accounts:
                         self._accounts[folder_name] = AccountState(folder_name)
+                    # Mark startup done so get_account_rows never re-triggers
+                    # _startup_catchup on this offline account
+                    self._accounts[folder_name]._startup_done = True
                 self.log(f"📋 [{folder_name}] No active session — showing Offline")
             t = threading.Thread(target=self._backfill_history, args=(d,), daemon=True)
             t.start()
@@ -830,6 +835,17 @@ class LogWatcher:
             self.log(f"⚠ Startup scan error [{e.__class__.__name__}]: {e}")
 
     # ── Backfill ───────────────────────────────────────────────────────────────
+    @staticmethod
+    def _base_log_name(fname):
+        """Strip rotation suffix from log filename.
+        logfile-X.log.1 -> logfile-X.log
+        logfile-X.log   -> logfile-X.log
+        Ensures rotated files are recognised as already scanned
+        when their base name was recorded before rotation.
+        """
+        import re as _re
+        return _re.sub(r'\.\d+$', '', fname)
+
     def _backfill_history(self, folder):
         # TODO: _backfill_history handles file selection, offset restore, chunked parsing,
         # and history dispatch. Split when adding new backfill-specific event handling.
@@ -878,7 +894,7 @@ class LogWatcher:
                 # Skip already-scanned rotated files only.
                 # Always process the active file — it may have grown, and on upgrade
                 # from older versions it may already have a stale scan record.
-                if not is_active and fname in scanned:
+                if not is_active and self._base_log_name(fname) in scanned:
                     continue
 
                 try:
@@ -1021,7 +1037,8 @@ class LogWatcher:
                 # Only record completed rotated files as scanned.
                 # Active file resume is handled by offsets.json, not history.
                 if not is_active:
-                    record_log_scanned(account, fname)
+                    # Record base name so future rotations are recognised
+                    record_log_scanned(account, self._base_log_name(fname))
                 total_entries  += entries_this_file
                 files_scanned  += 1
 

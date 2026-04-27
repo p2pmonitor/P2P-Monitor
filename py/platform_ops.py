@@ -155,14 +155,19 @@ def is_account_process_running(account, jar_path=''):
 def _is_account_process_running_psutil(account, jar_path=''):
     try:
         import psutil
-        for proc in psutil.process_iter(['name', 'cmdline']):
+        for proc in psutil.process_iter(['name']):
             try:
-                cmdline = proc.info.get('cmdline') or []
-                cmdline_str = ' '.join(cmdline)
                 name = (proc.info.get('name') or '').lower()
-                if ('java' in name and
-                        '-jar' in cmdline_str and
-                        account in cmdline_str):
+                if 'java' not in name:
+                    continue
+                # Fetch cmdline separately — can raise on Windows due to access
+                try:
+                    cmdline = proc.cmdline()
+                except (psutil.NoSuchProcess, psutil.AccessDenied,
+                        psutil.ZombieProcess, OSError):
+                    continue
+                cmdline_str = ' '.join(cmdline)
+                if ('-jar' in cmdline_str and account in cmdline_str):
                     if jar_path and jar_path not in cmdline_str:
                         continue
                     return True
@@ -392,6 +397,17 @@ def _capture_window_image_windows(window_id, out_path):
 
         if not user32.IsWindow(hwnd):
             return False, f'window {hwnd} does not exist'
+
+        # Restore window if minimized — GetClientRect returns 0x0 for minimized windows
+        SW_RESTORE = 9
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype  = wintypes.BOOL
+        user32.IsIconic.argtypes   = [wintypes.HWND]
+        user32.IsIconic.restype    = wintypes.BOOL
+        was_minimized = bool(user32.IsIconic(hwnd))
+        if was_minimized:
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            import time as _time; _time.sleep(0.3)
 
         rect = wintypes.RECT()
         user32.GetClientRect(hwnd, ctypes.byref(rect))

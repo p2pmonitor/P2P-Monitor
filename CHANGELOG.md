@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.6
+### Bug Fixes
+- Fixed duplicate history entries after log rotation — `logfile-X.log.1` was not recognised as already scanned after rotating from `logfile-X.log`; scanned records now use the base filename (without rotation suffix) so rotated files are correctly skipped
+- Fixed startup task appearing for offline accounts — `get_account_rows` was calling `_startup_catchup` on accounts where `_startup_done=False` because they were skipped at startup; offline accounts now have `_startup_done=True` set immediately
+- Fixed all three force commands (`do_force_panel`, `do_force_skill`, `do_force`) getting window geometry before focusing — if the window was minimized, geometry returned `None` and the command bailed silently; now restores if minimized, focuses, waits, then gets geometry
+- Fixed `capture_window_image` (`PrintWindow`) failing with `window has no client area (0x0)` when window is minimized — now restores window before calling `GetClientRect`
+- Increased sleep after restore from minimized to 0.5s (was 0.3s) — gives window time to render before geometry query and click
+
+### UI Fixes
+- Fixed launcher tab deselecting account immediately on click — selection now persists for account rows so "Launch Selected" works; deselect only fires on action column clicks (Launch/Edit/Delete) and clicks outside rows
+- Fixed history tab not deselecting on click outside a row — now deselects when clicking empty space or non-row regions
+- Added os.path.normpath to path browse callbacks in Settings and Launcher — normalises forward/back slashes from filedialog on Windows
+- Fixed duplicate launch detection on both Linux and Windows — psutil cmdline fetched upfront via process_iter can return empty/None for processes that change state during iteration; now filters to java processes first then calls proc.cmdline() individually with per-process error handling
+- Fixed scheduled screenshots firing during breaks — break check now also tests _break_start_ts (covers transition states) and script_running (skips offline accounts)
+
 ## v1.3.5
 ### Window Matching & Screenshot Fixes
 - Fixed wrong window being captured on Windows — `find_window_ids_by_name` now requires both "DreamBot" AND the account name in the window title, preventing false matches against Discord threads or other windows containing the account name

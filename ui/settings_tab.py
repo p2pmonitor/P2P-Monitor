@@ -464,7 +464,8 @@ class SettingsTab:
     def _browse_dir(self):
         d = filedialog.askdirectory(title="Select DreamBot log folder")
         if d:
-            self._vars['logs_root'].set(d)
+            import os
+            self._vars['logs_root'].set(os.path.normpath(d))
 
     def _test_webhooks(self):
         self.save()
