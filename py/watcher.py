@@ -499,11 +499,14 @@ class LogWatcher:
         """
         scan = get_open_log_handles()
         if not scan.reliable:
-            # Cannot trust handle scan — skip all offline transitions
-            for d in self._get_log_dirs():
-                folder = os.path.basename(d)
-                self._dbg(f'handle scan unreliable ({scan.reason}) — '
-                          f'skipping offline check for {folder}')
+            # Cannot trust handle scan — skip all offline transitions.
+            # Only log once per session to avoid spamming the monitor tab.
+            if not getattr(self, '_unreliable_scan_logged', False):
+                for d in self._get_log_dirs():
+                    folder = os.path.basename(d)
+                    self._dbg(f'handle scan unreliable ({scan.reason}) — '
+                              f'skipping offline check for {folder}')
+                self._unreliable_scan_logged = True
             self.on_status()
             return
         for d in self._get_log_dirs():
@@ -534,8 +537,10 @@ class LogWatcher:
         try:
             scan = get_open_log_handles()
             if not scan.reliable:
-                self._dbg(f'handle scan unreliable ({scan.reason}) — '
-                          f'skipping offline check for {folder}')
+                if not getattr(self, '_unreliable_scan_logged', False):
+                    self._dbg(f'handle scan unreliable ({scan.reason}) — '
+                              f'skipping offline check for {folder}')
+                    self._unreliable_scan_logged = True
                 return True  # Fail open — cannot confirm stale
             norm_folder = normalize_path(str(folder))
             return any(p.startswith(norm_folder + os.sep) or p == norm_folder
@@ -1477,8 +1482,11 @@ class LogWatcher:
             self.cfg['bot_thread_ids'] = thread_ids
             self._save_cfg()
             self.log(f"🤖 Threads ready for account: {account}")
-            for tid in acct_threads.values():
-                self._bot_add_user_to_thread(tid, token)
+        # Always verify membership for all threads — cheap GET check,
+        # adds user only if missing. Handles the case where the user
+        # was removed from a thread between sessions.
+        for tid in acct_threads.values():
+            self._bot_add_user_to_thread(tid, token)
 
     def _bot_add_user_to_thread(self, thread_id, token):
         """Best-effort: add configured mention user to a Discord thread.
