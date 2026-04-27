@@ -110,52 +110,23 @@ def _get_open_log_handles_linux():
 
 def _get_open_log_handles_windows():
     """
-    Windows implementation via psutil.
+    Windows: returns reliable=False unconditionally.
 
-    Reliability rules:
-      - psutil not installed              → unreliable (cannot check at all)
-      - scan completes, even with some    → reliable (partial AccessDenied is
-        AccessDenied on individual procs    normal on Windows, not a failure)
-      - scan raises at top level          → unreliable
-      - psutil iterates zero processes    → unreliable (pathological — means
-        (not zero open files)               psutil itself is broken)
+    psutil open_files() on Windows queries NtQueryObject for every handle
+    in the process. A running JVM (DreamBot) keeps hundreds of handles open,
+    making this call block for minutes. Even filtering to java processes only
+    did not help — the per-process open_files() call itself is the bottleneck.
+
+    Returning reliable=False causes the watcher to:
+      - use name-based log file selection (newest logfile-*.log)
+      - skip forced offline transitions
+      - skip EOF pinning on stop
+
+    This is the correct tradeoff for Windows — fast and stable beats
+    theoretically precise but practically blocking for minutes.
     """
-    try:
-        import psutil
-    except ImportError:
-        return HandleScanResult(set(), reliable=False,
-                                reason='psutil not installed')
-
-    open_paths  = set()
-    proc_count  = 0
-    try:
-        # Filter to java/javaw only — DreamBot always runs as a Java process.
-        # Scanning all processes via open_files() is expensive on Windows;
-        # filtering reduces the scan from 100+ processes to 2-5.
-        for proc in psutil.process_iter(['name', 'open_files']):
-            try:
-                name = (proc.info.get('name') or '').lower()
-                if 'java' not in name:
-                    continue
-                proc_count += 1
-                files = proc.info.get('open_files') or []
-                for f in files:
-                    try:
-                        open_paths.add(normalize_path(f.path))
-                    except Exception:
-                        continue
-            except (psutil.NoSuchProcess, psutil.AccessDenied,
-                    psutil.ZombieProcess):
-                continue
-            except Exception:
-                continue
-    except Exception as e:
-        return HandleScanResult(set(), reliable=False,
-                                reason=f'psutil scan failed: {e}')
-
-    # proc_count = 0 means no java processes found — not pathological on
-    # Windows (DreamBot may not be running), so still reliable.
-    return HandleScanResult(open_paths, reliable=True)
+    return HandleScanResult(set(), reliable=False,
+                            reason='open_files() skipped on Windows — uses name-based fallback')
 
 
 # ── Process detection ──────────────────────────────────────────────────────────
