@@ -1,9 +1,24 @@
 # Changelog
 
+## v1.3.11
+### Bug Fix
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.11
+### Stability & Performance
+- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
+- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
+- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
+
+### Launcher
+- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
+- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
+
 ## v1.3.10
 ### Bug Fixes
 - Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
 - Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
 
 ## v1.3.9
 ### Bug Fixes
@@ -20,10 +35,25 @@
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
 
+## v1.3.11
+### Bug Fix
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.11
+### Stability & Performance
+- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
+- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
+- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
+
+### Launcher
+- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
+- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
+
 ## v1.3.10
 ### Bug Fixes
 - Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
 - Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
 
 ## v1.3.9
 ### Bug Fixes
@@ -56,10 +86,25 @@
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
 
+## v1.3.11
+### Bug Fix
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.11
+### Stability & Performance
+- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
+- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
+- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
+
+### Launcher
+- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
+- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
+
 ## v1.3.10
 ### Bug Fixes
 - Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
 - Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
 
 ## v1.3.9
 ### Bug Fixes
@@ -76,10 +121,25 @@
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
 
+## v1.3.11
+### Bug Fix
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.11
+### Stability & Performance
+- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
+- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
+- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
+
+### Launcher
+- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
+- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
+
 ## v1.3.10
 ### Bug Fixes
 - Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
 - Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
+- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
 
 ## v1.3.9
 ### Bug Fixes

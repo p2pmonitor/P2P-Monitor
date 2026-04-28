@@ -155,6 +155,10 @@ class LauncherTab:
         if not jar:
             messagebox.showerror('Launcher', 'Please set the path to Launcher.jar first.')
             return
+        if not os.path.isfile(jar):
+            messagebox.showerror('Launcher',
+                f'Launcher.jar not found at:\n{jar}\n\nPlease check the path in Settings.')
+            return
 
         account = preset.get('account', '?')
 
@@ -268,7 +272,12 @@ def _build_command(jar, preset):
     if custom:
         # Parse custom args safely
         try:
-            cmd += shlex.split(custom)
+            try:
+                cmd += shlex.split(custom)
+            except ValueError as e:
+                from tkinter import messagebox as _mb
+                _mb.showerror('Launcher', f'Invalid custom args: {e}')
+                return cmd[:3]  # return base command only
         except ValueError:
             cmd.append(custom)
 

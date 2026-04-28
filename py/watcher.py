@@ -181,6 +181,8 @@ class LogWatcher:
         self._accounts_lock = threading.Lock()
         self._offsets_lock  = threading.Lock()
         self._window_lock   = threading.Lock()  # serializes all window focus/click/screenshot ops
+        self._last_seen_cache  = {}    # account -> last line written; avoids disk I/O every 5s
+        self._threads_verified = set() # accounts whose Discord thread membership confirmed this session
         self._ss_svc   = None    # ScreenshotService — created in start()
         self._router   = None    # DiscordRouter — created in start()
         self.cfg = {}
@@ -295,7 +297,14 @@ class LogWatcher:
                             pass
             else:
                 self._dbg(f'stop(): handle scan unreliable ({scan.reason}) — skipping EOF pin')
-            save_offsets(dict(self._offsets))
+            # Merge with existing disk contents to preserve __last_seen keys
+            # written by set_last_seen() which go directly to disk, not self._offsets
+            try:
+                disk = load_offsets()
+                disk.update(dict(self._offsets))
+                save_offsets(disk)
+            except Exception:
+                save_offsets(dict(self._offsets))
 
     # ── Account row export ─────────────────────────────────────────────────────
     def get_account_rows(self):
@@ -316,10 +325,10 @@ class LogWatcher:
                 folder = os.path.basename(d)
                 with self._accounts_lock:
                     state = self._accounts.get(folder)
-                if state and (not state._startup_done or session_files != state.session_file_set):
-                    is_rotation = state._startup_done and session_files != state.session_file_set
+                if state and session_files != state.session_file_set:
+                    # Log rotation detected — re-run catchup to pick up new active file
                     state.session_file_set = session_files
-                    self._startup_catchup(str(active), is_rotation=is_rotation)
+                    self._startup_catchup(str(active), is_rotation=True)
         except Exception as e:
             self._dbg(f'get_account_rows rotation check failed: {e}')
 
@@ -1034,11 +1043,15 @@ class LogWatcher:
             new_lines = new_text.splitlines()
             folder    = os.path.basename(os.path.dirname(path)) or os.path.splitext(os.path.basename(path))[0]
             self._process_lines(new_lines, folder)
-            # Update last-seen marker so backfill knows where to resume
+            # Update last-seen marker so backfill knows where to resume.
+            # Only write to disk when the value actually changes — avoids I/O every 5s.
             if new_lines:
                 try:
-                    account = os.path.basename(os.path.dirname(path))
-                    set_last_seen(account, new_lines[-1])
+                    account   = os.path.basename(os.path.dirname(path))
+                    last_line = new_lines[-1]
+                    if last_line != self._last_seen_cache.get(account):
+                        set_last_seen(account, last_line)
+                        self._last_seen_cache[account] = last_line
                 except Exception:
                     pass
         except Exception as e:
@@ -1436,6 +1449,8 @@ class LogWatcher:
         token = self.cfg.get('bot_token', '').strip()
         if not token or not self.cfg.get('bot_setup_done'):
             return
+        if account in self._threads_verified:
+            return  # already verified this session
         channel_ids = self.cfg.get('bot_channel_ids', {})
         if not channel_ids:
             return
@@ -1459,6 +1474,7 @@ class LogWatcher:
         # was removed from a thread between sessions.
         for tid in acct_threads.values():
             self._bot_add_user_to_thread(tid, token)
+        self._threads_verified.add(account)
 
     def _bot_add_user_to_thread(self, thread_id, token):
         """Best-effort: add configured mention user to a Discord thread.
