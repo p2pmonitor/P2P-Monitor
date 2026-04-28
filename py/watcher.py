@@ -342,7 +342,7 @@ class LogWatcher:
             break_secs = s.total_break_secs
             if s._break_start_ts:
                 break_secs += time.time() - s._break_start_ts
-            break_str = _fmt_duration(break_secs)
+            break_str = _fmt_duration(break_secs) if (s.script_running or s.on_break or s._break_start_ts) else '—'
             rows.append({'account': name, 'task': s.last_task or '—',
                          'activity': s.last_activity or '—', 'status': status,
                          'uptime': uptime_str, 'break_time': break_str,
@@ -955,7 +955,11 @@ class LogWatcher:
                             if not v2 and bf_last_activity:
                                 ev['activity'] = bf_last_activity
 
-                        append_history(account, ev)
+                        append_history(account,
+                                       ev.get('type', ''),
+                                       ev.get('value', ''),
+                                       ev.get('activity', ''),
+                                       timestamp=ev.get('time'))
                         entries_this_file += 1
 
                     # Track last line of this chunk as potential marker

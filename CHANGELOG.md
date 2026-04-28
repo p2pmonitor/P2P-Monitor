@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.9
+### Bug Fixes
+- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
+- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
+
 ## v1.3.8
 ### History Duplication Fix
 - Fixed root cause of duplicate history entries — `_backfill_history` was using filename sort to determine the active log file, which disagreed with `_get_active_log_file`'s mtime-based selection; the real active file was being processed from byte 0 as a rotated file, re-writing events already recorded live; backfill now uses mtime consistently with the poll loop
@@ -8,6 +13,11 @@
 
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
+
+## v1.3.9
+### Bug Fixes
+- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
+- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
 
 ## v1.3.8
 ### History Backfill Redesign
@@ -34,6 +44,11 @@
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
 
+## v1.3.9
+### Bug Fixes
+- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
+- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
+
 ## v1.3.8
 ### History Duplication Fix
 - Fixed root cause of duplicate history entries — `_backfill_history` was using filename sort to determine the active log file, which disagreed with `_get_active_log_file`'s mtime-based selection; the real active file was being processed from byte 0 as a rotated file, re-writing events already recorded live; backfill now uses mtime consistently with the poll loop
@@ -42,6 +57,11 @@
 
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
+
+## v1.3.9
+### Bug Fixes
+- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
+- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
 
 ## v1.3.8
 ### History Backfill Redesign
