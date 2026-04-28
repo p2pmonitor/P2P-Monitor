@@ -959,12 +959,10 @@ class LogWatcher:
                                        ev.get('type', ''),
                                        ev.get('value', ''),
                                        ev.get('activity', ''),
-                                       timestamp=ev.get('time'))
+                                       timestamp=ev.get('ts'))
                         entries_this_file += 1
 
-                    # Track last line of this chunk as potential marker
-                    if chunk:
-                        new_last_seen = chunk[-1]
+                    # (last_seen marker updated at file level after all chunks)
 
                 for line in lines:
                     chunk.append(line)
@@ -973,6 +971,11 @@ class LogWatcher:
                         chunk = []
                 if chunk:
                     _process_chunk(chunk)
+
+                # Always update last_seen to the final line of this file,
+                # regardless of whether it produced parseable events
+                if lines:
+                    new_last_seen = lines[-1]
 
                 total_entries += entries_this_file
 
