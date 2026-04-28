@@ -327,10 +327,13 @@ def _capture_window_image_linux(window_id, out_path):
 
 def _capture_window_image_windows(window_id, out_path):
     """
-    Windows screenshot via PrintWindow Win32 API.
-    Captures the window's own render buffer — works even when the window
-    is in the background, partially covered, or on another monitor.
-    Does NOT require the window to be focused or on screen.
+    Windows screenshot using BitBlt from screen DC.
+
+    The window must be focused and visible — which the caller guarantees
+    by calling raise_and_focus_window before capture. BitBlt reads the
+    screen compositor output without triggering any repaints, eliminating
+    the flickering caused by PrintWindow forcing Java to repaint repeatedly.
+
     pywin32 is NOT required — all Win32 calls go through ctypes.
     """
     try:
@@ -349,7 +352,6 @@ def _capture_window_image_windows(window_id, out_path):
         return False, f'invalid window id: {window_id!r}'
 
     try:
-        # DPI awareness so dimensions are in physical pixels
         try:
             ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
         except Exception:
@@ -361,17 +363,16 @@ def _capture_window_image_windows(window_id, out_path):
         if not user32.IsWindow(hwnd):
             return False, f'window {hwnd} does not exist'
 
-        # Restore window if minimized — GetClientRect returns 0x0 for minimized windows
-        SW_RESTORE = 9
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype  = wintypes.BOOL
+        # Restore if minimized
         user32.IsIconic.argtypes   = [wintypes.HWND]
         user32.IsIconic.restype    = wintypes.BOOL
-        was_minimized = bool(user32.IsIconic(hwnd))
-        if was_minimized:
-            user32.ShowWindow(hwnd, SW_RESTORE)
-            import time as _time; _time.sleep(0.3)
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype  = wintypes.BOOL
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            import time as _t; _t.sleep(0.3)
 
+        # Get client area size
         rect = wintypes.RECT()
         user32.GetClientRect(hwnd, ctypes.byref(rect))
         w = rect.right  - rect.left
@@ -379,20 +380,20 @@ def _capture_window_image_windows(window_id, out_path):
         if w <= 0 or h <= 0:
             return False, f'window has no client area ({w}x{h})'
 
+        # Get client area position in screen coordinates
+        pt = wintypes.POINT()
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        sx, sy = pt.x, pt.y
+
+        # BitBlt from screen — no repaints, no flicker
         hdc_screen = user32.GetDC(None)
         hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
         hbmp       = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
         gdi32.SelectObject(hdc_mem, hbmp)
-        user32.ReleaseDC(None, hdc_screen)
 
         try:
-            # PW_CLIENTONLY=1, PW_RENDERFULLCONTENT=2 — use 3 for hardware-accelerated apps
-            user32.PrintWindow(hwnd, hdc_mem, 3)
-
-            # Wait for GPU compositing before reading bitmap.
-            # DreamBot uses hardware-accelerated Java2D — without this
-            # the captured bitmap may be black mid-frame.
-            import time as _t; _t.sleep(0.15)
+            SRCCOPY = 0x00CC0020
+            gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, sx, sy, SRCCOPY)
 
             class BITMAPINFOHEADER(ctypes.Structure):
                 _fields_ = [
@@ -431,26 +432,13 @@ def _capture_window_image_windows(window_id, out_path):
                 return True, ''
             return False, 'captured image is empty'
         finally:
+            user32.ReleaseDC(None, hdc_screen)
             gdi32.DeleteObject(hbmp)
             gdi32.DeleteDC(hdc_mem)
 
     except Exception as e:
         return False, str(e)
 
-
-
-# ── Window control ────────────────────────────────────────────────────────────
-#
-# All window operations go through this layer.
-# Linux backend uses xdotool / xprop via util.py helpers.
-# Windows backend uses Win32 APIs via ctypes (stdlib).
-#
-# Interface contract:
-#   - All functions accept wid as str (X11 wid on Linux, HWND as str on Windows)
-#   - All functions return None or a value as documented — never raise
-#   - click_at(x, y) performs the click only; callers own timing/sleep
-#   - paint hide/show (paint_is_visible, crop comparison) is Linux-only for now;
-#     on Windows those checks are skipped and capture proceeds unconditionally
 
 def get_focused_window():
     """

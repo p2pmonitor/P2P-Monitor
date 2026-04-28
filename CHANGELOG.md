@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.3.8
+### History Duplication Fix
+- Fixed root cause of duplicate history entries — `_backfill_history` was using filename sort to determine the active log file, which disagreed with `_get_active_log_file`'s mtime-based selection; the real active file was being processed from byte 0 as a rotated file, re-writing events already recorded live; backfill now uses mtime consistently with the poll loop
+- Reverted `_base_log_name` rotation-suffix stripping — DreamBot `.log.1` files are independent older session files not rotated versions of `.log`; stripping the suffix caused incorrect scanned-set lookups
+- Fixed break time persisting in status tab when account goes offline — `break_time` is now cleared when an account is detected as having no active session
+
+### Windows Screenshot Fix
+- Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
+
+## v1.3.8
+### History Backfill Redesign
+- Replaced rotation-suffix/scanned-set/byte-offset backfill tracking with a last-seen-line approach
+- All log files sorted chronologically by unix timestamp in filename — correctly handles .log, .log.1, .log.2 regardless of suffix
+- On startup, backfill scans forward through all files until it finds the last line seen in a previous session, then processes only new content after it
+- Live poll loop updates the last-seen marker after each batch of new lines so restarts always resume from the correct position
+- Last-seen line stored in offsets.json as `accountname__last_seen` — coexists with existing byte offset entries
+- On first run after update: processes all files, dedup cleans any duplicates, writes marker — fast on all subsequent starts
+- No rotation suffix tracking, no scanned sets, no base name stripping — rotation files are just part of the chronological stream
+
+### Windows Screenshot Fix
+- Replaced PrintWindow with BitBlt from screen DC — no repaints triggered, no flickering, no black frames
+
+### UI Fix
+- Break time now cleared when account goes offline — was persisting from previous session
+
 ## v1.3.7
 ### Windows Core Fixes
 - Fixed monitor not detecting script activity on Windows — active log file selection was using newest-by-filename as fallback when handle scan is unreliable; DreamBot creates a new log file on each launch so the newest filename is often a nearly-empty new session file while the real active file is older; now uses most-recently-modified file (mtime) which correctly identifies the file DreamBot is actively writing to
@@ -8,6 +33,31 @@
 
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
+
+## v1.3.8
+### History Duplication Fix
+- Fixed root cause of duplicate history entries — `_backfill_history` was using filename sort to determine the active log file, which disagreed with `_get_active_log_file`'s mtime-based selection; the real active file was being processed from byte 0 as a rotated file, re-writing events already recorded live; backfill now uses mtime consistently with the poll loop
+- Reverted `_base_log_name` rotation-suffix stripping — DreamBot `.log.1` files are independent older session files not rotated versions of `.log`; stripping the suffix caused incorrect scanned-set lookups
+- Fixed break time persisting in status tab when account goes offline — `break_time` is now cleared when an account is detected as having no active session
+
+### Windows Screenshot Fix
+- Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
+
+## v1.3.8
+### History Backfill Redesign
+- Replaced rotation-suffix/scanned-set/byte-offset backfill tracking with a last-seen-line approach
+- All log files sorted chronologically by unix timestamp in filename — correctly handles .log, .log.1, .log.2 regardless of suffix
+- On startup, backfill scans forward through all files until it finds the last line seen in a previous session, then processes only new content after it
+- Live poll loop updates the last-seen marker after each batch of new lines so restarts always resume from the correct position
+- Last-seen line stored in offsets.json as `accountname__last_seen` — coexists with existing byte offset entries
+- On first run after update: processes all files, dedup cleans any duplicates, writes marker — fast on all subsequent starts
+- No rotation suffix tracking, no scanned sets, no base name stripping — rotation files are just part of the chronological stream
+
+### Windows Screenshot Fix
+- Replaced PrintWindow with BitBlt from screen DC — no repaints triggered, no flickering, no black frames
+
+### UI Fix
+- Break time now cleared when account goes offline — was persisting from previous session
 
 ## v1.3.7
 ### Windows Click & Force Command Fixes

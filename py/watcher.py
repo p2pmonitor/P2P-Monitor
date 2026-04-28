@@ -16,6 +16,7 @@ from py.util    import now_str
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
 from py.history import (append_history, record_log_scanned, get_scanned_logs,
+                        get_last_seen, set_last_seen,
                         load_history_for, load_offsets, save_offsets)
 from py.paint        import do_force, do_force_skill, do_force_panel, PANEL_ACTIONS, AMOUNT_ACTIONS
 from py.platform_ops import (get_open_log_handles, find_window_ids_by_name,
@@ -535,6 +536,7 @@ class LogWatcher:
                     state.logged_in       = False
                     state.on_break        = False
                     state._break_start_ts = None
+                    state.break_time      = 0
         self.on_status()
 
     def _is_folder_active(self, folder):
@@ -848,211 +850,130 @@ class LogWatcher:
         """Strip rotation suffix from log filename.
         logfile-X.log.1 -> logfile-X.log
         logfile-X.log   -> logfile-X.log
-        Ensures rotated files are recognised as already scanned
-        when their base name was recorded before rotation.
         """
         import re as _re
         return _re.sub(r'\.\d+$', '', fname)
 
-    def _backfill_history(self, folder):
-        # TODO: _backfill_history handles file selection, offset restore, chunked parsing,
-        # and history dispatch. Split when adding new backfill-specific event handling.
+    @staticmethod
+    def _log_file_sort_key(f):
+        """Sort key for log files — extracts unix timestamp from filename.
+        logfile-1777318301710.log.1 → 1777318301710
+        Sorts correctly regardless of rotation suffix.
         """
-        Scan all unscanned log files for this account and write history entries.
-        Uses parse_lines() — no Discord, no screenshots, no state updates.
-        Error events are skipped: only events that alerted live belong in history.
-        Marks completed (rotated) files as scanned via record_log_scanned.
-        Resume offsets for the active file come from offsets.json (self._offsets).
+        import re as _re
+        m = _re.search(r'logfile-(\d+)', str(f))
+        return int(m.group(1)) if m else 0
+
+    def _backfill_history(self, folder):
+        """
+        Scan all log files for this account and write missing history entries.
+
+        Uses a last-seen-line approach instead of byte offsets or scanned-file sets:
+        - All log files sorted chronologically by unix timestamp in filename
+        - Scan forward through all lines until we find the last line seen in a
+          previous session, then process everything after it
+        - No rotation suffix tracking, no scanned sets, no base name stripping
+        - Works correctly with .log, .log.1, .log.2 etc. — treated as one stream
+
+        On first run (no last-seen line): processes all files, dedup cleans history.
+        Subsequent runs: skips to last-seen line quickly, processes only new content.
+        Never fires Discord or screenshots — append_history only.
         """
         account = os.path.basename(folder)
         try:
-            scanned  = get_scanned_logs(account)
-            # Load resume offsets directly from disk — self._offsets has already been
-            # set to EOF by _run before this thread started, so we can't use it here.
-            # If history was cleared (scanned is empty), ignore stored offsets entirely
-            # so we backfill from the beginning rather than resuming near EOF.
-            resume_offsets = load_offsets() if scanned else {}
+            last_seen = get_last_seen(account)
             log_files = _get_log_files(folder)
             if not log_files:
                 return
 
-            total_entries = 0
-            files_scanned = 0
-            active_fname  = log_files[-1].name  # newest = active
+            # Sort all files by unix timestamp embedded in filename — correct
+            # chronological order regardless of .log/.log.1/.log.2 suffix
+            log_files = sorted(log_files, key=self._log_file_sort_key)
+
+            total_entries  = 0
+            new_last_seen  = None
+            found_last     = (last_seen is None)  # if no marker, process everything
+
+            bf_last_task     = ''
+            bf_last_activity = ''
 
             for f in log_files:
-                fname = f.name
-                fstr  = str(f)
-                is_active = (fname == active_fname)
-
-                # For the active file: resume from offsets.json if available,
-                # otherwise set to EOF so live monitor only sees new content.
-                # For rotated files: always set to EOF (they won't grow).
-                with self._offsets_lock:
-                    stored_offset = resume_offsets.get(fstr)
-                try:
-                    eof = f.stat().st_size
-                    with self._offsets_lock:
-                        if is_active and stored_offset is not None:
-                            self._offsets[fstr] = stored_offset
-                        # rotated files already set to EOF by _run, leave them
-                except Exception as e:
-                    self._dbg(f'Could not restore offset for {os.path.basename(fstr)}: {e}')
-
-                # Skip already-scanned rotated files only.
-                # Always process the active file — it may have grown, and on upgrade
-                # from older versions it may already have a stale scan record.
-                if not is_active and self._base_log_name(fname) in scanned:
-                    continue
-
+                fstr = str(f)
                 try:
                     with open(fstr, 'r', encoding='utf-8', errors='replace') as fh:
-                        if is_active and stored_offset:
-                            fh.seek(stored_offset)
-
-                        CHUNK = 500
-                        entries_this_file = 0
-                        bf_last_task     = ''
-                        bf_last_activity = ''
-                        chunk = []
-
-                        def _process_chunk(chunk, bf_error_seen):
-                            nonlocal entries_this_file, bf_last_task, bf_last_activity
-                            if not chunk:
-                                return
-                            try:
-                                events = parse_lines(chunk)
-                            except Exception as pe:
-                                self.log(f"  ⚠ [{account}] Backfill parse error in {fname}: {pe}")
-                                return
-
-                            # Reset error dedup on each NEW TASK boundary in this chunk
-                            new_task_lines = {i for i, l in enumerate(chunk) if 'NEW TASK' in l.upper()}
-
-                            # Stuck walking / Escaped ship detection — scan before events update task state
-                            for stuck_idx, line in enumerate(chunk):
-                                _reset_type = None
-                                if 'Stuck walking -> Startup' in line:
-                                    _reset_type = 'Stuck walking → Startup'
-                                elif 'Escaped ship -> Startup' in line:
-                                    _reset_type = 'Escaped ship → Startup'
-                                if not _reset_type:
-                                    continue
-                                ctx_task = bf_last_task
-                                ctx_act  = bf_last_activity
-                                for prev in reversed(chunk[:stuck_idx]):
-                                    pb = strip_prefix(prev).strip()
-                                    if re.match(r'^Actually task is\s+', pb, re.IGNORECASE):
-                                        ctx_task = re.sub(r'^Actually task is\s*', '', pb, flags=re.IGNORECASE).strip()
-                                        if ctx_act:
-                                            break
-                                    elif re.match(r'^Task is\b', pb, re.IGNORECASE) and not ctx_task:
-                                        ctx_task = re.sub(r'^Task is\s*', '', pb, flags=re.IGNORECASE).strip()
-                                        if ctx_act:
-                                            break
-                                    elif re.match(r'^Activity is\s+', pb, re.IGNORECASE) and not ctx_act:
-                                        ctx_act = re.sub(r'^Activity is\s*', '', pb, flags=re.IGNORECASE).strip()
-                                        if ctx_task:
-                                            break
-                                task_ctx = f"{ctx_task} — {ctx_act}" if ctx_act else ctx_task
-                                label    = task_ctx or f"Script reset ({_reset_type})"
-                                reason   = f"Script reset: {_reset_type}"
-                                ts_line  = next((LOG_TS_RE.match(l).group(1) for l in reversed(chunk[:stuck_idx+1]) if LOG_TS_RE.match(l)), '')
-                                reset_ev = {
-                                    'type': 'error', 'value': label, 'activity': reason, 'ts': ts_line,
-                                    '_raw': (f'reset_{ts_line}', 1, 0, 600, reason),
-                                    '_detail': reason, '_task_ctx': task_ctx,
-                                }
-                                if self.handle_event(reset_ev, account, source='backfill'):
-                                    entries_this_file += 1
-
-                            for ev in events:
-                                etype    = ev.get('type', '')
-                                value    = ev.get('value', '')
-                                activity = ev.get('activity', '')
-                                ts       = ev.get('ts', '')
-                                line_idx = ev.get('_line_idx', -1)
-
-                                # Config guard — same as live path
-                                bf_guard = self._CFG_GUARD.get(etype)
-                                if bf_guard and not self.cfg.get(bf_guard, True):
-                                    continue
-
-                                # Reset error dedup when we cross a NEW TASK boundary
-                                if any(t <= line_idx for t in new_task_lines):
-                                    last_nt = max((t for t in new_task_lines if t <= line_idx), default=-1)
-                                    bf_error_seen.clear()
-                                    new_task_lines = {t for t in new_task_lines if t > last_nt}
-
-                                # ── State mutations (backfill task tracking) ──
-                                if etype == 'task':
-                                    bf_last_task     = value
-                                    bf_last_activity = activity
-                                elif etype == 'slayer_task':
-                                    bf_last_task     = 'Slayer'
-                                    bf_last_activity = activity
-                                elif etype == 'slayer_complete':
-                                    td, pe, tp = ev.get('_slayer_complete', (None, None, None))
-                                    pts = f"+{pe:,} pts (total: {tp:,})" if pe else "no points yet"
-                                    ev  = dict(ev, activity=pts)
-
-                                # ── Error: enrich + backfill dedup ────────────
-                                elif etype == 'error':
-                                    raw = ev.get('_raw')
-                                    if not raw:
-                                        continue
-                                    err_key = raw[0]
-                                    if err_key in bf_error_seen:
-                                        continue
-                                    bf_error_seen.add(err_key)
-                                    _, _, _, _, detail = raw
-                                    lock_name    = ev.get('_lock_name', '')
-                                    is_farm_skip = ev.get('_is_farm_skip', False)
-                                    last_t = bf_last_task     or ''
-                                    last_a = bf_last_activity or ''
-                                    if last_t.lower() in ('break', ''):
-                                        last_t = ''
-                                        last_a = ''
-                                    if lock_name:
-                                        enriched_value = lock_name
-                                    elif is_farm_skip or last_t:
-                                        enriched_value = f"{last_t} — {last_a}" if last_a else last_t or value
-                                    else:
-                                        enriched_value = value
-                                    task_ctx = f"{last_t} — {last_a}" if last_a else last_t
-                                    ev = dict(ev, value=enriched_value,
-                                              _detail=detail, _task_ctx=task_ctx)
-
-                                # ── Fan out through unified dispatcher ────────
-                                # source='backfill' → history only, no Discord/UI
-                                if self.handle_event(ev, account, source='backfill'):
-                                    entries_this_file += 1
-
-                        bf_error_seen = set()  # dedup errors per task block across chunks
-                        for raw_line in fh:
-                            if not self._running:
-                                return
-                            chunk.append(raw_line.rstrip('\n'))
-                            if len(chunk) >= CHUNK:
-                                _process_chunk(chunk, bf_error_seen)
-                                chunk = []
-                        _process_chunk(chunk, bf_error_seen)  # flush remainder
-
+                        lines = fh.readlines()
                 except Exception as e:
-                    self.log(f"  ⚠ [{account}] Backfill read error {fname}: {e}")
+                    self._dbg(f'Backfill read error {f.name}: {e}')
                     continue
 
-                # Only record completed rotated files as scanned.
-                # Active file resume is handled by offsets.json, not history.
-                if not is_active:
-                    # Record base name so future rotations are recognised
-                    record_log_scanned(account, self._base_log_name(fname))
-                total_entries  += entries_this_file
-                files_scanned  += 1
+                # Strip newlines
+                lines = [l.rstrip('\n\r') for l in lines]
 
-            if files_scanned:
-                # Dedup history file after backfill — catches duplicates from
-                # previous sessions where DreamBot closed before monitor did
+                # Find last_seen line in this file if not yet found
+                if not found_last and last_seen:
+                    for i, line in enumerate(lines):
+                        if line == last_seen:
+                            found_last = True
+                            lines = lines[i+1:]  # process only lines after marker
+                            break
+                    else:
+                        # Marker not in this file — skip entire file
+                        continue
+
+                if not lines:
+                    continue
+
+                # Process lines in chunks
+                CHUNK = 500
+                chunk = []
+                entries_this_file = 0
+
+                def _process_chunk(chunk):
+                    nonlocal entries_this_file, bf_last_task, bf_last_activity, new_last_seen
+                    if not chunk:
+                        return
+                    try:
+                        events = parse_lines(chunk)
+                    except Exception as pe:
+                        self.log(f'  ⚠ [{account}] Backfill parse error: {pe}')
+                        return
+
+                    new_task_lines = {i for i, l in enumerate(chunk) if 'NEW TASK' in l.upper()}
+
+                    for idx, ev in enumerate(events):
+                        if not ev or ev.get('type') == 'error':
+                            continue
+                        etype = ev.get('type', '')
+                        v1    = ev.get('value', '')
+                        v2    = ev.get('activity', '')
+
+                        if etype == 'task':
+                            bf_last_task     = v1
+                            bf_last_activity = v2
+                        elif etype in ('slayer_task', 'quest_started', 'quest_completed',
+                                       'drop', 'death', 'levelup', 'chat'):
+                            if not v2 and bf_last_activity:
+                                ev['activity'] = bf_last_activity
+
+                        append_history(account, ev)
+                        entries_this_file += 1
+
+                    # Track last line of this chunk as potential marker
+                    if chunk:
+                        new_last_seen = chunk[-1]
+
+                for line in lines:
+                    chunk.append(line)
+                    if len(chunk) >= CHUNK:
+                        _process_chunk(chunk)
+                        chunk = []
+                if chunk:
+                    _process_chunk(chunk)
+
+                total_entries += entries_this_file
+
+            if total_entries:
+                # Dedup after backfill — cleans any duplicates from previous sessions
                 try:
                     from py.history import _dedup_history_file, history_file
                     hf = history_file(account)
@@ -1061,11 +982,16 @@ class LogWatcher:
                         self.log(f'🧹 [{account}] Cleaned {dupes} duplicate history entries')
                 except Exception as e:
                     self._dbg(f'History dedup failed [{account}]: {e}')
-                if self._on_backfill_done:
-                    self._on_backfill_done()
+
+            # Update last-seen marker
+            if new_last_seen:
+                set_last_seen(account, new_last_seen)
+
+            if self._on_backfill_done:
+                self._on_backfill_done()
 
         except Exception as e:
-            self.log(f"  ⚠ Backfill error [{account}]: {e}")
+            self.log(f'  ⚠ Backfill error [{account}]: {e}')
 
     # ── File polling ───────────────────────────────────────────────────────────
     def _check_file(self, path):
@@ -1081,6 +1007,13 @@ class LogWatcher:
                     self._offsets[path] = 0
                     offset = 0
                     self.log(f"🔄 Log rotated: {os.path.basename(path)}")
+                    # Record base name as scanned so backfill skips .log.1
+                    # — all content up to this offset was already seen live
+                    try:
+                        account = os.path.basename(os.path.dirname(path))
+                        record_log_scanned(account, self._base_log_name(os.path.basename(path)))
+                    except Exception:
+                        pass
             if size <= offset:
                 return
             with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -1094,6 +1027,13 @@ class LogWatcher:
             new_lines = new_text.splitlines()
             folder    = os.path.basename(os.path.dirname(path)) or os.path.splitext(os.path.basename(path))[0]
             self._process_lines(new_lines, folder)
+            # Update last-seen marker so backfill knows where to resume
+            if new_lines:
+                try:
+                    account = os.path.basename(os.path.dirname(path))
+                    set_last_seen(account, new_lines[-1])
+                except Exception:
+                    pass
         except Exception as e:
             self.log(f"⚠ Error reading {os.path.basename(path)}: {e}")
 

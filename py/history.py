@@ -24,7 +24,21 @@ def history_file(account):
     return account_history_dir(account) / "history.jsonl"
 
 # ── Resume offsets ─────────────────────────────────────────────────────────────
+def get_last_seen(account):
+    """Return the last log line seen by backfill for this account, or None."""
+    offsets = load_offsets()
+    return offsets.get(f'{account}__last_seen')
+
+
+def set_last_seen(account, line):
+    """Store the last log line seen by backfill for this account."""
+    offsets = load_offsets()
+    offsets[f'{account}__last_seen'] = line
+    save_offsets(offsets)
+
+
 def load_offsets(log_fn=None, debug=False):
+
     """Load {filename: byte_offset} from offsets.json. Returns empty dict if missing/corrupt."""
     try:
         if OFFSETS_FILE.exists():
