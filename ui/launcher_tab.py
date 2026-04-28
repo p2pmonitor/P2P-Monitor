@@ -8,6 +8,7 @@ from tkinter import ttk, messagebox, filedialog
 import subprocess
 import threading
 import shlex
+import os
 from py.config       import save_config
 from py.platform_ops import is_account_process_running
 
@@ -99,7 +100,6 @@ class LauncherTab:
             filetypes=[('JAR files', '*.jar'), ('All files', '*.*')]
         )
         if path:
-            import os
             self._jar_var.set(os.path.normpath(path))
 
     def _refresh_tree(self):

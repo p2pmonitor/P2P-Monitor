@@ -1,8 +1,16 @@
 # Changelog
 
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
+
 ## v1.3.11
 ### Bug Fix
 - Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
 
 ## v1.3.11
 ### Stability & Performance
@@ -35,9 +43,17 @@
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
 
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
+
 ## v1.3.11
 ### Bug Fix
 - Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
 
 ## v1.3.11
 ### Stability & Performance
@@ -86,9 +102,17 @@
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
 
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
+
 ## v1.3.11
 ### Bug Fix
 - Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
 
 ## v1.3.11
 ### Stability & Performance
@@ -121,9 +145,17 @@
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
 
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
+
 ## v1.3.11
 ### Bug Fix
 - Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
+
+## v1.3.12
+### Bug Fix
+- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
 
 ## v1.3.11
 ### Stability & Performance
