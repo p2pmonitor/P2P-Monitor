@@ -27,11 +27,9 @@ SS_PRIORITY_SCHEDULED = 3   # scheduled interval screenshots
 SCREENSHOT_DIR = Path.home() / '.p2p_monitor' / 'screenshots'
 
 # ── Paint button geometry ──────────────────────────────────────────────────────
-PAINT_BTN_X_OFFSET = 100
-PAINT_BTN_Y_OFFSET = 50
-PAINT_BTN_CROP_W   = 60
-PAINT_BTN_CROP_H   = 20
-PAINT_REF_FILE     = Path.home() / ".p2p_monitor" / "paint_visible_ref.png"
+# PAINT_BTN_* constants imported from py.platform_ops (centralized source of truth)
+PAINT_REF_FILE       = Path.home() / ".p2p_monitor" / "paint_visible_ref.png"
+PAINT_REF_SCALE_FILE = Path.home() / ".p2p_monitor" / "paint_ref_scale.txt"
 PAINT_DIFF_THRESH  = 0.15
 
 # ── Linux-only paint detection helpers ──────────────────────────────────────────
@@ -47,7 +45,10 @@ from py.platform_ops import (find_window_ids_by_name, capture_window_image,
                              get_focused_window, get_window_geometry,
                              is_window_minimized, restore_window,
                              raise_and_focus_window, minimize_window,
-                             click_at, supports_paint_detection)
+                             click_at, supports_paint_detection,
+                             get_window_dpi_scale,
+                             PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET,
+                             PAINT_BTN_CROP_W, PAINT_BTN_CROP_H)
 
 def _window_is_minimized(wid, env=None):
     """Delegates to platform_ops — env param kept for call-site compat."""
@@ -63,21 +64,27 @@ def _get_paint_btn_coords(wid, env=None):
     if not geom:
         return None
     x, y, w, h = geom
-    return (x + PAINT_BTN_X_OFFSET, y + h - PAINT_BTN_Y_OFFSET)
+    scale = get_window_dpi_scale(wid)
+    off_x = round(PAINT_BTN_X_OFFSET * scale)
+    off_y = round(PAINT_BTN_Y_OFFSET * scale)
+    return (x + off_x, y + h - off_y)
 
 # ── Paint state detection ──────────────────────────────────────────────────────
 def _capture_btn_crop(btn_coords, env=None, wid=None):
     """Capture a crop of the paint button area. Returns path to temp file or None."""
     import sys
     bx, by = btn_coords
-    x0 = bx - PAINT_BTN_CROP_W // 2
-    y0 = by - PAINT_BTN_CROP_H // 2
+    scale  = get_window_dpi_scale(wid) if wid else 1.0
+    crop_w = round(PAINT_BTN_CROP_W * scale)
+    crop_h = round(PAINT_BTN_CROP_H * scale)
+    x0 = bx - crop_w // 2
+    y0 = by - crop_h // 2
     tmp = str(Path.home() / ".p2p_monitor" / "_paint_btn_cmp.png")
     if sys.platform.startswith('linux'):
         env = env or _get_linux_env()
         subprocess.run(
             ['import', '-window', 'root',
-             '-crop', f'{PAINT_BTN_CROP_W}x{PAINT_BTN_CROP_H}+{x0}+{y0}', '+repage', tmp],
+             '-crop', f'{crop_w}x{crop_h}+{x0}+{y0}', '+repage', tmp],
             capture_output=True, timeout=5, env=env)
         return tmp if Path(tmp).exists() else None
     else:
@@ -102,8 +109,8 @@ def _capture_btn_crop(btn_coords, env=None, wid=None):
             rel_y0 = y0 - win_y
             img  = Image.open(tmp_full)
             crop = img.crop((rel_x0, rel_y0,
-                             rel_x0 + PAINT_BTN_CROP_W,
-                             rel_y0 + PAINT_BTN_CROP_H))
+                             rel_x0 + crop_w,
+                             rel_y0 + crop_h))
             crop.save(tmp)
             try: Path(tmp_full).unlink(missing_ok=True)
             except Exception: pass
@@ -115,10 +122,32 @@ def _paint_is_visible(btn_coords, env=None, wid=None):
     """Return True if paint overlay is currently visible.
     Falls back to True (assume visible) on any failure so capture always proceeds.
     Linux: ImageMagick compare. Windows: Pillow ImageChops.difference.
+
+    Auto-resnaps the reference if DPI scale has changed by more than 0.05
+    (e.g. window moved to a different monitor or user changed scaling).
+    Guard prevents repeated resnap attempts within a single call.
     """
     import sys
     if not PAINT_REF_FILE.exists():
         return True
+
+    # ── DPI scale check — resnap reference if scale has changed ──────────────
+    ref_resnap_attempted = False
+    current_scale = get_window_dpi_scale(wid) if wid else 1.0
+    try:
+        if PAINT_REF_SCALE_FILE.exists():
+            saved_scale = float(PAINT_REF_SCALE_FILE.read_text().strip())
+            if abs(current_scale - saved_scale) > 0.05:
+                # DPI changed — resnap reference using current scale
+                if not ref_resnap_attempted:
+                    ref_resnap_attempted = True
+                    try:
+                        _save_paint_reference(btn_coords, wid=wid)
+                    except Exception:
+                        pass  # resnap failed — continue with old reference
+    except Exception:
+        pass  # scale file unreadable — treat as mismatch handled by resize below
+
     crop = _capture_btn_crop(btn_coords, env, wid=wid)
     if not crop:
         return True  # capture failed — assume visible, fail safe
@@ -140,9 +169,8 @@ def _paint_is_visible(btn_coords, env=None, wid=None):
             img_ref  = Image.open(str(PAINT_REF_FILE)).convert('RGB')
             if img_curr.size != img_ref.size:
                 img_curr = img_curr.resize(img_ref.size, Image.LANCZOS)
-            diff = ImageChops.difference(img_curr, img_ref)
+            diff     = ImageChops.difference(img_curr, img_ref)
             pixels   = list(diff.getdata())
-            # Normalise to 0.0–1.0 range matching PAINT_DIFF_THRESH
             avg_diff = sum(max(r,g,b) for r,g,b in pixels) / (len(pixels) * 255.0)
             return avg_diff < PAINT_DIFF_THRESH
     except Exception:
@@ -159,6 +187,13 @@ def _save_paint_reference(btn_coords, env=None, log=None, debug=False, wid=None)
     if crop:
         try:
             shutil.move(crop, str(PAINT_REF_FILE))
+            # Save DPI scale alongside reference so _paint_is_visible can detect
+            # if the user's DPI changes and auto-resnap when needed
+            scale = get_window_dpi_scale(wid) if wid else 1.0
+            try:
+                PAINT_REF_SCALE_FILE.write_text(str(scale))
+            except Exception:
+                pass  # scale file is best-effort
         except Exception as e:
             if debug and log:
                 log(f'[DEBUG] _save_paint_reference failed: {e}')

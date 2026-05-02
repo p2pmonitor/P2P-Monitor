@@ -8,11 +8,11 @@ import time
 
 from py.platform_ops import (find_window_ids_by_name, get_focused_window,
                              get_window_geometry, raise_and_focus_window, click_at,
-                             is_window_minimized, restore_window)
+                             is_window_minimized, restore_window,
+                             get_window_dpi_scale,
+                             PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET)
 
 # ── Paint button (hide/show toggle) ───────────────────────────────────────────
-PAINT_BTN_X_OFFSET = 100   # right from window left edge
-PAINT_BTN_Y_OFFSET = 50    # up from window bottom edge
 
 # ── Click offsets from bottom-left of the DreamBot window ────────────────────
 # Time adjustments
@@ -87,8 +87,9 @@ def click_at_offset(account, offset_x, offset_y):
         time.sleep(0.3)
 
         x, y, w, h = geom
-        click_x = x + offset_x
-        click_y = y + h - offset_y
+        scale   = get_window_dpi_scale(wid)
+        click_x = x + round(offset_x * scale)
+        click_y = y + h - round(offset_y * scale)
         _click(click_x, click_y)
     finally:
         if restore_wid and restore_wid != wid:
@@ -136,8 +137,9 @@ def do_force_skill(account, action, log=None, window_lock=None):
                     log(f"  ⚠ [{account}] Could not get window geometry")
                 return
             x, y, w, h = geom
-            click_x = x + offset_x
-            click_y = y + h - offset_y
+            scale   = get_window_dpi_scale(wid)
+            click_x = x + round(offset_x * scale)
+            click_y = y + h - round(offset_y * scale)
             _click(click_x, click_y)
         finally:
             if restore_wid and restore_wid != wid:
@@ -192,8 +194,9 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
                 return
 
             x, y, w, h = geom
-            click_x = x + offset_x
-            click_y = y + h - offset_y
+            scale   = get_window_dpi_scale(wid)
+            click_x = x + round(offset_x * scale)
+            click_y = y + h - round(offset_y * scale)
 
             # Open panel
             _click(click_x, click_y)
@@ -250,8 +253,9 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
                     log(f"  ⚠ [{account}] Could not get window geometry")
                 return
             x, y, w, h = geom
-            click_x = x + offset_x
-            click_y = y + h - offset_y
+            scale   = get_window_dpi_scale(wid)
+            click_x = x + round(offset_x * scale)
+            click_y = y + h - round(offset_y * scale)
 
             for i in range(amount):
                 _click(click_x, click_y)

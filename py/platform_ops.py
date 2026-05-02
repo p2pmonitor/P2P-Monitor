@@ -977,6 +977,47 @@ def _click_at_windows(x, y):
         pass
 
 
+def get_window_dpi_scale(window_id):
+    """
+    Return the DPI scale factor for the monitor the window is on.
+
+    Windows: uses GetDpiForWindow — returns actual DPI for the window's monitor,
+             handles multi-monitor setups where each monitor has different scaling.
+             96 DPI = 1.0 (100%), 120 DPI = 1.25 (125%), 144 DPI = 1.5 (150%) etc.
+    Linux:   always returns 1.0 — X11 logical pixels match physical for our purposes.
+
+    Used to scale hardcoded DreamBot UI offsets (button positions relative to
+    window edge) which were measured at 100% DPI. Do NOT use this to scale window
+    bounds — those are already physical pixels from DWM/GetWindowRect.
+
+    Returns: float scale factor, always >= 1.0, defaults to 1.0 on any error.
+    """
+    if not sys.platform.startswith('win32') and sys.platform != 'win32':
+        return 1.0
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = int(str(window_id), 0)
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        user32.GetDpiForWindow.restype  = ctypes.c_uint
+        dpi = user32.GetDpiForWindow(hwnd)
+        if dpi <= 0:
+            return 1.0
+        return dpi / 96.0
+    except Exception:
+        return 1.0
+
+
+# ── DreamBot paint UI offsets (measured at 100% DPI) ───────────────────────────
+# These are scaled at point of use by get_window_dpi_scale().
+# Centralized here so paint.py and screenshot.py share one source of truth.
+PAINT_BTN_X_OFFSET = 100   # pixels from window left edge to Hide button
+PAINT_BTN_Y_OFFSET = 50    # pixels from window bottom edge to Hide button
+PAINT_BTN_CROP_W   = 60    # crop width for paint button visibility check
+PAINT_BTN_CROP_H   = 20    # crop height for paint button visibility check
+
+
 def supports_paint_detection():
     """
     Return True if paint hide/show detection is supported on this platform.
