@@ -20,6 +20,23 @@ import sys
 from pathlib import Path
 
 
+from typing import NamedTuple, Optional, Tuple
+
+
+class WindowBounds(NamedTuple):
+    """Geometry result from _get_window_bounds().
+    All values in physical screen pixels, consistent coordinate space.
+    dwm_rect and winrect_rect store (left, top, width, height) for BitBlt.
+    """
+    sx:          int
+    sy:          int
+    w:           int
+    h:           int
+    method:      str                              # 'dwm' or 'winrect'
+    dwm_rect:    Optional[Tuple[int,int,int,int]] # (left, top, w, h) or None
+    winrect_rect:Optional[Tuple[int,int,int,int]] # (left, top, w, h) or None
+
+
 # ── Open file detection ────────────────────────────────────────────────────────
 
 # Cache for get_open_log_handles() — avoids expensive repeated scans.
@@ -281,7 +298,7 @@ def _find_window_ids_windows(name):
 
 # ── Window capture ─────────────────────────────────────────────────────────────
 
-def capture_window_image(window_id, out_path):
+def capture_window_image(window_id, out_path, debug_log=None):
     """
     Capture a screenshot of the given window to out_path.
 
@@ -291,7 +308,8 @@ def capture_window_image(window_id, out_path):
       - out_path parent directory will be created if it does not exist
 
     Linux:   ImageMagick `import -window <wid>`
-    Windows: PIL.ImageGrab + Win32 GetWindowRect via ctypes (stdlib)
+    Windows: BitBlt from screen DC using DWM-first geometry (DwmGetWindowAttribute
+             → GetWindowRect fallback → PrintWindow last resort)
              Requires: Pillow (pip install pillow)
              Note: uses ctypes only — pywin32 is NOT required
 
@@ -301,7 +319,7 @@ def capture_window_image(window_id, out_path):
         if sys.platform.startswith('linux'):
             return _capture_window_image_linux(window_id, out_path)
         elif sys.platform == 'win32':
-            return _capture_window_image_windows(window_id, out_path)
+            return _capture_window_image_windows(window_id, out_path, debug_log=debug_log)
         return False, 'window capture unsupported on this platform'
     except Exception as e:
         return False, str(e)
@@ -325,16 +343,140 @@ def _capture_window_image_linux(window_id, out_path):
         return False, str(e)
 
 
-def _capture_window_image_windows(window_id, out_path):
+def _get_window_bounds(hwnd, debug_log=None):
+    """
+    Get window geometry in physical screen coordinates.
+
+    Tries DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) first — gives
+    the true visible rendered frame, unaffected by DPI virtualization or
+    invisible DWM border pixels.
+
+    Falls back to GetWindowRect if DWM fails.
+
+    Both use GetDC(NULL) coordinate space (screen/virtual-desktop origin)
+    so BitBlt can use sx/sy directly without coordinate conversion.
+
+    Args:
+        hwnd:      window handle (int)
+        debug_log: optional callable(msg) for debug output
+
+    Returns:
+        WindowBounds or None if all geometry calls failed
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        # Set DPI awareness and save old context for restore
+        try:
+            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            old_ctx = None
+
+        user32  = ctypes.WinDLL('user32',  use_last_error=True)
+        dwmapi  = ctypes.WinDLL('dwmapi',  use_last_error=True)
+
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype  = wintypes.BOOL
+
+        dwmapi.DwmGetWindowAttribute.argtypes = [
+            wintypes.HWND, ctypes.c_uint,
+            ctypes.c_void_p, ctypes.c_uint]
+        dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long  # HRESULT
+
+        DWMWA_EXTENDED_FRAME_BOUNDS = 9
+        MAX_W, MAX_H = 7680, 4320  # 8K upper bound sanity check
+
+        dwm_rect    = None
+        winrect     = None
+        chosen_rect = None
+        method      = None
+
+        # ── Try DWM extended frame bounds ────────────────────────────────────
+        dwm_r = wintypes.RECT()
+        hr = dwmapi.DwmGetWindowAttribute(
+            hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+            ctypes.byref(dwm_r), ctypes.sizeof(dwm_r))
+        if hr == 0:
+            dw = dwm_r.right  - dwm_r.left
+            dh = dwm_r.bottom - dwm_r.top
+            if 0 < dw <= MAX_W and 0 < dh <= MAX_H:
+                dwm_rect    = (dwm_r.left, dwm_r.top, dw, dh)
+                chosen_rect = dwm_rect
+                method      = 'dwm'
+                if debug_log:
+                    debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                              f'DWM bounds=({dwm_r.left},{dwm_r.top},{dw},{dh})')
+            else:
+                if debug_log:
+                    debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                              f'DWM returned invalid size {dw}x{dh}, skipping')
+        else:
+            if debug_log:
+                debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                          f'DwmGetWindowAttribute failed HRESULT=0x{hr & 0xFFFFFFFF:08X}')
+
+        # ── Try GetWindowRect if DWM failed ───────────────────────────────────
+        if chosen_rect is None:
+            wr = wintypes.RECT()
+            ok = user32.GetWindowRect(hwnd, ctypes.byref(wr))
+            if ok:
+                ww = wr.right  - wr.left
+                wh = wr.bottom - wr.top
+                if 0 < ww <= MAX_W and 0 < wh <= MAX_H:
+                    winrect     = (wr.left, wr.top, ww, wh)
+                    chosen_rect = winrect
+                    method      = 'winrect'
+                    if debug_log:
+                        debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                                  f'GetWindowRect=({wr.left},{wr.top},{ww},{wh})')
+                else:
+                    if debug_log:
+                        debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                                  f'GetWindowRect invalid size {ww}x{wh}')
+            else:
+                err = ctypes.get_last_error()
+                if debug_log:
+                    debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                              f'GetWindowRect failed error={err}')
+
+        # ── Restore DPI context ───────────────────────────────────────────────
+        if old_ctx is not None:
+            try:
+                ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
+            except Exception:
+                pass
+
+        if chosen_rect is None:
+            return None
+
+        sx, sy, w, h = chosen_rect
+        return WindowBounds(
+            sx=sx, sy=sy, w=w, h=h,
+            method=method,
+            dwm_rect=dwm_rect,
+            winrect_rect=winrect)
+
+    except Exception as e:
+        if debug_log:
+            debug_log(f'_get_window_bounds hwnd={hwnd}: unexpected error: {e}')
+        return None
+
+
+def _capture_window_image_windows(window_id, out_path, debug_log=None):
     """
     Windows screenshot using BitBlt from screen DC.
 
-    The window must be focused and visible — which the caller guarantees
-    by calling raise_and_focus_window before capture. BitBlt reads the
-    screen compositor output without triggering any repaints, eliminating
-    the flickering caused by PrintWindow forcing Java to repaint repeatedly.
+    Fallback chain:
+      1. DWM extended frame bounds + GetDC(NULL) + BitBlt  (primary)
+      2. GetWindowRect bounds     + GetDC(NULL) + BitBlt  (secondary)
+      3. PrintWindow                                        (last resort)
 
-    pywin32 is NOT required — all Win32 calls go through ctypes.
+    Each method keeps coordinate space consistent:
+      GetDC(NULL) uses screen/virtual-desktop coordinates → use bounds.sx/sy directly.
+      PrintWindow renders into its own DC → uses 0,0 coordinates.
+
+    debug_log: optional callable(msg) — only passed when Debug Mode is enabled.
     """
     try:
         from PIL import Image
@@ -352,91 +494,167 @@ def _capture_window_image_windows(window_id, out_path):
         return False, f'invalid window id: {window_id!r}'
 
     try:
-        try:
-            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
-        except Exception:
-            pass
-
         user32 = ctypes.WinDLL('user32', use_last_error=True)
         gdi32  = ctypes.WinDLL('gdi32',  use_last_error=True)
+
+        # ── Set up argtypes/restype for all GDI calls ─────────────────────────
+        # Critical on 64-bit Windows: handles are pointer-sized (8 bytes).
+        # Without restype, ctypes defaults to c_int (4 bytes) and truncates.
+        user32.IsWindow.argtypes      = [wintypes.HWND]
+        user32.IsWindow.restype       = wintypes.BOOL
+        user32.IsIconic.argtypes      = [wintypes.HWND]
+        user32.IsIconic.restype       = wintypes.BOOL
+        user32.ShowWindow.argtypes    = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindow.restype     = wintypes.BOOL
+        user32.GetDC.argtypes         = [wintypes.HWND]
+        user32.GetDC.restype          = wintypes.HDC
+        user32.ReleaseDC.argtypes     = [wintypes.HWND, wintypes.HDC]
+        user32.ReleaseDC.restype      = ctypes.c_int
+        user32.PrintWindow.argtypes   = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+        user32.PrintWindow.restype    = wintypes.BOOL
+
+        gdi32.CreateCompatibleDC.argtypes    = [wintypes.HDC]
+        gdi32.CreateCompatibleDC.restype     = wintypes.HDC
+        gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+        gdi32.CreateCompatibleBitmap.restype  = wintypes.HBITMAP
+        gdi32.SelectObject.argtypes           = [wintypes.HDC, wintypes.HGDIOBJ]
+        gdi32.SelectObject.restype            = wintypes.HGDIOBJ
+        gdi32.BitBlt.argtypes = [
+            wintypes.HDC, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int,
+            wintypes.HDC, ctypes.c_int, ctypes.c_int,
+            ctypes.c_ulong]
+        gdi32.BitBlt.restype  = wintypes.BOOL
+        gdi32.GetDIBits.argtypes = [
+            wintypes.HDC, wintypes.HBITMAP,
+            ctypes.c_uint, ctypes.c_uint,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+        gdi32.GetDIBits.restype  = ctypes.c_int
+        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+        gdi32.DeleteObject.restype  = wintypes.BOOL
+        gdi32.DeleteDC.argtypes     = [wintypes.HDC]
+        gdi32.DeleteDC.restype      = wintypes.BOOL
 
         if not user32.IsWindow(hwnd):
             return False, f'window {hwnd} does not exist'
 
         # Restore if minimized
-        user32.IsIconic.argtypes   = [wintypes.HWND]
-        user32.IsIconic.restype    = wintypes.BOOL
-        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-        user32.ShowWindow.restype  = wintypes.BOOL
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             import time as _t; _t.sleep(0.3)
 
-        # Get full window bounds in physical screen coordinates.
-        # GetWindowRect returns real physical pixels regardless of the
-        # target window's DPI awareness — no conversion needed, no math.
-        # GetClientRect + ClientToScreen was previously used but caused
-        # incorrect position and size at non-100% DPI scaling (e.g. 125%)
-        # because Java windows are DPI-unaware and Windows scales them.
-        rect = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-        sx = rect.left
-        sy = rect.top
-        w  = rect.right  - rect.left
-        h  = rect.bottom - rect.top
-        if w <= 0 or h <= 0:
-            return False, f'window has no size ({w}x{h})'
+        # ── Get window bounds ─────────────────────────────────────────────────
+        bounds = _get_window_bounds(hwnd, debug_log=debug_log)
+        if bounds is None:
+            return False, 'could not determine window geometry'
 
-        # BitBlt from screen — no repaints, no flicker
-        hdc_screen = user32.GetDC(None)
-        hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
-        hbmp       = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
-        gdi32.SelectObject(hdc_mem, hbmp)
+        if debug_log:
+            debug_log(f'capture hwnd={hwnd} method={bounds.method} '
+                      f'sx={bounds.sx} sy={bounds.sy} w={bounds.w} h={bounds.h}')
 
-        try:
-            SRCCOPY = 0x00CC0020
-            gdi32.BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, sx, sy, SRCCOPY)
+        def _do_bitblt(sx, sy, w, h, label):
+            """BitBlt from screen DC at screen coordinates sx,sy."""
+            hdc_screen = user32.GetDC(None)
+            hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
+            hbmp       = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+            old_obj    = gdi32.SelectObject(hdc_mem, hbmp)
+            try:
+                SRCCOPY = 0x00CC0020
+                ok = gdi32.BitBlt(hdc_mem, 0, 0, w, h,
+                                  hdc_screen, sx, sy, SRCCOPY)
+                if not ok:
+                    err = ctypes.get_last_error()
+                    if debug_log:
+                        debug_log(f'BitBlt({label}) failed error={err}')
+                    return None
 
-            class BITMAPINFOHEADER(ctypes.Structure):
-                _fields_ = [
-                    ('biSize',          ctypes.c_uint32),
-                    ('biWidth',         ctypes.c_int32),
-                    ('biHeight',        ctypes.c_int32),
-                    ('biPlanes',        ctypes.c_uint16),
-                    ('biBitCount',      ctypes.c_uint16),
-                    ('biCompression',   ctypes.c_uint32),
-                    ('biSizeImage',     ctypes.c_uint32),
-                    ('biXPelsPerMeter', ctypes.c_int32),
-                    ('biYPelsPerMeter', ctypes.c_int32),
-                    ('biClrUsed',       ctypes.c_uint32),
-                    ('biClrImportant',  ctypes.c_uint32),
-                ]
+                class BITMAPINFOHEADER(ctypes.Structure):
+                    _fields_ = [
+                        ('biSize',          ctypes.c_uint32),
+                        ('biWidth',         ctypes.c_int32),
+                        ('biHeight',        ctypes.c_int32),
+                        ('biPlanes',        ctypes.c_uint16),
+                        ('biBitCount',      ctypes.c_uint16),
+                        ('biCompression',   ctypes.c_uint32),
+                        ('biSizeImage',     ctypes.c_uint32),
+                        ('biXPelsPerMeter', ctypes.c_int32),
+                        ('biYPelsPerMeter', ctypes.c_int32),
+                        ('biClrUsed',       ctypes.c_uint32),
+                        ('biClrImportant',  ctypes.c_uint32),
+                    ]
 
-            bmi           = BITMAPINFOHEADER()
-            bmi.biSize    = ctypes.sizeof(BITMAPINFOHEADER)
-            bmi.biWidth   =  w
-            bmi.biHeight  = -h  # negative = top-down
-            bmi.biPlanes  = 1
-            bmi.biBitCount    = 32
-            bmi.biCompression = 0  # BI_RGB
+                bmi           = BITMAPINFOHEADER()
+                bmi.biSize    = ctypes.sizeof(BITMAPINFOHEADER)
+                bmi.biWidth   =  w
+                bmi.biHeight  = -h
+                bmi.biPlanes  = 1
+                bmi.biBitCount    = 32
+                bmi.biCompression = 0
 
-            buf = ctypes.create_string_buffer(w * h * 4)
-            gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+                buf = ctypes.create_string_buffer(w * h * 4)
+                gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf,
+                                ctypes.byref(bmi), 0)
+                return Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1).convert('RGB')
+            finally:
+                gdi32.SelectObject(hdc_mem, old_obj)
+                user32.ReleaseDC(None, hdc_screen)
+                gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
 
-            img = Image.frombuffer('RGBA', (w, h), buf, 'raw', 'BGRA', 0, 1)
-            img = img.convert('RGB')
+        # ── Primary: BitBlt with chosen bounds ────────────────────────────────
+        img = _do_bitblt(bounds.sx, bounds.sy, bounds.w, bounds.h, bounds.method)
 
-            p = Path(out_path)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            img.save(str(p))
+        # ── Secondary: retry with alternate rect if primary failed ────────────
+        if img is None and bounds.method == 'dwm' and bounds.winrect_rect:
+            if debug_log:
+                debug_log(f'BitBlt DWM failed — retrying with GetWindowRect')
+            sx, sy, w, h = bounds.winrect_rect
+            img = _do_bitblt(sx, sy, w, h, 'winrect-fallback')
 
-            if p.exists() and p.stat().st_size > 0:
-                return True, ''
-            return False, 'captured image is empty'
-        finally:
-            user32.ReleaseDC(None, hdc_screen)
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc_mem)
+        # ── Last resort: PrintWindow ──────────────────────────────────────────
+        if img is None:
+            if debug_log:
+                debug_log(f'BitBlt failed — trying PrintWindow fallback')
+            w, h = bounds.w, bounds.h
+            hdc_screen = user32.GetDC(None)
+            hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
+            hbmp       = gdi32.CreateCompatibleBitmap(hdc_screen, w, h)
+            old_obj    = gdi32.SelectObject(hdc_mem, hbmp)
+            try:
+                user32.PrintWindow(hwnd, hdc_mem, 3)
+                class BITMAPINFOHEADER(ctypes.Structure):
+                    _fields_ = [
+                        ('biSize',ctypes.c_uint32),('biWidth',ctypes.c_int32),
+                        ('biHeight',ctypes.c_int32),('biPlanes',ctypes.c_uint16),
+                        ('biBitCount',ctypes.c_uint16),('biCompression',ctypes.c_uint32),
+                        ('biSizeImage',ctypes.c_uint32),('biXPelsPerMeter',ctypes.c_int32),
+                        ('biYPelsPerMeter',ctypes.c_int32),('biClrUsed',ctypes.c_uint32),
+                        ('biClrImportant',ctypes.c_uint32),]
+                bmi = BITMAPINFOHEADER()
+                bmi.biSize=ctypes.sizeof(BITMAPINFOHEADER)
+                bmi.biWidth=w; bmi.biHeight=-h
+                bmi.biPlanes=1; bmi.biBitCount=32; bmi.biCompression=0
+                buf = ctypes.create_string_buffer(w * h * 4)
+                gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
+                img = Image.frombuffer('RGBA',(w,h),buf,'raw','BGRA',0,1).convert('RGB')
+                if debug_log:
+                    debug_log(f'PrintWindow fallback succeeded')
+            finally:
+                gdi32.SelectObject(hdc_mem, old_obj)
+                user32.ReleaseDC(None, hdc_screen)
+                gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+
+        if img is None:
+            return False, 'all capture methods failed'
+
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(p))
+
+        if p.exists() and p.stat().st_size > 0:
+            return True, ''
+        return False, 'captured image is empty'
 
     except Exception as e:
         return False, str(e)
@@ -502,23 +720,15 @@ def _get_window_geometry_linux(wid):
 
 
 def _get_window_geometry_windows(wid):
+    """Uses _get_window_bounds for DWM-first geometry.
+    Same coordinate space as capture_window_image — paint/force clicks align correctly.
+    """
     try:
-        import ctypes
-        from ctypes import wintypes
-        try:
-            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
-        except Exception:
-            pass
-        hwnd  = int(str(wid), 0)
-        user32 = ctypes.WinDLL('user32', use_last_error=True)
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        user32.GetWindowRect.restype  = wintypes.BOOL
-        rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        hwnd   = int(str(wid), 0)
+        bounds = _get_window_bounds(hwnd)
+        if bounds is None:
             return None
-        w = rect.right  - rect.left
-        h = rect.bottom - rect.top
-        return (rect.left, rect.top, w, h) if w and h else None
+        return (bounds.sx, bounds.sy, bounds.w, bounds.h)
     except Exception:
         return None
 

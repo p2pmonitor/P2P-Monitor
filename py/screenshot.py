@@ -81,8 +81,8 @@ def _capture_btn_crop(btn_coords, env=None, wid=None):
             capture_output=True, timeout=5, env=env)
         return tmp if Path(tmp).exists() else None
     else:
-        # Windows: capture full window via PrintWindow then crop the button region.
-        # Works regardless of window occlusion or focus state.
+        # Windows: capture full window via capture_window_image (DWM-first BitBlt)
+        # then crop the button region using window-relative coordinates.
         # Requires wid to be passed through from the caller.
         if wid is None:
             return None
