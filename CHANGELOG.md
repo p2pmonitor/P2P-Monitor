@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.14
+### Windows Screenshot Overhaul
+- Added `WindowBounds` NamedTuple for clean geometry results across all capture/geometry callers
+- Added `_get_window_bounds(hwnd, debug_log=None)` shared helper — tries `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` first (true visible rendered frame), falls back to `GetWindowRect`; both use screen coordinate space consistent with `GetDC(NULL)` + BitBlt; DPI awareness set and restored per call
+- Fixed Windows screenshot capturing wrong position and wrong content at non-100% DPI scaling and multi-monitor setups — root cause was mixed coordinate spaces (`GetClientRect`/`ClientToScreen` vs screen DC); now uses DWM bounds + `GetDC(NULL)` + BitBlt in consistent Pattern A
+- Added proper `argtypes`/`restype` on all GDI/user32 calls (`GetDC`, `CreateCompatibleDC`, `CreateCompatibleBitmap`, `SelectObject`, `BitBlt`, `GetDIBits`, `DeleteObject`, `DeleteDC`, `ReleaseDC`, `PrintWindow`) — prevents handle truncation on 64-bit Windows where handles are 8 bytes but ctypes defaults to 4-byte `c_int`
+- Added three-path fallback: DWM + BitBlt → GetWindowRect + BitBlt → PrintWindow last resort; silent to normal users, detailed logging in Debug Mode
+- `get_window_geometry()` now uses `_get_window_bounds` — paint button coordinates and force command click positions use the same geometry as capture, ensuring alignment
+- `capture_window_image()` accepts optional `debug_log` callback — passed through to capture backend for per-call geometry logging in Debug Mode
+- Fixed stale comment in `screenshot.py` referencing PrintWindow; updated `platform_ops.py` docstring to accurately describe DWM-first capture backend
+- Cleaned duplicate entries in CHANGELOG.md
+
 ## v1.3.13
 ### Windows Screenshot Fix
 - Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
@@ -11,24 +23,6 @@
 ## v1.3.11
 ### Bug Fix
 - Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Stability & Performance
-- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
-- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
-- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
-
-### Launcher
-- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
-- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
 
 ## v1.3.10
 ### Bug Fixes
@@ -50,64 +44,6 @@
 
 ### Windows Screenshot Fix
 - Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Bug Fix
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Stability & Performance
-- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
-- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
-- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
-
-### Launcher
-- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
-- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
-
-## v1.3.10
-### Bug Fixes
-- Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
-- Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
-
-## v1.3.9
-### Bug Fixes
-- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
-- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
-- Fixed backfill last-seen marker not advancing to end of file — `new_last_seen` was only updated inside `_process_chunk` when events were found; now always set to the final line of each file after all chunks are processed, preventing re-processing of already-seen content on next startup
-
-## v1.3.8
-### History Backfill Redesign
-- Replaced rotation-suffix/scanned-set/byte-offset backfill tracking with a last-seen-line approach
-- All log files sorted chronologically by unix timestamp in filename — correctly handles .log, .log.1, .log.2 regardless of suffix
-- On startup, backfill scans forward through all files until it finds the last line seen in a previous session, then processes only new content after it
-- Live poll loop updates the last-seen marker after each batch of new lines so restarts always resume from the correct position
-- Last-seen line stored in offsets.json as `accountname__last_seen` — coexists with existing byte offset entries
-- On first run after update: processes all files, dedup cleans any duplicates, writes marker — fast on all subsequent starts
-- No rotation suffix tracking, no scanned sets, no base name stripping — rotation files are just part of the chronological stream
-
-### Windows Screenshot Fix
-- Replaced PrintWindow with BitBlt from screen DC — no repaints triggered, no flickering, no black frames
-
-### UI Fix
-- Break time now cleared when account goes offline — was persisting from previous session
 
 ## v1.3.7
 ### Windows Core Fixes
@@ -117,127 +53,6 @@
 
 ### Duplicate Launch Fix
 - Replaced psutil cmdline inspection for duplicate launch detection with window title lookup using `find_window_ids_by_name` — psutil cmdline access fails silently on both Linux and Windows due to process access restrictions; window title matching is already proven to work correctly on both platforms
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Bug Fix
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Stability & Performance
-- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
-- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
-- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
-
-### Launcher
-- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
-- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
-
-## v1.3.10
-### Bug Fixes
-- Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
-- Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
-
-## v1.3.9
-### Bug Fixes
-- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
-- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
-- Fixed backfill last-seen marker not advancing to end of file — `new_last_seen` was only updated inside `_process_chunk` when events were found; now always set to the final line of each file after all chunks are processed, preventing re-processing of already-seen content on next startup
-
-## v1.3.8
-### History Duplication Fix
-- Fixed root cause of duplicate history entries — `_backfill_history` was using filename sort to determine the active log file, which disagreed with `_get_active_log_file`'s mtime-based selection; the real active file was being processed from byte 0 as a rotated file, re-writing events already recorded live; backfill now uses mtime consistently with the poll loop
-- Reverted `_base_log_name` rotation-suffix stripping — DreamBot `.log.1` files are independent older session files not rotated versions of `.log`; stripping the suffix caused incorrect scanned-set lookups
-- Fixed break time persisting in status tab when account goes offline — `break_time` is now cleared when an account is detected as having no active session
-
-### Windows Screenshot Fix
-- Replaced `PrintWindow` with `BitBlt` from screen DC — `PrintWindow` was triggering DreamBot's Java renderer to repaint multiple times causing visible flickering and occasional black frames; `BitBlt` reads the screen compositor output directly with no repaints; window is already focused by caller so it is guaranteed to be on screen
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Bug Fix
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk by `set_last_seen`; shutdown now merges disk contents with in-memory offsets before saving so both are preserved
-
-## v1.3.13
-### Windows Screenshot Fix
-- Fixed screenshot capturing wrong position and cutting off content at non-100% DPI scaling (e.g. 125%) — replaced `GetClientRect` + `ClientToScreen` with `GetWindowRect` which returns the true physical pixel position and size of the window directly from Windows, no coordinate conversion or DPI math needed; works correctly at any DPI scaling setting
-
-## v1.3.12
-### Bug Fix
-- Fixed launcher not working after v1.3.11 — the new `os.path.isfile(jar)` check introduced in v1.3.11 used `os` without importing it at the module level, causing a silent `NameError` that prevented any launch from completing on both Linux and Windows
-
-## v1.3.11
-### Stability & Performance
-- Fixed `_startup_catchup` potentially running from UI refresh thread — `get_account_rows` now only triggers `_startup_catchup` on log rotation, not on initial startup; startup catchup only runs from `_run()` at startup as intended
-- Fixed `set_last_seen` writing to disk every 5 seconds regardless of change — now cached in memory per account (`_last_seen_cache`); disk write only occurs when the value actually changes, eliminating unnecessary file I/O on every poll tick
-- Fixed Discord thread membership being re-verified on every monitor start — `_threads_verified` set tracks which accounts have been verified this session; membership check skipped for already-verified accounts
-
-### Launcher
-- Added Launcher.jar file existence check before launching — shows a clear error if the configured path no longer exists instead of failing silently
-- Fixed malformed custom args crashing silently — `shlex.split` errors now show a validation message instead of passing broken args to DreamBot
-
-## v1.3.10
-### Bug Fixes
-- Fixed backfill writing history entries with current time instead of the actual log timestamp — `parse_lines` returns the timestamp in the `ts` field but the backfill was calling `ev.get('time')` which always returned `None`, causing `append_history` to fall back to the current time; now correctly passes `ev.get('ts')`
-- Fixed last-seen marker not advancing to end of file — marker is now always set to the final raw line of each file after all chunks are processed
-- Fixed last-seen marker being lost on monitor shutdown — `save_offsets` was overwriting `offsets.json` with only in-memory byte offsets, clobbering `__last_seen` keys written directly to disk; shutdown now merges disk contents with in-memory offsets before saving
-
-## v1.3.9
-### Bug Fixes
-- Fixed `append_history` call in backfill using wrong argument format — was passing the full event dict as the second argument instead of unpacking `type`, `value`, `activity`, `timestamp` as separate positional args; caused backfill error on startup
-- Fixed break time showing in status tab for offline accounts — break time now shows `—` when account is offline, matching uptime behavior
-- Fixed backfill last-seen marker not advancing to end of file — `new_last_seen` was only updated inside `_process_chunk` when events were found; now always set to the final line of each file after all chunks are processed, preventing re-processing of already-seen content on next startup
-
-## v1.3.8
-### History Backfill Redesign
-- Replaced rotation-suffix/scanned-set/byte-offset backfill tracking with a last-seen-line approach
-- All log files sorted chronologically by unix timestamp in filename — correctly handles .log, .log.1, .log.2 regardless of suffix
-- On startup, backfill scans forward through all files until it finds the last line seen in a previous session, then processes only new content after it
-- Live poll loop updates the last-seen marker after each batch of new lines so restarts always resume from the correct position
-- Last-seen line stored in offsets.json as `accountname__last_seen` — coexists with existing byte offset entries
-- On first run after update: processes all files, dedup cleans any duplicates, writes marker — fast on all subsequent starts
-- No rotation suffix tracking, no scanned sets, no base name stripping — rotation files are just part of the chronological stream
-
-### Windows Screenshot Fix
-- Replaced PrintWindow with BitBlt from screen DC — no repaints triggered, no flickering, no black frames
-
-### UI Fix
-- Break time now cleared when account goes offline — was persisting from previous session
-
-## v1.3.7
-### Windows Click & Force Command Fixes
-- Fixed force commands and paint hide/show not working — PostMessage (WM_LBUTTONDOWN/UP) does not work for Java windows; Java AWT/Swing intercepts raw input at a lower level and ignores standard Windows messages; reverted to mouse_event with correct multi-monitor coordinate math
-- Fixed clicks landing on wrong monitor — added MOUSEEVENTF_VIRTUALDESK flag and normalize coordinates against full virtual desktop dimensions (SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN) rather than primary monitor only; also added SM_XVIRTUALSCREEN/SM_YVIRTUALSCREEN offsets for virtual desktop origin
-- Fixed triple-click on paint hide/show — removed self-correction logic that re-clicked when detection result was uncertain; with a correct reference snap, one click is sufficient and the self-correction was causing extra clicks when detection was unreliable
-
-### Windows Core Fix
-- Fixed monitor not detecting script activity — active log file fallback now uses most-recently-modified file (mtime) instead of newest by filename; DreamBot creates new log files per launch so newest filename is often an empty new session while activity continues in an older file
-
-### Duplicate Launch Fix
-- Replaced psutil cmdline inspection with window title lookup for duplicate launch detection; psutil cmdline access fails silently on both platforms; window title matching via find_window_ids_by_name is proven to work on both Linux and Windows
 
 ## v1.3.6
 ### Critical Windows Fix — Active Log File Detection
