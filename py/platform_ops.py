@@ -372,18 +372,20 @@ def _capture_window_image_windows(window_id, out_path):
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             import time as _t; _t.sleep(0.3)
 
-        # Get client area size
+        # Get full window bounds in physical screen coordinates.
+        # GetWindowRect returns real physical pixels regardless of the
+        # target window's DPI awareness — no conversion needed, no math.
+        # GetClientRect + ClientToScreen was previously used but caused
+        # incorrect position and size at non-100% DPI scaling (e.g. 125%)
+        # because Java windows are DPI-unaware and Windows scales them.
         rect = wintypes.RECT()
-        user32.GetClientRect(hwnd, ctypes.byref(rect))
-        w = rect.right  - rect.left
-        h = rect.bottom - rect.top
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        sx = rect.left
+        sy = rect.top
+        w  = rect.right  - rect.left
+        h  = rect.bottom - rect.top
         if w <= 0 or h <= 0:
-            return False, f'window has no client area ({w}x{h})'
-
-        # Get client area position in screen coordinates
-        pt = wintypes.POINT()
-        user32.ClientToScreen(hwnd, ctypes.byref(pt))
-        sx, sy = pt.x, pt.y
+            return False, f'window has no size ({w}x{h})'
 
         # BitBlt from screen — no repaints, no flicker
         hdc_screen = user32.GetDC(None)
