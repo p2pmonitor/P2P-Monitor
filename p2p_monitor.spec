@@ -4,12 +4,12 @@
 #
 # Usage:
 #   pip install pyinstaller
+#   pip install -r requirements-windows.txt
+#   python -c "import discord; print('discord.py OK')"   # verify before building
+#   python -c "from PIL import Image, ImageGrab, ImageChops; print('Pillow OK')"
 #   pyinstaller p2p_monitor.spec
 #
 # Output: dist/P2P Monitor.exe (single file, no console window)
-#
-# Requirements (must be installed in your build environment):
-#   pip install -r requirements-windows.txt
 
 block_cipher = None
 
@@ -19,7 +19,7 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
-        # discord.py and its dependencies
+        # discord.py and all required submodules
         'discord',
         'discord.ext',
         'discord.ext.commands',
@@ -27,32 +27,58 @@ a = Analysis(
         'discord.http',
         'discord.state',
         'discord.ui',
+        'discord.opus',
+        'discord.voice_client',
+        'discord.webhook',
+        'discord.webhook.sync',
+        'discord.webhook.async_',
+        # aiohttp (discord.py dependency)
         'aiohttp',
         'aiohttp.connector',
+        'aiohttp.resolver',
+        'aiohttp.cookiejar',
+        'aiohttp.client_exceptions',
         # psutil
         'psutil',
         'psutil._pswindows',
-        # PIL / Pillow
+        'psutil._psutil_windows',
+        # PIL / Pillow — all modules used by P2P Monitor
         'PIL',
         'PIL.Image',
         'PIL.ImageGrab',
         'PIL.ImageDraw',
-        # stdlib modules that PyInstaller sometimes misses
+        'PIL.ImageChops',
+        # pystray (system tray)
+        'pystray',
+        'pystray._win32',
+        # tkinter
         'tkinter',
         'tkinter.ttk',
         'tkinter.messagebox',
         'tkinter.filedialog',
-        'pystray',
+        'tkinter.font',
+        'tkinter.simpledialog',
+        # stdlib modules PyInstaller sometimes misses
         'webbrowser',
         'urllib.request',
+        'urllib.parse',
         'zipfile',
         'tempfile',
         'threading',
         'platform',
+        'shlex',
+        'json',
+        'pathlib',
+        'logging',
+        'asyncio',
+        'asyncio.events',
+        'asyncio.tasks',
+        'asyncio.futures',
+        'asyncio.runners',
     ],
     excludes=[
-        # Linux-only — not needed in Windows build
-        'curses',
+        'curses',       # Linux-only
+        'readline',     # Linux-only
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -76,7 +102,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,       # no console window — Tkinter app
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
