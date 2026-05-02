@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.3.15
+### Windows DPI Scaling Fix for Button Clicks
+- Added `get_window_dpi_scale(window_id)` helper in `platform_ops.py` — queries `GetDpiForWindow` for the actual DPI of the monitor the window is on; returns scale factor (1.0 at 100%, 1.25 at 125%, 1.5 at 150% etc); returns 1.0 on Linux and on any error
+- Fixed paint hide/show click landing in wrong position at non-100% DPI — `PAINT_BTN_X_OFFSET` and `PAINT_BTN_Y_OFFSET` were hardcoded at 100% DPI assumptions; now scaled by DPI factor using `round()` for accurate physical pixel positions
+- Fixed paint reference crop capturing wrong area at non-100% DPI — `PAINT_BTN_CROP_W` and `PAINT_BTN_CROP_H` now scaled by DPI factor; affects both Linux ImageMagick crop and Windows BitBlt crop
+- Fixed all force commands (`/force Stats`, `/force Loot`, `/force Hide`, `/force +10m`, `/force -10m`, `/force Skip`) clicking wrong position at non-100% DPI — all `CLICK_OFFSETS` in `paint.py` now scaled by DPI factor at point of use
+- Linux unaffected — `get_window_dpi_scale` always returns 1.0 on Linux, all multiplications are no-ops
+- Note: only hardcoded UI offsets are scaled; window bounds are already physical pixels from the v1.3.14 DWM fix and are not scaled
+
+### Paint Constants Centralized
+- Moved `PAINT_BTN_X_OFFSET`, `PAINT_BTN_Y_OFFSET`, `PAINT_BTN_CROP_W`, `PAINT_BTN_CROP_H` from `paint.py` and `screenshot.py` into `platform_ops.py` as the single source of truth; both files import from there
+- Added `paint_ref_scale.txt` companion file saved alongside the paint reference image — stores the DPI scale at snap time; `_paint_is_visible` reads this on every call and auto-resnaps the reference if scale has changed by more than 0.05 (e.g. window moved to different monitor or user changed DPI setting); guarded against resnap loops
+
 ## v1.3.14
 ### Windows Screenshot Overhaul
 - Added `WindowBounds` NamedTuple for clean geometry results across all capture/geometry callers
