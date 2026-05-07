@@ -46,7 +46,7 @@ from py.platform_ops import (find_window_ids_by_name, capture_window_image,
                              is_window_minimized, restore_window,
                              raise_and_focus_window, minimize_window,
                              click_at, supports_paint_detection,
-                             get_window_dpi_scale,
+                             get_window_dpi_scale, get_window_title,
                              PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET,
                              PAINT_BTN_CROP_W, PAINT_BTN_CROP_H)
 
@@ -59,6 +59,9 @@ def get_focused_wid():
     return get_focused_window()
 
 def _get_paint_btn_coords(wid, env=None):
+    """Return paint button position in DWM/capture-space coordinates.
+    Used for crop, reference, and visibility detection — NOT for clicking.
+    """
     from py.platform_ops import get_window_geometry
     geom = get_window_geometry(wid)
     if not geom:
@@ -73,6 +76,7 @@ def _get_paint_btn_coords(wid, env=None):
 def _capture_btn_crop(btn_coords, env=None, wid=None):
     """Capture a crop of the paint button area. Returns path to temp file or None."""
     import sys
+
     bx, by = btn_coords
     scale  = get_window_dpi_scale(wid) if wid else 1.0
     crop_w = round(PAINT_BTN_CROP_W * scale)
@@ -88,9 +92,6 @@ def _capture_btn_crop(btn_coords, env=None, wid=None):
             capture_output=True, timeout=5, env=env)
         return tmp if Path(tmp).exists() else None
     else:
-        # Windows: capture full window via capture_window_image (DWM-first BitBlt)
-        # then crop the button region using window-relative coordinates.
-        # Requires wid to be passed through from the caller.
         if wid is None:
             return None
         try:
@@ -100,14 +101,32 @@ def _capture_btn_crop(btn_coords, env=None, wid=None):
             ok, err  = capture_window_image(wid, tmp_full)
             if not ok or not Path(tmp_full).exists():
                 return None
-            # Convert absolute screen coords to window-client-relative coords
+
             geom = get_window_geometry(wid)
             if not geom:
+                try: Path(tmp_full).unlink(missing_ok=True)
+                except Exception: pass
                 return None
             win_x, win_y, win_w, win_h = geom
             rel_x0 = x0 - win_x
             rel_y0 = y0 - win_y
-            img  = Image.open(tmp_full)
+
+            img = Image.open(tmp_full)
+            img_w, img_h = img.size
+
+            # Hard bounds validation — never save a crop that falls outside the
+            # captured image, which would produce garbage or the full window image
+            bounds_ok = (
+                rel_x0 >= 0 and
+                rel_y0 >= 0 and
+                rel_x0 + crop_w <= img_w and
+                rel_y0 + crop_h <= img_h
+            )
+            if not bounds_ok:
+                try: Path(tmp_full).unlink(missing_ok=True)
+                except Exception: pass
+                return None
+
             crop = img.crop((rel_x0, rel_y0,
                              rel_x0 + crop_w,
                              rel_y0 + crop_h))
@@ -184,19 +203,73 @@ def _paint_is_visible(btn_coords, env=None, wid=None):
 
 def _save_paint_reference(btn_coords, env=None, log=None, debug=False, wid=None):
     crop = _capture_btn_crop(btn_coords, env, wid=wid)
-    if crop:
+    if not crop:
+        return
+    # Guard: only save if the crop file actually exists and has non-zero size
+    crop_path = Path(crop)
+    if not crop_path.exists() or crop_path.stat().st_size == 0:
+        try: crop_path.unlink(missing_ok=True)
+        except Exception: pass
+        return
+    try:
+        shutil.move(crop, str(PAINT_REF_FILE))
+        scale = get_window_dpi_scale(wid) if wid else 1.0
         try:
-            shutil.move(crop, str(PAINT_REF_FILE))
-            # Save DPI scale alongside reference so _paint_is_visible can detect
-            # if the user's DPI changes and auto-resnap when needed
-            scale = get_window_dpi_scale(wid) if wid else 1.0
+            PAINT_REF_SCALE_FILE.write_text(str(scale))
+        except Exception:
+            pass  # scale file is best-effort
+    except Exception as e:
+        if debug and log:
+            log(f'[DEBUG] _save_paint_reference failed: {e}')
+
+def _get_paint_click_coords(wid):
+    """
+    Compute paint button click position using ClientToScreen as anchor.
+
+    DWM EXTENDED_FRAME_BOUNDS (used by get_window_geometry) includes the
+    invisible drop shadow border — its origin and size do not match the
+    actual clickable client area. Using DWM coords for clicking lands below
+    the real window bottom.
+
+    Uses ClientToScreen(hwnd, 0,0) to get the real client area origin on the
+    desktop, then adds client-relative offsets. No DPI scaling applied —
+    ClientToScreen returns logical desktop coordinates which is the same space
+    SetCursorPos operates in.
+
+    Only used for click injection. Crop/reference path keeps using DWM geometry.
+    Returns (click_x, click_y) or None on failure.
+    """
+    import sys
+    if sys.platform != 'win32':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd   = int(str(wid), 0)
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        old_ctx = None
+        try:
+            old_ctx = user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            pass
+        # Client area size
+        cr = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(cr))
+        client_h = cr.bottom
+        # Client origin on desktop
+        pt = wintypes.POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        click_x = pt.x + PAINT_BTN_X_OFFSET
+        click_y = pt.y + client_h - PAINT_BTN_Y_OFFSET
+        if old_ctx is not None:
             try:
-                PAINT_REF_SCALE_FILE.write_text(str(scale))
+                user32.SetThreadDpiAwarenessContext(old_ctx)
             except Exception:
-                pass  # scale file is best-effort
-        except Exception as e:
-            if debug and log:
-                log(f'[DEBUG] _save_paint_reference failed: {e}')
+                pass
+        return (click_x, click_y)
+    except Exception:
+        return None
+
 
 def _click_paint_button(coords, env=None):
     """Click the paint toggle button. env param kept for call-site compat."""
@@ -434,7 +507,18 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
         wids = find_window_ids_by_name(account_name)
         if not wids:
             return None, f"No window found for account: {account_name}"
+
         target_wid = wids[0]
+
+        # ── Hard guard: verify the chosen HWND actually belongs to DreamBot ──
+        confirmed_title = get_window_title(target_wid)
+        title_lower = confirmed_title.lower()
+        if 'dreambot' not in title_lower or account_name.lower() not in title_lower:
+            return None, (
+                f"HWND {target_wid} title {confirmed_title!r} does not match "
+                f"expected DreamBot account {account_name!r} — capture aborted "
+                f"to prevent wrong-window screenshot"
+            )
 
         ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', account_name)
@@ -457,21 +541,26 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False):
             btn_coords = _get_paint_btn_coords(target_wid) if supports_paint_detection() else None
             did_hide   = False
             if btn_coords and supports_paint_detection():
+                # btn_coords   — DWM-based logical coords, used for crop/reference/visibility
+                # click_coords — ClientToScreen-based coords, used for click injection only
+                # Falls back to btn_coords on Linux (where client == DWM frame)
+                click_coords = _get_paint_click_coords(target_wid) or btn_coords
                 if not PAINT_REF_FILE.exists():
                     _save_paint_reference(btn_coords, wid=target_wid)
                 paint_visible = _paint_is_visible(btn_coords, wid=target_wid)
                 if hide_paint and paint_visible:
-                    _click_paint_button(btn_coords)
+                    _click_paint_button(click_coords)
                     time.sleep(0.3)
                     did_hide = True
                 elif not hide_paint and not paint_visible:
-                    _click_paint_button(btn_coords)
+                    _click_paint_button(click_coords)
                     time.sleep(0.3)
 
             ok_cap, err_cap = capture_window_image(target_wid, out_path)
 
             if did_hide and btn_coords:
-                _click_paint_button(btn_coords)
+                click_coords = _get_paint_click_coords(target_wid) or btn_coords
+                _click_paint_button(click_coords)
         finally:
             if target_was_minimized:
                 try:

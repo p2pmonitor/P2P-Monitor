@@ -381,7 +381,10 @@ def slice_tasks(lines):
             ms = parse_break_length_ms(arr, max(0, i - 25), max_search=51)
             if ms is not None:
                 activity = "Length: " + format_break_duration(ms)
-            result.append(("Break", activity))
+            # Store the actual log line as search hint so parse_lines can find
+            # the correct line index and timestamp via _find_ts — not 'Break'
+            # which would never match anything in arr and fall back to len(arr).
+            result.append(("Break", activity, line))
 
     # Task scanning — anchor on 'Task is' and 'Actually task is'
     i = 0
@@ -713,9 +716,13 @@ def parse_lines(lines):
     for _, quest in slice_quests(arr):
         events.append(_ev('quest', quest, '', quest))
 
-    # Tasks (non-slayer)
-    for task_name, activity in slice_tasks(arr):
-        events.append(_ev('task', task_name, activity, task_name))
+    # Tasks (non-slayer) — tuples are (name, activity) or (name, activity, search_hint)
+    # BREAK START entries carry the raw log line as search_hint so _find_ts resolves
+    # the correct index; regular tasks use task_name as the search string.
+    for tup in slice_tasks(arr):
+        task_name, activity = tup[0], tup[1]
+        search_hint = tup[2] if len(tup) > 2 else task_name
+        events.append(_ev('task', task_name, activity, search_hint))
 
     # Slayer new task
     for monster, count in slice_slayer_tasks(arr):

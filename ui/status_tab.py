@@ -100,7 +100,7 @@ class StatusTab:
             ('screenshot',  90, 'Screenshot'),
         ]:
             app._st_tree.heading(col, text=lbl)
-            app._st_tree.column(col, width=w, minwidth=w if col == 'action' else 40, anchor='w')
+            app._st_tree.column(col, width=w, minwidth=w if col == 'account' else 40, anchor='w')
 
         scr = ttk.Scrollbar(f, orient='vertical', command=app._st_tree.yview)
         app._st_tree.configure(yscrollcommand=scr.set)

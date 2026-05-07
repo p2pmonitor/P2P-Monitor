@@ -31,14 +31,32 @@ def get_last_seen(account):
 
 
 def set_last_seen(account, line):
-    """Store the last log line seen by backfill for this account."""
-    offsets = load_offsets()
-    offsets[f'{account}__last_seen'] = line
-    save_offsets(offsets)
+    """Store the last log line seen by backfill for this account.
+    Merges only the __last_seen key into the existing offsets file rather than
+    doing a full load+save cycle — avoids unnecessary disk reads on every poll tick.
+    """
+    key = f'{account}__last_seen'
+    try:
+        data = {}
+        if OFFSETS_FILE.exists():
+            try:
+                with open(OFFSETS_FILE, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        data = loaded
+            except Exception:
+                pass
+        if data.get(key) == line:
+            return  # already current — skip the write entirely
+        data[key] = line
+        OFFSETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(OFFSETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+    except Exception:
+        pass  # best-effort — backfill will re-process on next startup if lost
 
 
 def load_offsets(log_fn=None, debug=False):
-
     """Load {filename: byte_offset} from offsets.json. Returns empty dict if missing/corrupt."""
     try:
         if OFFSETS_FILE.exists():

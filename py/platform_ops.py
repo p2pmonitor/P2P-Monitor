@@ -929,18 +929,18 @@ def _click_at_windows(x, y):
     simulate real hardware input that Java's event system will receive.
 
     Uses MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK for correct coordinate
-    normalization across multiple monitors and any DPI scaling:
-    - SetThreadDpiAwarenessContext(-4) ensures physical pixel coordinates
-    - SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN give the full virtual desktop size
-    - MOUSEEVENTF_VIRTUALDESK normalizes against the full virtual desktop,
-      not just the primary monitor — critical for multi-monitor setups
+    normalization across multiple monitors. Virtual desktop bounds are derived
+    from EnumDisplayMonitors which returns physical pixel rects for every monitor,
+    avoiding the GetSystemMetrics logical-pixel ambiguity on scaled displays.
+    Falls back to GetSystemMetrics if EnumDisplayMonitors fails or returns nothing.
     """
     try:
         import ctypes
+        from ctypes import wintypes
 
-        # Physical pixel coordinates
+        old_ctx = None
         try:
-            ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
         except Exception:
             pass
 
@@ -948,19 +948,49 @@ def _click_at_windows(x, y):
         MOUSEEVENTF_LEFTDOWN    = 0x0002
         MOUSEEVENTF_LEFTUP      = 0x0004
         MOUSEEVENTF_ABSOLUTE    = 0x8000
-        MOUSEEVENTF_VIRTUALDESK = 0x4000  # normalize against virtual desktop
+        MOUSEEVENTF_VIRTUALDESK = 0x4000
 
-        # SM_XVIRTUALSCREEN=76, SM_YVIRTUALSCREEN=77 — virtual desktop origin
-        # SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79 — virtual desktop size
-        vx = ctypes.windll.user32.GetSystemMetrics(76)  # virtual desktop left
-        vy = ctypes.windll.user32.GetSystemMetrics(77)  # virtual desktop top
-        vw = ctypes.windll.user32.GetSystemMetrics(78)  # virtual desktop width
-        vh = ctypes.windll.user32.GetSystemMetrics(79)  # virtual desktop height
+        # ── Virtual desktop bounds via EnumDisplayMonitors (physical pixels) ──
+        monitors = []
+        vx = vy = vw = vh = None
 
-        if vw <= 0: vw = ctypes.windll.user32.GetSystemMetrics(0)
-        if vh <= 0: vh = ctypes.windll.user32.GetSystemMetrics(1)
+        try:
+            MonitorEnumProc = ctypes.WINFUNCTYPE(
+                ctypes.c_bool,
+                ctypes.c_ulong,
+                ctypes.c_ulong,
+                ctypes.POINTER(wintypes.RECT),
+                ctypes.c_double
+            )
 
-        # Normalize to 0-65535 relative to virtual desktop origin
+            def _monitor_cb(hmon, hdc, lprect, data):
+                r = lprect.contents
+                monitors.append((r.left, r.top, r.right, r.bottom))
+                return True
+
+            cb = MonitorEnumProc(_monitor_cb)
+            ctypes.windll.user32.EnumDisplayMonitors(None, None, cb, 0)
+
+            if monitors:
+                vx = min(m[0] for m in monitors)
+                vy = min(m[1] for m in monitors)
+                vw = max(m[2] for m in monitors) - vx
+                vh = max(m[3] for m in monitors) - vy
+        except Exception:
+            pass
+
+        # ── Fallback: GetSystemMetrics ────────────────────────────────────────
+        if vx is None or vw is None or vw <= 0:
+            vx = ctypes.windll.user32.GetSystemMetrics(76)
+            vy = ctypes.windll.user32.GetSystemMetrics(77)
+            vw = ctypes.windll.user32.GetSystemMetrics(78)
+            vh = ctypes.windll.user32.GetSystemMetrics(79)
+            if vw <= 0:
+                vw = ctypes.windll.user32.GetSystemMetrics(0)
+            if vh <= 0:
+                vh = ctypes.windll.user32.GetSystemMetrics(1)
+
+        # ── Normalize and inject ──────────────────────────────────────────────
         ax = int((x - vx) * 65535 / max(vw, 1))
         ay = int((y - vy) * 65535 / max(vh, 1))
 
@@ -973,6 +1003,13 @@ def _click_at_windows(x, y):
         ctypes.windll.user32.mouse_event(
             MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
             ax, ay, 0, 0)
+
+        if old_ctx is not None:
+            try:
+                ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
+            except Exception:
+                pass
+
     except Exception:
         pass
 
@@ -1016,6 +1053,33 @@ PAINT_BTN_X_OFFSET = 100   # pixels from window left edge to Hide button
 PAINT_BTN_Y_OFFSET = 50    # pixels from window bottom edge to Hide button
 PAINT_BTN_CROP_W   = 60    # crop width for paint button visibility check
 PAINT_BTN_CROP_H   = 20    # crop height for paint button visibility check
+
+
+def get_window_title(window_id):
+    """Return the window title string for the given window_id, or '' on failure.
+    Used to verify a matched HWND actually belongs to the expected process before capture.
+    Linux: xdotool getwindowname. Windows: GetWindowTextW.
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            r = subprocess.run(
+                ['xdotool', 'getwindowname', str(window_id)],
+                capture_output=True, text=True, timeout=3)
+            return r.stdout.strip() if r.returncode == 0 else ''
+        elif sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+            hwnd   = int(str(window_id), 0)
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return ''
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value or ''
+    except Exception:
+        pass
+    return ''
 
 
 def supports_paint_detection():

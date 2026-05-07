@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.3.15
+P2P Monitor v1.3.16
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -21,8 +21,6 @@ File structure:
 """
 
 import os
-import re
-import shutil
 import sys
 import threading
 import tkinter as tk
@@ -46,7 +44,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.3.15"
+VERSION      = "1.3.16"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -91,7 +89,7 @@ def _send_startup_ping(cfg, log_fn=None):
     """Send anonymous startup ping in background. No retry, no IDs, fails silently."""
     if not cfg.get('enable_usage_stats', True):
         return
-    import platform, urllib.request, json as _json, threading
+    import platform, urllib.request, json as _json
     def _ping():
         try:
             url     = cfg.get('usage_stats_url', 'https://stats.p2pmonitor.workers.dev')

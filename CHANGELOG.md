@@ -1,6 +1,81 @@
 # Changelog
 
-## v1.3.15
+## v1.3.16
+### Code Quality, Reliability & Windows Click/Screenshot Fixes
+
+---
+
+**Code quality & reliability (all platforms)**
+
+- Fixed `set_last_seen` doing a full `load_offsets` + `save_offsets` disk cycle on every poll tick — now skips the write entirely if the stored value is already current; prevents unnecessary disk wear and reduces corruption risk on ungraceful shutdown (`py/history.py`)
+- Fixed `slice_tasks` BREAK START entries getting an incorrect line index of `len(arr)` — the search hint passed to `_find_ts` was `"Break"` which never matches any real log line; now passes the actual log line as the search hint so timestamps and sort order are correct by design rather than by accident (`py/reader.py`)
+- Fixed dead column condition `col == 'action'` in status tab column setup — column named `'action'` does not exist; corrected to `col == 'account'` so the account column gets its intended `minwidth` (`ui/status_tab.py`)
+- Fixed unused `log_files = _get_log_files(d)` glob call in the main poll loop — result was immediately discarded on every tick; removed to eliminate redundant disk I/O (`py/watcher.py`)
+- Fixed dir cache not invalidating when log folder is changed in Settings — `_dirs_last_check` is now reset to 0 on save so the new path takes effect within one poll cycle instead of up to 30 seconds later (`ui/settings_tab.py`, `py/watcher.py`)
+- Fixed `_startup_catchup` on log rotation running synchronously on the status refresh thread — moved to a daemon thread; prevents UI stutter on large log files during rotation (`py/watcher.py`)
+- Removed `BotRunner` tombstone class — no longer imported anywhere (`py/discord.py`)
+- Removed redundant `import threading` inside `_send_startup_ping` — already imported at module level (`p2p_monitor.py`)
+- Removed unused top-level imports `shutil` and `re` from `p2p_monitor.py`
+- Fixed blank line between `def load_offsets` and its docstring (`py/history.py`)
+- Added comment documenting the intentional deferred import of `discord.py` inside `ScreenshotService._worker` to prevent circular import (`py/discord.py`)
+
+---
+
+**Windows screenshot & click coordinate fixes**
+
+**Root cause:** `get_window_geometry()` uses `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` which includes the invisible drop shadow border around DreamBot windows. This made the geometry origin and height larger than the actual clickable client area — clicking at DWM-based coordinates landed below the real window bottom (e.g. y=788 when client bottom was 680), causing clicks to hit whatever was underneath DreamBot. Crop and reference capture were unaffected because they operate in DWM/image space consistently.
+
+- Added `get_window_title(window_id)` helper to `platform_ops.py` — retrieves actual window title via `GetWindowTextW` on Windows / `xdotool getwindowname` on Linux
+- `take_screenshot()` now verifies both `"dreambot"` and the account name appear in the chosen HWND's title before any capture attempt; aborts with a clear error if not matched — prevents Discord or other windows from being captured via stale HWNDs (`py/screenshot.py`)
+- Added `_get_paint_click_coords(wid)` — uses `ClientToScreen(hwnd, 0,0)` as anchor to get the real client area origin on the desktop, then adds `PAINT_BTN_X/Y_OFFSET` as client-relative offsets with no DPI scaling; `take_screenshot()` now uses this for all paint toggle clicks; crop/reference/visibility detection continues using DWM-based `_get_paint_btn_coords` unchanged (`py/screenshot.py`)
+- Added `_get_client_click_pos(wid, offset_x, offset_y)` — same `ClientToScreen` anchor approach for force clicks; on Linux falls back to existing DWM geometry + DPI-scaled offset path which was already correct (`py/paint.py`)
+- Updated all four force-click functions (`click_at_offset`, `do_force_skill`, `do_force_panel`, `do_force`) to use `_get_client_click_pos` on Windows (`py/paint.py`)
+- Replaced `GetSystemMetrics(76/77/78/79)` virtual desktop bounds in `_click_at_windows` with `EnumDisplayMonitors` union — `GetSystemMetrics` returns logical pixels on scaled monitors causing wrong normalization on multi-monitor setups; `EnumDisplayMonitors` returns physical pixel rects regardless of DPI context; `GetSystemMetrics` retained as fallback (`py/platform_ops.py`)
+- Restored DPI context after click injection via `SetThreadDpiAwarenessContext(old_ctx)` — previously the context was set but never restored (`py/platform_ops.py`)
+- `_capture_btn_crop()` Windows path now validates crop box bounds before calling `img.crop()` — returns `None` if crop box falls outside image bounds; `_paint_full_cap.png` temp file cleaned up after each crop (`py/screenshot.py`)
+- `_save_paint_reference()` now verifies crop file exists and has non-zero size before calling `shutil.move`; an existing valid reference can no longer be overwritten by a failed or empty crop (`py/screenshot.py`)
+
+
+### Windows Screenshot & Click Coordinate Fixes
+
+**Root cause:** `get_window_geometry()` uses `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` which includes the invisible drop shadow border around DreamBot windows. This made the geometry origin and height larger than the actual clickable client area — clicking at DWM-based coordinates landed below the real window bottom (e.g. y=788 when client bottom was 680), causing clicks to hit whatever was underneath DreamBot (ChatGPT, taskbar, etc.). Crop and reference capture were unaffected because they operate in DWM/image space consistently.
+
+**Screenshot paint hide/show click fix (`py/screenshot.py`):**
+- Added `_get_paint_click_coords(wid)` — uses `ClientToScreen(hwnd, 0,0)` as anchor to get the real client area origin on the desktop, then adds `PAINT_BTN_X/Y_OFFSET` as client-relative offsets with no DPI scaling; returns `None` on Linux where client area equals frame
+- `take_screenshot()` now uses `_get_paint_click_coords` for all three paint toggle click sites, falling back to `btn_coords` on Linux; crop/reference/visibility detection continues using `_get_paint_btn_coords` (DWM-based) unchanged
+
+**Force click fix (`py/paint.py`):**
+- Added `_get_client_click_pos(wid, offset_x, offset_y)` — same `ClientToScreen` anchor approach; on Linux falls back to existing DWM geometry + DPI-scaled offset path which was already correct
+- Updated all four force-click functions (`click_at_offset`, `do_force_skill`, `do_force_panel`, `do_force`) to use `_get_client_click_pos` on Windows
+
+**Click injection fix (`py/platform_ops.py`):**
+- Replaced `GetSystemMetrics(76/77/78/79)` virtual desktop bounds with `EnumDisplayMonitors` union — `GetSystemMetrics` returns logical pixels on scaled monitors causing wrong normalization; `EnumDisplayMonitors` returns physical pixel rects for every monitor regardless of DPI context; `GetSystemMetrics` retained as fallback
+- Restored DPI context after click via `SetThreadDpiAwarenessContext(old_ctx)`
+
+**Screenshot HWND guard (`py/screenshot.py`):**
+- Added `get_window_title(window_id)` to `platform_ops.py` — retrieves actual window title via `GetWindowTextW` on Windows / `xdotool getwindowname` on Linux
+- `take_screenshot()` now verifies both `"dreambot"` and the account name appear in the chosen HWND's title before any capture; aborts with a clear error if not matched — prevents Discord or other windows from being captured via stale HWNDs
+
+**Crop/reference safety guards (`py/screenshot.py`):**
+- `_capture_btn_crop()` Windows path now validates crop box bounds before calling `img.crop()` — returns `None` if `rel_x0 < 0`, `rel_y0 < 0`, or crop extends past image edge; `_paint_full_cap.png` temp file cleaned up after each crop
+- `_save_paint_reference()` now verifies crop file exists and has non-zero size before calling `shutil.move`; an existing valid reference can no longer be overwritten by a failed or empty crop
+
+
+### Code Quality & Reliability Fixes
+
+- Fixed `set_last_seen` doing a full `load_offsets` + `save_offsets` disk cycle on every call — now reads and writes only when the stored value has actually changed, and skips the write entirely if the value is already current; prevents unnecessary disk wear and reduces corruption risk on ungraceful shutdown (`py/history.py`)
+- Fixed `slice_tasks` BREAK START entries getting an incorrect line index of `len(arr)` — the search hint passed to `_find_ts` was `"Break"` (the synthesised task name) which never matches any real log line; now passes the actual log line as the search hint so timestamps and sort order are correct by design rather than by accident (`py/reader.py`)
+- Fixed dead column condition `col == 'action'` in status tab column setup — column named `'action'` does not exist; corrected to `col == 'account'` so the account column gets its intended `minwidth` (`ui/status_tab.py`)
+- Fixed unused `log_files = _get_log_files(d)` glob call in the main poll loop — result was immediately discarded on every tick; removed to eliminate redundant disk I/O every poll interval (`py/watcher.py`)
+- Fixed dir cache not invalidating when log folder is changed in Settings — `_dirs_last_check` is now reset to 0 on save so the new path takes effect within one poll cycle instead of up to 30 seconds later (`ui/settings_tab.py`, `py/watcher.py`)
+- Fixed `_startup_catchup` on log rotation running synchronously on the status refresh thread — moved to a daemon thread matching the initial startup catchup path; prevents UI stutter on large log files during rotation (`py/watcher.py`)
+- Removed `BotRunner` tombstone class — no longer imported anywhere; dead code removed (`py/discord.py`)
+- Removed redundant `import threading` inside `_send_startup_ping` — `threading` is already imported at module level (`p2p_monitor.py`)
+- Removed unused top-level imports `shutil` and `re` from `p2p_monitor.py` — both are used only in submodules
+- Fixed blank line between `def load_offsets` and its docstring — cosmetic editing artifact (`py/history.py`)
+- Added comment documenting the intentional deferred import of `discord.py` inside `ScreenshotService._worker` to prevent circular import; guards against future refactors accidentally moving it to module level (`py/discord.py`)
+
+
 ### Windows DPI Scaling Fix for Button Clicks
 - Added `get_window_dpi_scale(window_id)` helper in `platform_ops.py` — queries `GetDpiForWindow` for the actual DPI of the monitor the window is on; returns scale factor (1.0 at 100%, 1.25 at 125%, 1.5 at 150% etc); returns 1.0 on Linux and on any error
 - Fixed paint hide/show click landing in wrong position at non-100% DPI — `PAINT_BTN_X_OFFSET` and `PAINT_BTN_Y_OFFSET` were hardcoded at 100% DPI assumptions; now scaled by DPI factor using `round()` for accurate physical pixel positions

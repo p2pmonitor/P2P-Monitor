@@ -4,6 +4,7 @@ Owns hide/show paint and all click-based interactions.
 All coordinates are offsets from the bottom-left of the DreamBot window.
 """
 
+import sys
 import time
 
 from py.platform_ops import (find_window_ids_by_name, get_focused_window,
@@ -56,6 +57,61 @@ PANEL_ACTIONS = {'Stats', 'Loot'}
 # Actions that need an amount parameter (clicked N times)
 AMOUNT_ACTIONS = {'-10m', '+10m'}
 
+
+def _get_client_click_pos(wid, offset_x, offset_y):
+    """
+    Compute absolute desktop click position for a client-relative offset.
+
+    On Windows, uses ClientToScreen(hwnd, 0,0) as the anchor so clicks land
+    in the actual client area — not the DWM extended frame which includes the
+    invisible drop shadow and produces y-coords below the real window bottom.
+    No DPI scaling applied: ClientToScreen returns logical desktop coords which
+    is the same space SetCursorPos operates in.
+
+    On Linux, falls back to DWM geometry (get_window_geometry) with DPI scaling
+    since client area == frame on X11 and scaling works correctly there.
+
+    Returns (click_x, click_y).
+    """
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd   = int(str(wid), 0)
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            old_ctx = None
+            try:
+                old_ctx = user32.SetThreadDpiAwarenessContext(-4)
+            except Exception:
+                pass
+            # Client area size
+            cr = wintypes.RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(cr))
+            client_h = cr.bottom
+            # Client origin on desktop
+            pt = wintypes.POINT(0, 0)
+            user32.ClientToScreen(hwnd, ctypes.byref(pt))
+            click_x = pt.x + offset_x
+            click_y = pt.y + client_h - offset_y
+            if old_ctx is not None:
+                try:
+                    user32.SetThreadDpiAwarenessContext(old_ctx)
+                except Exception:
+                    pass
+            return click_x, click_y
+        except Exception:
+            pass  # fall through to DWM path on any failure
+
+    # Linux / fallback: DWM geometry + DPI-scaled offsets
+    geom = get_window_geometry(wid)
+    if not geom:
+        return None, None
+    x, y, w, h = geom
+    scale   = get_window_dpi_scale(wid)
+    click_x = x + round(offset_x * scale)
+    click_y = y + h - round(offset_y * scale)
+    return click_x, click_y
+
 # ── Window helpers ─────────────────────────────────────────────────────────────
 def _find_window(account):
     """Find DreamBot window ID for account. Returns wid string or None."""
@@ -75,21 +131,14 @@ def click_at_offset(account, offset_x, offset_y):
     wid = _find_window(account)
     if not wid:
         return False, f"No window found for account: {account}"
-    geom = get_window_geometry(wid)
-    if not geom:
-        return False, f"Could not get window geometry for: {account}"
 
-    # Remember what was focused before
     restore_wid = get_focused_window()
-
     try:
         raise_and_focus_window(wid)
         time.sleep(0.3)
-
-        x, y, w, h = geom
-        scale   = get_window_dpi_scale(wid)
-        click_x = x + round(offset_x * scale)
-        click_y = y + h - round(offset_y * scale)
+        click_x, click_y = _get_client_click_pos(wid, offset_x, offset_y)
+        if click_x is None:
+            return False, f"Could not get window geometry for: {account}"
         _click(click_x, click_y)
     finally:
         if restore_wid and restore_wid != wid:
@@ -136,10 +185,11 @@ def do_force_skill(account, action, log=None, window_lock=None):
                 if log:
                     log(f"  ⚠ [{account}] Could not get window geometry")
                 return
-            x, y, w, h = geom
-            scale   = get_window_dpi_scale(wid)
-            click_x = x + round(offset_x * scale)
-            click_y = y + h - round(offset_y * scale)
+            click_x, click_y = _get_client_click_pos(wid, offset_x, offset_y)
+            if click_x is None:
+                if log:
+                    log(f"  ⚠ [{account}] Could not compute click position")
+                return
             _click(click_x, click_y)
         finally:
             if restore_wid and restore_wid != wid:
@@ -193,10 +243,11 @@ def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
                     log(f"  ⚠ [{account}] Could not get window geometry")
                 return
 
-            x, y, w, h = geom
-            scale   = get_window_dpi_scale(wid)
-            click_x = x + round(offset_x * scale)
-            click_y = y + h - round(offset_y * scale)
+            click_x, click_y = _get_client_click_pos(wid, offset_x, offset_y)
+            if click_x is None:
+                if log:
+                    log(f"  ⚠ [{account}] Could not compute click position")
+                return
 
             # Open panel
             _click(click_x, click_y)
@@ -252,10 +303,11 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
                 if log:
                     log(f"  ⚠ [{account}] Could not get window geometry")
                 return
-            x, y, w, h = geom
-            scale   = get_window_dpi_scale(wid)
-            click_x = x + round(offset_x * scale)
-            click_y = y + h - round(offset_y * scale)
+            click_x, click_y = _get_client_click_pos(wid, offset_x, offset_y)
+            if click_x is None:
+                if log:
+                    log(f"  ⚠ [{account}] Could not compute click position")
+                return
 
             for i in range(amount):
                 _click(click_x, click_y)

@@ -441,6 +441,9 @@ class SettingsTab:
             save_config(app.cfg)
         except Exception:
             pass
+        # Invalidate watcher dir cache so a changed logs_root takes effect immediately
+        if app.watcher:
+            app.watcher._dirs_last_check = 0
         self._saved_lbl.configure(text="✅ Settings saved", fg=app.GREEN)
         app.after(3000, lambda: self._saved_lbl.configure(text=""))
 

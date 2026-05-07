@@ -9,6 +9,9 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+# NOTE: screenshot.py also imports from discord.py, but defers that import to
+# inside ScreenshotService._worker() at runtime to avoid a circular import at
+# module load time. Do NOT move that import to the top of screenshot.py.
 from py.screenshot import SS_PRIORITY_EVENT, SS_PRIORITY_DROPS  # used by DiscordRouter
 
 
@@ -872,10 +875,3 @@ class GatewayRunner:
         if fail_count:
             self.cb['log'](f"🤖 {fail_count} slash command(s) failed to register in guild {server_id}")
 
-
-# ── BotRunner tombstone (removed v5.4.0) ──────────────────────────────────────
-# Replaced by GatewayRunner. Name kept so stale imports raise a clear error.
-class BotRunner:
-    def __init__(self, *a, **kw):
-        raise RuntimeError(
-            "BotRunner was removed in v5.4.0. Use GatewayRunner instead.")

@@ -326,9 +326,17 @@ class LogWatcher:
                 with self._accounts_lock:
                     state = self._accounts.get(folder)
                 if state and session_files != state.session_file_set:
-                    # Log rotation detected — re-run catchup to pick up new active file
+                    # Log rotation detected — re-run catchup to pick up new active file.
+                    # Run in a daemon thread so get_account_rows isn't blocked by a
+                    # potentially slow full-file scan on large logs.
                     state.session_file_set = session_files
-                    self._startup_catchup(str(active), is_rotation=True)
+                    active_str = str(active)
+                    threading.Thread(
+                        target=self._startup_catchup,
+                        args=(active_str,),
+                        kwargs={'is_rotation': True},
+                        daemon=True,
+                    ).start()
         except Exception as e:
             self._dbg(f'get_account_rows rotation check failed: {e}')
 
@@ -634,8 +642,7 @@ class LogWatcher:
         while self._running:
             current_dirs = self._get_log_dirs()
             for d in current_dirs:
-                log_files = _get_log_files(d)
-                active    = _get_active_log_file(d)
+                active = _get_active_log_file(d)
                 if not active:
                     continue
                 self._check_file(str(active))
