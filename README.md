@@ -39,6 +39,8 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - `/ss [account]` — on-demand screenshot
 - `/s` — live status summary of all accounts
 - `/force <account> <action> [amount]` — force a skill, action, or time adjustment from Discord
+- Self-healing: automatically detects and recovers from deleted Discord threads, channels, and webhooks — no restart needed
+- Level 99 detection: special "🎆 Level 99! 🎆" embed title, always notifies regardless of the level-up interval
 
 ### Event history
 - Persists every event to a local JSONL file per account
@@ -134,6 +136,8 @@ Set your DreamBot log folder path in **Settings → Log Folder**. Each subfolder
 ---
 
 ## Data and files
+
+Config is automatically sanitized on startup: stale keys from older versions are removed, types are validated, and thread IDs for deleted accounts are pruned.
 
 | Path | Contents |
 |---|---|

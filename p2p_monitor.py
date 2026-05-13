@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.3.16
+P2P Monitor v1.4.0
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -36,7 +36,7 @@ except ImportError:
     TRAY_AVAILABLE = False
 
 from py.history      import migrate_history
-from py.config       import save_config, load_config
+from py.config       import save_config, load_config, sanitize_config
 from py.watcher      import LogWatcher
 from ui.monitor_tab   import MonitorTab
 from ui.status_tab    import StatusTab
@@ -44,7 +44,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.3.16"
+VERSION      = "1.4.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -62,6 +62,7 @@ DEFAULT_CFG = {
     "screenshot_minutes": 60, "bot_token": "",
     "monitor_quests": True, "monitor_tasks": True,
     "monitor_chat": True, "monitor_errors": True, "screenshots_enabled": False,
+    "screenshot_on_startup": False,
     "ss_event_task": False, "ss_event_quest": False, "ss_event_chat": False,
     "ss_event_error": False, "ss_event_drops": False,
     "ss_event_death": False, "ss_event_levelup": False,
@@ -146,6 +147,14 @@ class App(tk.Tk):
         self.minsize(960, 680)
         self.configure(bg=self.BG)
         self.cfg     = load_config(DEFAULT_CFG)
+        _corrections = sanitize_config(
+            self.cfg, DEFAULT_CFG,
+            logs_root=self.cfg.get('logs_root', ''),
+            log_fn=self._log,
+            debug=self.cfg.get('debug', False),
+        )
+        if _corrections:
+            save_config(self.cfg)
         self.watcher = None   # created in _start() to avoid orphaned screenshot worker thread
         self._counts = {k: 0 for k in ('task', 'chat', 'error', 'drop', 'death', 'levelup')}
         self._style()
@@ -225,7 +234,7 @@ class App(tk.Tk):
             elif '💬' in msg:                                        tag = 'chat'
             elif any(x in msg for x in ['📒','💎','💰','🐾','🎁']): tag = 'drop'
             elif '💀' in msg:                                        tag = 'death'
-            elif '🎉' in msg:                                        tag = 'levelup'
+            elif any(x in msg for x in ['🎉', '🎆']):              tag = 'levelup'
             elif '✅' in msg and 'Slayer complete' in msg:           tag = 'slayer_complete'
             elif '⏭️' in msg:                                        tag = 'slayer_skip'
             elif '🖥️' in msg:                                        tag = 'script_event'

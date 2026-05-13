@@ -1,5 +1,5 @@
 """
-watcher.py — Log watching engine for P2P Monitor
+watcher.py — Log watching engine for P2P Monitor v1.4.0
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 """
@@ -228,15 +228,20 @@ class LogWatcher:
             'log':                self.log,
             'is_muted':           self._is_muted,
             'enqueue_screenshot': self._enqueue_screenshot,
+            'invalidate_threads': lambda acct: self._threads_verified.discard(acct),
+            'ensure_threads':     self._ensure_threads_for_account,
+            'run_bot_setup':      lambda: self._run_bot_setup(),
+            'save_cfg':           self._save_cfg,
         })
         self._bot_ready = threading.Event()
         self._ss_svc  = ScreenshotService({
-            'get_cfg':        lambda: self.cfg,
-            'log':            self.log,
-            'is_muted':       self._is_muted,
-            'wh_with_thread': self._router.wh_with_thread,
-            'window_lock':    self._window_lock,
-            'bot_ready':      self._bot_ready,
+            'get_cfg':          lambda: self.cfg,
+            'log':              self.log,
+            'is_muted':         self._is_muted,
+            'wh_with_thread':   self._router.wh_with_thread,
+            'window_lock':      self._window_lock,
+            'bot_ready':        self._bot_ready,
+            'handle_post_error': self._router._handle_post_error,
         })
         self._ss_svc.start()
         self._thread  = threading.Thread(target=self._run, daemon=True)
@@ -1196,11 +1201,12 @@ class LogWatcher:
                 elif etype == 'levelup':
                     level     = int(activity) if activity.isdigit() else 0
                     total_lvl = ev.get('_total_level')
+                    is_99     = ev.get('_is_99', False)
                     url = self._router.resolve_url(account, 'levelup')
                     if url:
                         self._router.post_event(account, 'levelup',
                             levelup_payload(mention, account, value, level,
-                                            total_level=total_lvl), url=url)
+                                            total_level=total_lvl, is_99=is_99), url=url)
                 elif etype == 'script_event':
                     self._router.post_script_event(account, value)
             except Exception as e:
@@ -1363,14 +1369,19 @@ class LogWatcher:
             elif etype == 'levelup':
                 skill = value
                 level = int(activity) if activity.isdigit() else 0
+                is_99 = ev.get('_is_99', False)
                 notify_every = int(self.cfg.get('levelup_every', 5))
                 last_notified = state.notified_levels.get(skill, 0)
-                should_notify = (level // notify_every > last_notified // notify_every
-                                 or last_notified == 0) if level else True
+                if is_99:
+                    should_notify = True  # Level 99 ALWAYS notifies
+                else:
+                    should_notify = (level // notify_every > last_notified // notify_every
+                                     or last_notified == 0) if level else True
                 state.notified_levels[skill] = level
                 if not should_notify or self._is_muted(folder):
                     continue
-                self.log(f"🎉 [{folder}] Level up: {skill} → {level}")
+                prefix = "🎆" if is_99 else "🎉"
+                self.log(f"{prefix} [{folder}] Level up: {skill} → {level}")
 
             elif etype == 'script_event':
                 cfg_key_map = {

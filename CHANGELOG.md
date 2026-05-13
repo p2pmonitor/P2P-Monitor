@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.4.0
+### Discord Self-Healing, Config Cleanup & Level 99 Detection
+
+---
+
+**Discord self-healing**
+
+- When a Discord thread, channel, or webhook is deleted (error 10003 Unknown Channel / 10015 Unknown Webhook), the monitor now automatically detects the 404, invalidates the stale ID from config, recreates the missing resource, and retries the failed message once — no manual intervention or restart needed
+- Retried messages include a footer note: "⚠ Thread/channel was recreated — screenshot may be delayed"
+- Thread recovery: removes stale thread ID → evicts account from verified set → re-creates thread → retries post
+- Channel recovery: removes channel ID + webhook URL + all associated threads → re-runs bot setup → retries post
+- Webhook recovery: removes stale webhook URL → re-runs bot setup to recreate → retries post
+- 401 Unauthorized: flags `bot_setup_done = False` and logs "update token in Settings and re-run Bot Setup"
+- 403 Forbidden / 50001 Missing Access: logs "re-invite the bot and re-run Bot Setup" without clearing setup state
+- Recovery limited to one retry per failure — no infinite retry loops
+- Screenshot-queued posts also self-heal: `ScreenshotService` receives a `handle_post_error` callback and wraps both `post_discord` and `post_bot_image` calls with recovery; the retry lambda captures the image path so the screenshot is included in the retry post; file cleanup happens only after recovery completes
+- New DiscordRouter callbacks: `invalidate_threads`, `ensure_threads`, `run_bot_setup`, `save_cfg`
+- Affected files: `py/discord.py`, `py/watcher.py`, `py/screenshot.py`
+
+---
+
+**Config cleanup on startup**
+
+- New `sanitize_config()` function runs at app startup after `load_config()`
+- Removes unknown/stale config keys (e.g. old `github_token` from prior versions)
+- Validates types: coerces int-like strings to int, 0/1 to bool where expected; resets values that can't be coerced
+- Validates `bot_channel_ids` and `bot_webhook_urls`: removes entries with invalid channel names or empty values
+- Validates `bot_thread_ids` structure: removes malformed entries, invalid channel names, empty IDs; normalizes int IDs to strings
+- Prunes `bot_thread_ids` for accounts whose log folders no longer exist (only when `logs_root` is set and valid)
+- Logs all corrections in debug mode; saves config only if corrections were made
+- Affected files: `py/config.py`, `p2p_monitor.py`
+
+---
+
+**Level 99 detection**
+
+- New regex `SKILL_99_RE` detects the special game message: "Congratulations, you've reached the highest possible {skill} level of 99"
+- Level 99 events use the title "🎆 Level 99! 🎆" instead of "🎉 Level Up!" in Discord embeds (gold color unchanged)
+- Level 99 **always notifies** regardless of the `levelup_every` interval setting — you never miss a max level achievement
+- Log prefix uses 🎆 for level 99, 🎉 for regular level ups
+- The `_is_99` flag flows from reader → watcher → discord cleanly; regular level ups are completely unaffected
+- Affected files: `py/reader.py`, `py/discord.py`, `py/watcher.py`
+
+---
+
+**Other changes**
+
+- Version bump: v1.3.16 → v1.4.0
+- Fixed `screenshot_on_startup` missing from `DEFAULT_CFG` — was never declared as a default, which meant the sanitizer would strip it from existing configs; now included with default `False` (`p2p_monitor.py`)
+- Updated `_log` tag detection in `p2p_monitor.py` to recognize 🎆 emoji for level 99 log coloring
+- Updated DiscordRouter docstring to document new recovery callbacks
+
+
 ## v1.3.16
 ### Code Quality, Reliability & Windows Click/Screenshot Fixes
 

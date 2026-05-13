@@ -1,5 +1,5 @@
 """
-discord.py — Discord integration for P2P Monitor
+discord.py — Discord integration for P2P Monitor v1.4.0
 All embed payloads, post_discord(), bot API helpers, bot setup, bot command runner.
 """
 
@@ -117,12 +117,13 @@ def death_payload(mention, folder, context=''):
                   [{"name": "Detail", "value": context or "Oh dear, you are dead!", "inline": False}],
                   0xff0000)
 
-def levelup_payload(mention, folder, skill, level, total_level=None):
+def levelup_payload(mention, folder, skill, level, total_level=None, is_99=False):
+    title = "🎆 Level 99! 🎆" if is_99 else "🎉 Level Up!"
     fields = [{"name": "Skill", "value": skill,      "inline": True},
               {"name": "Level", "value": str(level),  "inline": True}]
     if total_level:
         fields.append({"name": "Total Level", "value": str(total_level), "inline": True})
-    return _embed("🎉 Level Up!", _desc(mention, folder), fields, 0xffd700)
+    return _embed(title, _desc(mention, folder), fields, 0xffd700)
 
 def screenshot_payload(account, trigger):
     return _embed("📸 Screenshot", f"**Account:** {account}\n**Trigger:** {trigger}", [], 0x7a8099)
@@ -167,6 +168,49 @@ def _read_http_error(e):
     except Exception:
         body = ''
     return f"HTTP {e.code}: {body}"
+
+
+def _is_discord_404(err_str):
+    """Detect Discord 404 / Unknown Channel (10003) / Unknown Webhook (10015).
+    Returns True if the error indicates a deleted resource that can be recreated."""
+    if not err_str:
+        return False
+    if 'HTTP 404' in err_str:
+        return True
+    if '10003' in err_str:
+        return True
+    if '10015' in err_str:
+        return True
+    return False
+
+
+def _is_discord_auth_error(err_str):
+    """Detect 401 Unauthorized or 403 Forbidden (bot kicked/token invalid)."""
+    if not err_str:
+        return False
+    if 'HTTP 401' in err_str:
+        return True
+    if 'HTTP 403' in err_str:
+        return True
+    if '50001' in err_str:
+        return True
+    return False
+
+
+def _add_recovery_footer(payload, message):
+    """Add a footer note to an embed payload indicating recovery happened."""
+    import copy as _copy
+    if not payload or not isinstance(payload, dict):
+        return payload
+    payload = _copy.deepcopy(payload)
+    embeds = payload.get('embeds', [])
+    if embeds and isinstance(embeds[0], dict):
+        existing_footer = embeds[0].get('footer', {}).get('text', '')
+        if existing_footer:
+            embeds[0]['footer'] = {'text': f"{existing_footer} | {message}"}
+        else:
+            embeds[0]['footer'] = {'text': message}
+    return payload
 
 
 # ── Post ───────────────────────────────────────────────────────────────────────
@@ -392,6 +436,10 @@ class DiscordRouter:
         is_muted(account)                                   → bool
         enqueue_screenshot(priority, account, trigger,
                            url, payload)                    → None
+        invalidate_threads(account)                         → None  (evict from _threads_verified)
+        ensure_threads(account)                             → None  (re-create threads)
+        run_bot_setup()                                     → None  (re-create channels/webhooks)
+        save_cfg()                                          → None  (persist config to disk)
     """
 
     _CH_MAP = {
@@ -441,6 +489,192 @@ class DiscordRouter:
         url, _ = self.wh_with_thread('default', account)
         return url or ''
 
+    # ── Self-healing helpers ───────────────────────────────────────────────────
+    def _find_ch_name_for_webhook(self, url):
+        """Given a webhook URL (possibly with ?thread_id=), find its channel name."""
+        if not url:
+            return None
+        base_url = url.split('?')[0] if '?' in url else url
+        for name, wh in self._cfg().get('bot_webhook_urls', {}).items():
+            if wh.split('?')[0] == base_url:
+                return name
+        return None
+
+    def _find_ch_name_for_thread(self, account, url):
+        """Extract thread_id from URL and find its channel name."""
+        if not url:
+            return None, None
+        tid = None
+        for sep in ('?thread_id=', '&thread_id='):
+            if sep in url:
+                tid = url.split(sep)[1].split('&')[0]
+                break
+        if not tid:
+            return None, None
+        acct_threads = self._cfg().get('bot_thread_ids', {}).get(account, {})
+        for ch_name, stored_tid in acct_threads.items():
+            if str(stored_tid) == str(tid):
+                return ch_name, tid
+        return None, tid
+
+    def _invalidate_thread(self, account, ch_name):
+        """Remove a stale thread ID and evict account from verified set."""
+        cfg = self._cfg()
+        thread_ids = cfg.get('bot_thread_ids', {})
+        acct_threads = thread_ids.get(account, {})
+        if ch_name in acct_threads:
+            del acct_threads[ch_name]
+            self._cb['log'](f"🔧 [{account}] Invalidated stale thread for #{ch_name}")
+            return True
+        return False
+
+    def _invalidate_channel(self, ch_name):
+        """Remove a stale channel ID, webhook URL, and all thread entries for it."""
+        cfg = self._cfg()
+        changed = False
+        if ch_name in cfg.get('bot_channel_ids', {}):
+            del cfg['bot_channel_ids'][ch_name]
+            changed = True
+        if ch_name in cfg.get('bot_webhook_urls', {}):
+            del cfg['bot_webhook_urls'][ch_name]
+            changed = True
+        for acct, threads in cfg.get('bot_thread_ids', {}).items():
+            if ch_name in threads:
+                del threads[ch_name]
+                changed = True
+        if changed:
+            self._cb['log'](f"🔧 Invalidated stale channel #{ch_name}")
+        return changed
+
+    def _invalidate_webhook(self, ch_name):
+        """Remove a stale webhook URL so bot setup recreates it."""
+        cfg = self._cfg()
+        if ch_name in cfg.get('bot_webhook_urls', {}):
+            del cfg['bot_webhook_urls'][ch_name]
+            self._cb['log'](f"🔧 Invalidated stale webhook for #{ch_name}")
+            return True
+        return False
+
+    def _handle_post_error(self, err, url, account, retry_fn):
+        """
+        Check if a failed post is recoverable. If it's a 404, invalidate the
+        stale resource, trigger recreation via callbacks, and call retry_fn
+        with the updated URL to retry.
+
+        Args:
+            err       — error string from the failed post
+            url       — the URL that failed
+            account   — account name for thread context
+            retry_fn  — callable(new_url) -> (ok, err) that retries the post
+
+        Returns True if recovery + retry succeeded, False otherwise.
+        """
+        if not err:
+            return False
+
+        if _is_discord_auth_error(err):
+            cfg = self._cfg()
+            if 'HTTP 401' in err:
+                cfg['bot_setup_done'] = False
+                self._cb['log']("🤖 Bot token is invalid or expired — update token in Settings and re-run Bot Setup")
+            else:
+                self._cb['log']("🤖 Bot was removed from server or lacks permissions — re-invite and re-run Bot Setup")
+            return False
+
+        if not _is_discord_404(err):
+            return False
+
+        # ── 404 recovery ──────────────────────────────────────────────────
+        self._cb['log'](f"🔧 [{account}] Discord 404 detected — attempting recovery...")
+
+        # Determine what was deleted
+        ch_name_thread, tid = self._find_ch_name_for_thread(account, url) if account else (None, None)
+        ch_name_wh = self._find_ch_name_for_webhook(url)
+
+        recovered = False
+
+        if ch_name_thread and tid:
+            # Thread was deleted — invalidate and recreate
+            self._invalidate_thread(account, ch_name_thread)
+            if 'invalidate_threads' in self._cb:
+                self._cb['invalidate_threads'](account)
+            if 'ensure_threads' in self._cb:
+                self._cb['ensure_threads'](account)
+                recovered = True
+        elif ch_name_wh:
+            # Webhook or channel was deleted
+            if '10015' in err:
+                self._invalidate_webhook(ch_name_wh)
+            else:
+                self._invalidate_channel(ch_name_wh)
+            if 'run_bot_setup' in self._cb:
+                try:
+                    result = self._cb['run_bot_setup']()
+                    # _run_bot_setup returns (ok, msg) tuple
+                    if isinstance(result, tuple):
+                        setup_ok = result[0]
+                    else:
+                        setup_ok = bool(result)
+                    if setup_ok:
+                        recovered = True
+                    else:
+                        self._cb['log'](f"🔧 Recovery bot setup returned failure: {result}")
+                except Exception as e:
+                    self._cb['log'](f"🔧 Recovery bot setup failed: {e}")
+            if account and 'ensure_threads' in self._cb:
+                if 'invalidate_threads' in self._cb:
+                    self._cb['invalidate_threads'](account)
+                self._cb['ensure_threads'](account)
+        elif not url and '10003' in err:
+            # Bot-image post with no webhook URL — the monitor channel itself
+            # was deleted. Invalidate it and re-run bot setup to recreate.
+            self._invalidate_channel('monitor')
+            if 'run_bot_setup' in self._cb:
+                try:
+                    result = self._cb['run_bot_setup']()
+                    if isinstance(result, tuple):
+                        setup_ok = result[0]
+                    else:
+                        setup_ok = bool(result)
+                    if setup_ok:
+                        recovered = True
+                    else:
+                        self._cb['log'](f"🔧 Recovery bot setup returned failure: {result}")
+                except Exception as e:
+                    self._cb['log'](f"🔧 Recovery bot setup failed: {e}")
+            if account and 'ensure_threads' in self._cb:
+                if 'invalidate_threads' in self._cb:
+                    self._cb['invalidate_threads'](account)
+                self._cb['ensure_threads'](account)
+
+        if not recovered:
+            self._cb['log'](f"🔧 [{account}] Could not identify deleted resource — run Bot Setup manually")
+            return False
+
+        # Save config after recovery
+        if 'save_cfg' in self._cb:
+            self._cb['save_cfg']()
+
+        # Resolve the new URL after recreation
+        new_url = url
+        if ch_name_thread:
+            new_url_base, _ = self.wh_with_thread(ch_name_thread, account)
+            if new_url_base:
+                new_url = new_url_base
+        elif ch_name_wh:
+            new_url_base, _ = self.wh_with_thread(ch_name_wh, account)
+            if new_url_base:
+                new_url = new_url_base
+
+        # Retry via caller-supplied function
+        self._cb['log'](f"🔧 [{account}] Retrying post after recovery...")
+        retry_ok, retry_err = retry_fn(new_url)
+        if retry_ok:
+            self._cb['log'](f"🔧 [{account}] Recovery successful — message delivered")
+        else:
+            self._cb['log'](f"🔧 [{account}] Recovery retry failed: {retry_err}")
+        return retry_ok
+
     # ── Public post surface ────────────────────────────────────────────────────
     def post_event(self, account, event_type, payload, url=None):
         """Post an event embed. Mute-guarded. Enqueues screenshot if configured."""
@@ -456,7 +690,11 @@ class DiscordRouter:
         else:
             ok, err = post_discord(url, payload)
             if not ok:
-                self._cb['log'](f"  🚫 Discord failed: {err}")
+                def _retry(new_url, _p=payload):
+                    return post_discord(new_url, _add_recovery_footer(_p,
+                        "⚠ Thread/channel was recreated — screenshot may be delayed"))
+                if not self._handle_post_error(err, url, account, _retry):
+                    self._cb['log'](f"  🚫 Discord failed: {err}")
 
     def post_drop(self, account, drop_types, value):
         """Build and post a drop embed. Uses drop-priority screenshot if enabled."""
@@ -474,7 +712,11 @@ class DiscordRouter:
         else:
             ok, err = post_discord(url, payload)
             if not ok:
-                self._cb['log'](f"  🚫 Discord failed: {err}")
+                def _retry(new_url, _p=payload):
+                    return post_discord(new_url, _add_recovery_footer(_p,
+                        "⚠ Thread/channel was recreated — screenshot may be delayed"))
+                if not self._handle_post_error(err, url, account, _retry):
+                    self._cb['log'](f"  🚫 Discord failed: {err}")
 
     def post_task(self, account, task_name, activity,
                   title_override=None, footer_override=None):
@@ -502,9 +744,14 @@ class DiscordRouter:
             url = self._wh('default')
         if not url:
             return
-        ok, err = post_discord(url, script_event_payload(self.mention(), account, ev_key))
+        payload = script_event_payload(self.mention(), account, ev_key)
+        ok, err = post_discord(url, payload)
         if not ok:
-            self._cb['log'](f"  🚫 Discord failed: {err}")
+            def _retry(new_url, _p=payload):
+                return post_discord(new_url, _add_recovery_footer(_p,
+                    "⚠ Thread/channel was recreated — screenshot may be delayed"))
+            if not self._handle_post_error(err, url, account, _retry):
+                self._cb['log'](f"  🚫 Discord failed: {err}")
 
 
 # ── GatewayRunner ──────────────────────────────────────────────────────────────

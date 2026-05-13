@@ -1,5 +1,5 @@
 """
-reader.py — Pure log parsing for P2P Monitor
+reader.py — Pure log parsing for P2P Monitor v1.4.0
 Zero side effects: accepts lines, returns typed event dicts.
 All slice_* functions live here. parse_lines() is the single entry point
 used by both the live watcher and backfill — eliminates the triple-pipeline bug.
@@ -20,6 +20,7 @@ PET_PATTERNS = [
 
 DEATH_RE        = re.compile(r'\[GAME\] Oh dear, you are dead!', re.I)
 SKILL_LVL_RE    = re.compile(r"Congratulations, you've just advanced your (.+?) level\. You are now level (\d+)", re.I)
+SKILL_99_RE     = re.compile(r"Congratulations, you've reached the highest possible (.+?) level of 99", re.I)
 TOTAL_LVL_RE    = re.compile(r"Congratulations, you've reached a total level of (\d+)", re.I)
 SCRIPT_START_RE = re.compile(r'Starting P2P Master AI now!', re.I)
 SCRIPT_STOP_RE  = re.compile(r'Stopped P2P Master AI!', re.I)
@@ -923,6 +924,13 @@ def parse_lines(lines):
     # Level ups
     for i, line in enumerate(arr):
         clean = strip_color(strip_prefix(line)).strip()
+        # Check level 99 message FIRST — different format from normal levelups
+        m99 = SKILL_99_RE.search(clean)
+        if m99:
+            skill = m99.group(1).strip()
+            events.append({'type': 'levelup', 'value': skill, 'activity': '99',
+                           'ts': _ts_for_line(i), '_line_idx': i, '_is_99': True})
+            continue
         m = SKILL_LVL_RE.search(clean)
         if m:
             skill = m.group(1).strip()

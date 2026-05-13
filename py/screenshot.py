@@ -366,7 +366,8 @@ class ScreenshotService:
 
     def _worker(self):
         """Process queued screenshot requests in priority order."""
-        from py.discord import post_discord, post_bot_image, screenshot_payload  # local import avoids circular
+        from py.discord import (post_discord, post_bot_image,  # local import avoids circular
+                                screenshot_payload, _add_recovery_footer)
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.1)
@@ -397,7 +398,20 @@ class ScreenshotService:
                             else:
                                 ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
                                 if not ok:
-                                    self._cb['log'](f"  🚫 [{account}] Bot screenshot failed: {err}")
+                                    handler = self._cb.get('handle_post_error')
+                                    if handler:
+                                        def _retry_bot(new_url, _p=path, _a=account, _t=bot_token):
+                                            # Bot image posts go to a channel ID, not a webhook URL;
+                                            # after recovery the channel may be recreated with a new ID.
+                                            # Re-read the channel ID from config for the retry.
+                                            new_cfg = self._cb['get_cfg']()
+                                            ch_id = new_cfg.get('bot_channel_ids', {}).get('monitor', '')
+                                            if ch_id:
+                                                return post_bot_image(ch_id, _t, _a, _p)
+                                            return False, 'No monitor channel after recovery'
+                                        ok = handler(err, None, account, _retry_bot)
+                                    if not ok:
+                                        self._cb['log'](f"  🚫 [{account}] Bot screenshot failed: {err}")
                         else:
                             if url_override:
                                 url = url_override
@@ -410,7 +424,15 @@ class ScreenshotService:
                             if url:
                                 ok, e = post_discord(url, payload, image_path=path)
                                 if not ok:
-                                    self._cb['log'](f"  🚫 [{account}] Screenshot failed: {e}")
+                                    handler = self._cb.get('handle_post_error')
+                                    if handler:
+                                        def _retry_wh(new_url, _p=payload, _img=path):
+                                            retry_p = _add_recovery_footer(_p,
+                                                "⚠ Thread/channel was recreated") if _p else _p
+                                            return post_discord(new_url, retry_p, image_path=_img)
+                                        ok = handler(e, url, account, _retry_wh)
+                                    if not ok:
+                                        self._cb['log'](f"  🚫 [{account}] Screenshot failed: {e}")
                             else:
                                 self._cb['log'](f"  ⚠ [{account}] No default webhook configured")
                     finally:
