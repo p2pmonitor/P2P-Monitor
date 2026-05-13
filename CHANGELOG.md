@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.1
+### Config Sanitization Bugfix
+
+- Fixed `sanitize_config()` deleting legitimate config keys that were never declared in `DEFAULT_CFG` — `launcher_jar`, `launcher_presets`, `hist_col_widths`, `screenshot_on_startup`, `ui_section_discord_open`, and `ui_section_notifications_open` are now included with correct defaults so the sanitizer preserves them
+- Affected files: `p2p_monitor.py`
+
 ## v1.4.0
 ### Discord Self-Healing, Config Cleanup & Level 99 Detection
 
@@ -48,7 +54,6 @@
 **Other changes**
 
 - Version bump: v1.3.16 → v1.4.0
-- Fixed `screenshot_on_startup` missing from `DEFAULT_CFG` — was never declared as a default, which meant the sanitizer would strip it from existing configs; now included with default `False` (`p2p_monitor.py`)
 - Updated `_log` tag detection in `p2p_monitor.py` to recognize 🎆 emoji for level 99 log coloring
 - Updated DiscordRouter docstring to document new recovery callbacks
 
