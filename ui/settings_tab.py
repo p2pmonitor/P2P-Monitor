@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from py.discord import post_discord, bot_setup_discord, _embed
 from py.util    import now_str
-from py.config  import save_config
+from py.config  import save_config, is_logs_root_account_folder
 
 
 class SettingsTab:
@@ -116,6 +116,14 @@ class SettingsTab:
         tk.Button(dr, text="Browse", font=app.MONO, bg=app.BG3, fg=app.ACC,
             relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._browse_dir).pack(side='left', padx=(6, 0))
+
+        # Warning label — shown when logs_root points directly to an account folder
+        self._logs_root_warn = tk.Label(
+            inner, text="", font=app.MONO, bg=app.BG2, fg=app.YEL,
+            wraplength=820, justify='left')
+        self._logs_root_warn.pack(fill='x', padx=16, pady=(0, 2))
+        self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
+        self._check_logs_root_warning()
 
         # ── Discord Alerts ────────────────────────────────────────────────────
         _, discord_body, _ = collapsible("DISCORD ALERTS", 'ui_section_discord_open')
@@ -464,6 +472,27 @@ class SettingsTab:
                 pass
 
     # ── Actions ────────────────────────────────────────────────────────────────
+    def _check_logs_root_warning(self):
+        """Show a warning if logs_root points directly to an account folder."""
+        path = self._vars['logs_root'].get().strip()
+        if is_logs_root_account_folder(path):
+            try:
+                from pathlib import Path
+                parent = str(Path(path).parent)
+            except Exception:
+                parent = "the parent Logs folder"
+            self._logs_root_warn.configure(
+                text=(
+                    f"⚠  This path appears to be an account folder, not the parent Logs folder "
+                    f"(e.g. {parent}). Only this one account will be monitored — sibling accounts "
+                    f"will not be discovered. To monitor multiple accounts, select the parent "
+                    f"Logs folder instead."
+                    f"(e.g. {parent})."
+                )
+            )
+        else:
+            self._logs_root_warn.configure(text="")
+
     def _browse_dir(self):
         d = filedialog.askdirectory(title="Select DreamBot log folder")
         if d:

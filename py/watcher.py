@@ -1,5 +1,5 @@
 """
-watcher.py — Log watching engine for P2P Monitor v1.4.0
+watcher.py — Log watching engine for P2P Monitor v1.4.2
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 """
@@ -1491,27 +1491,41 @@ class LogWatcher:
         # adds user only if missing. Handles the case where the user
         # was removed from a thread between sessions.
         for tid in acct_threads.values():
-            self._bot_add_user_to_thread(tid, token)
+            self._bot_add_user_to_thread(account, tid, token)
         self._threads_verified.add(account)
 
-    def _bot_add_user_to_thread(self, thread_id, token):
+    def _bot_add_user_to_thread(self, account, thread_id, token):
         """Best-effort: add configured mention user to a Discord thread.
         Checks membership first to avoid redundant PUTs.
         Handles 429 rate limits with a single retry after retry_after delay.
+        On 404 / 10003 (deleted thread): invalidates the stale thread ID,
+        removes account from _threads_verified, saves config, and calls
+        _ensure_threads_for_account to recreate only the missing thread.
         """
         import re as _re, time as _time
         user_id = self.cfg.get('mention_id', '').strip()
         if not user_id or not thread_id:
             return
+
+        def _is_404(e):
+            return e and ('HTTP 404' in e or '10003' in e)
+
         # Check if user is already a member — skip PUT if so
         data, err = bot_api(token, 'GET',
                             f'/channels/{thread_id}/thread-members/{user_id}')
         if data is not None:
             return  # already a member
-        # Not a member (404) or other error — attempt to add
+
+        if _is_404(err):
+            # Thread was deleted — invalidate and trigger recreation
+            self._recover_deleted_thread(account, thread_id, token)
+            return
+
+        # Not a member (other error or absent) — attempt to add
         def _put():
             return bot_api(token, 'PUT',
                            f'/channels/{thread_id}/thread-members/{user_id}')
+
         _, err = _put()
         if err and '429' in err:
             # Rate limited — parse retry_after and wait once
@@ -1521,9 +1535,42 @@ class LogWatcher:
             _time.sleep(wait)
             _, err = _put()
         if err:
-            self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
+            if _is_404(err):
+                self._recover_deleted_thread(account, thread_id, token)
+            else:
+                self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
         else:
             self.log(f"🤖 Added user to thread {thread_id}")
+
+    def _recover_deleted_thread(self, account, thread_id, token):
+        """Invalidate a deleted thread ID and trigger recreation.
+        Called when _bot_add_user_to_thread receives a 404 / 10003.
+        Only invalidates the specific thread — does not touch channel or webhook.
+        """
+        thread_ids   = self.cfg.get('bot_thread_ids', {})
+        acct_threads = thread_ids.get(account, {})
+        ch_name = next(
+            (ch for ch, tid in acct_threads.items() if str(tid) == str(thread_id)),
+            None
+        )
+        if ch_name:
+            del acct_threads[ch_name]
+            thread_ids[account] = acct_threads
+            self.cfg['bot_thread_ids'] = thread_ids
+            self._save_cfg()
+            self.log(f"🔧 [{account}] Stale thread {thread_id} (#{ch_name}) removed — will recreate")
+        else:
+            self.log(f"🔧 [{account}] Stale thread {thread_id} not found in config — skipping invalidation")
+
+        # Evict from verified set so _ensure_threads_for_account runs fresh
+        self._threads_verified.discard(account)
+
+        # Recreate only the missing thread in a background thread
+        threading.Thread(
+            target=self._ensure_threads_for_account,
+            args=(account,),
+            daemon=True
+        ).start()
 
     # ── Bot screenshot helpers (called by GatewayRunner via callbacks) ──────────
     def _bot_screenshot_to_channel(self, account, channel_id, token):
@@ -1588,6 +1635,11 @@ class LogWatcher:
                 os.remove(path)
             except Exception:
                 pass
-            self._bot_add_user_to_thread(channel_id, token)
+            # Only add user to thread membership when we have a confirmed thread ID.
+            # channel_id may be a plain channel fallback if no thread ID was saved;
+            # _bot_add_user_to_thread must not receive a channel ID.
+            tid = self.cfg.get('bot_thread_ids', {}).get(account, {}).get('monitor')
+            if tid:
+                self._bot_add_user_to_thread(account, tid, token)
 
 

@@ -106,10 +106,12 @@ Output will be at `dist/P2P Monitor.exe`. See [WINDOWS_BUILD.md](WINDOWS_BUILD.m
 ## Setup
 
 ### DreamBot logs
-Set your DreamBot log folder path in **Settings → Log Folder**. Each subfolder inside that path corresponds to one account.
+Set your DreamBot log folder path in **Settings → Log Folder**. This should be the **parent Logs folder** that contains your account subfolders — not an individual account folder.
 
 - Linux default: `/home/debian/DreamBot/Logs`
 - Windows default: `C:\Users\<you>\DreamBot\Logs`
+
+> **Note:** If you set the path to an account subfolder (e.g. `...\Logs\Accname`) the monitor will still work for that single account, but Discord thread IDs will be lost on every restart causing new threads to be created. A warning will appear in Settings if this is detected.
 
 ### Discord — webhook mode
 1. Create a Discord webhook in any channel

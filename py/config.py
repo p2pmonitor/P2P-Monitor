@@ -1,5 +1,5 @@
 """
-config.py — Config I/O for P2P Monitor v1.4.0
+config.py — Config I/O for P2P Monitor v1.4.2
 Owns CONFIG_FILE path, save_config(), load_config(), and sanitize_config().
 stdlib only — no imports from other py/ modules.
 """
@@ -47,6 +47,27 @@ _VALID_CHANNEL_NAMES = frozenset([
 ])
 
 
+def is_logs_root_account_folder(logs_root):
+    """
+    Return True if logs_root points directly to an account folder rather than
+    the parent Logs directory.
+
+    A correctly configured logs_root contains account subfolders, each of which
+    holds logfile-*.log files. An incorrectly configured logs_root points at one
+    of those account subfolders directly, so logfile-*.log files appear at the
+    root level rather than inside a subdirectory.
+
+    Used by sanitize_config (to skip destructive pruning) and the Settings UI
+    (to show a warning to the user).
+    """
+    if not logs_root:
+        return False
+    p = Path(logs_root)
+    if not p.is_dir():
+        return False
+    return bool(list(p.glob('logfile-*.log')))
+
+
 def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
     """
     Clean up config in-place:
@@ -55,7 +76,8 @@ def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
       3. Validate bot_channel_ids / bot_webhook_urls entries against known channel names.
       4. Validate bot_thread_ids structure: {account: {ch_name: id}}.
       5. Prune bot_thread_ids for accounts whose log folders no longer exist
-         (only when logs_root is set and the directory exists).
+         (only when logs_root is set, is a directory, and is NOT itself an
+         account folder — i.e. does not contain logfile-*.log directly).
     Returns the number of corrections made.
     """
     def _log(msg):
@@ -184,15 +206,25 @@ def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
             _log(f'[CONFIG] Removed malformed thread entry for account {account!r}')
 
     # ── 5. Prune thread IDs for nonexistent account folders ───────────────────
+    # Skip this step entirely when logs_root is itself an account folder
+    # (i.e. contains logfile-*.log directly). In that configuration the folder
+    # has no account subfolders to compare against, so any pruning would
+    # incorrectly delete valid thread IDs every startup.
     if logs_root:
         logs_path = Path(logs_root)
         if logs_path.is_dir():
-            existing_folders = {f.name for f in logs_path.iterdir() if f.is_dir()}
-            stale_accounts = [a for a in thread_ids if a not in existing_folders]
-            for account in stale_accounts:
-                del thread_ids[account]
-                corrections += 1
-                _log(f'[CONFIG] Pruned threads for missing account folder: {account!r}')
+            if is_logs_root_account_folder(logs_root):
+                _log(
+                    '[CONFIG] logs_root appears to be an account folder (contains logfile-*.log '
+                    'directly) — skipping bot_thread_ids folder-based pruning to preserve thread IDs'
+                )
+            else:
+                existing_folders = {f.name for f in logs_path.iterdir() if f.is_dir()}
+                stale_accounts = [a for a in thread_ids if a not in existing_folders]
+                for account in stale_accounts:
+                    del thread_ids[account]
+                    corrections += 1
+                    _log(f'[CONFIG] Pruned threads for missing account folder: {account!r}')
 
     if corrections:
         _log(f'[CONFIG] Sanitization complete — {corrections} correction(s)')

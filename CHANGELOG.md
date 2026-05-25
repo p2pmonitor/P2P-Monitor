@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.4.2
+### Discord Thread Duplication & Deleted Thread Recovery Fix
+
+**Issue 1 — sanitize_config bad prune (thread duplication on restart)**
+
+- Fixed `sanitize_config()` incorrectly pruning `bot_thread_ids` when `logs_root` is set directly to an account folder (e.g. `C:\Users\<user>\DreamBot\Logs\Accname`) instead of the parent Logs folder
+- Root cause: step 5 of sanitize iterated `logs_root` looking for account subfolders; when `logs_root` is itself an account folder it contains only log files, so no subfolders are found and all thread IDs are pruned as "missing" — every monitor restart created a full new set of 8 Discord threads
+- Fix: sanitize now detects this condition via new helper `is_logs_root_account_folder()` — if `logs_root` contains `logfile-*.log` files directly, the subfolder-based prune is skipped entirely
+- Single-account mode (pointing `logs_root` at an account folder directly) continues to work for monitoring — only the destructive pruning is suppressed
+- Added a yellow warning label in Settings → DreamBot Logs Folder that appears whenever `logs_root` points to an account folder, explaining that thread IDs will be lost on restart and suggesting the parent Logs folder path
+- Affected files: `py/config.py`, `ui/settings_tab.py`
+
+**Issue 2 — deleted Discord thread recovery gap**
+
+- Fixed `_bot_add_user_to_thread()` silently ignoring 404 / 10003 errors when a Discord thread has been manually deleted
+- Previous behavior: stale thread ID stayed in config, membership check failed silently, running Bot Setup again had no effect because `_ensure_threads_for_account()` saw all 8 channel entries present and skipped thread creation entirely
+- Fix: `_bot_add_user_to_thread(account, thread_id, token)` now accepts `account` as a first parameter and detects 404 / 10003 on both the GET membership check and the PUT add call
+- On 404: new `_recover_deleted_thread(account, thread_id, token)` removes only the specific stale thread ID from config, evicts the account from `_threads_verified`, saves config, and spawns `_ensure_threads_for_account(account)` in a background thread to recreate only the missing thread
+- Channel IDs and webhook URLs are not touched — recovery is targeted to the deleted thread only
+- All call sites updated to pass `account` to `_bot_add_user_to_thread()`
+- Fixed `_bot_force_panel()` incorrectly passing `channel_id` (a plain channel or fallback ID) to `_bot_add_user_to_thread()` — membership add now only fires when a confirmed saved monitor thread ID exists for the account
+- Affected files: `py/watcher.py`
+
+**Manual workaround for users already affected**
+
+Close the monitor, open `config.json`, delete the account entry under `bot_thread_ids` (or clear `bot_thread_ids` entirely), save, reopen the monitor, and press Start. The monitor will find or create one clean set of threads. Also correct `logs_root` in Settings to point to the parent Logs folder.
+
 ## v1.4.1
 ### Config Sanitization Bugfix
 
