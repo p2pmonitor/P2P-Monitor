@@ -1,5 +1,5 @@
 """
-watcher.py — Log watching engine for P2P Monitor v1.4.2
+watcher.py — Log watching engine for P2P Monitor v1.4.3
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 """
@@ -183,6 +183,7 @@ class LogWatcher:
         self._window_lock   = threading.Lock()  # serializes all window focus/click/screenshot ops
         self._last_seen_cache  = {}    # account -> last line written; avoids disk I/O every 5s
         self._threads_verified = set() # accounts whose Discord thread membership confirmed this session
+        self._threads_recovery_attempted = set()  # (account, ch_name) pairs already recovered this session — prevents loops
         self._ss_svc   = None    # ScreenshotService — created in start()
         self._router   = None    # DiscordRouter — created in start()
         self.cfg = {}
@@ -1456,6 +1457,11 @@ class LogWatcher:
             self.cfg.update(result)
             self._save_cfg()
             self.log("🤖 Bot setup complete — channels and webhooks ready")
+            # Bot setup recreates channels/webhooks — clear per-session thread state
+            # so _ensure_threads_for_account runs fresh for every account and
+            # doesn't skip due to a stale _threads_verified entry.
+            self._threads_verified.clear()
+            self._threads_recovery_attempted.clear()
             for acc in list(self._accounts.keys()):
                 self._ensure_threads_for_account(acc)
             return True, "OK"
@@ -1472,35 +1478,51 @@ class LogWatcher:
         channel_ids = self.cfg.get('bot_channel_ids', {})
         if not channel_ids:
             return
-        thread_ids  = self.cfg.get('bot_thread_ids', {})
+        thread_ids   = self.cfg.get('bot_thread_ids', {})
         acct_threads = thread_ids.get(account, {})
-        changed = False
+        changed      = False
+        newly_created = set()  # ch_names created in this pass — skip membership check for these
+
         for ch_name, ch_id in channel_ids.items():
             if ch_name in acct_threads:
                 continue
             tid = bot_ensure_thread(token, ch_id, account, log_fn=self.log)
             if tid:
                 acct_threads[ch_name] = tid
+                newly_created.add(ch_name)
                 changed = True
+            else:
+                # bot_ensure_thread failed (likely 429) — do not mark verified
+                self.log(f"🤖 [{account}] Could not create thread for #{ch_name} — will retry next session")
+
         if changed:
             thread_ids[account] = acct_threads
             self.cfg['bot_thread_ids'] = thread_ids
             self._save_cfg()
             self.log(f"🤖 Threads ready for account: {account}")
-        # Always verify membership for all threads — cheap GET check,
-        # adds user only if missing. Handles the case where the user
-        # was removed from a thread between sessions.
-        for tid in acct_threads.values():
-            self._bot_add_user_to_thread(account, tid, token)
-        self._threads_verified.add(account)
 
-    def _bot_add_user_to_thread(self, account, thread_id, token):
+        # Verify membership for pre-existing threads only — skip newly created ones
+        # to avoid redundant Discord calls and prevent recovery loops on brand-new threads.
+        # Iterate over a snapshot so recovery mutations don't cause RuntimeError.
+        for ch_name, tid in list(acct_threads.items()):
+            if ch_name in newly_created:
+                continue  # just created — skip membership check this pass
+            self._bot_add_user_to_thread(account, ch_name, tid, token)
+
+        # Only mark verified if all channels have thread IDs
+        all_present = all(ch in acct_threads for ch in channel_ids)
+        if all_present:
+            self._threads_verified.add(account)
+        else:
+            self._dbg(f'[{account}] Not all threads present — will retry on next startup')
+
+    def _bot_add_user_to_thread(self, account, ch_name, thread_id, token):
         """Best-effort: add configured mention user to a Discord thread.
         Checks membership first to avoid redundant PUTs.
         Handles 429 rate limits with a single retry after retry_after delay.
-        On 404 / 10003 (deleted thread): invalidates the stale thread ID,
-        removes account from _threads_verified, saves config, and calls
-        _ensure_threads_for_account to recreate only the missing thread.
+        On confirmed 404 / 10003 (deleted thread): triggers one controlled
+        recovery attempt per account/channel per session.
+        429 is always treated as rate limit only — never triggers recovery.
         """
         import re as _re, time as _time
         user_id = self.cfg.get('mention_id', '').strip()
@@ -1508,7 +1530,15 @@ class LogWatcher:
             return
 
         def _is_404(e):
-            return e and ('HTTP 404' in e or '10003' in e)
+            """True only for confirmed deleted-resource errors — not rate limits."""
+            if not e:
+                return False
+            if '429' in e:
+                return False  # rate limit — never treat as deleted thread
+            return 'HTTP 404' in e or '10003' in e
+
+        def _is_429(e):
+            return e and '429' in e
 
         # Check if user is already a member — skip PUT if so
         data, err = bot_api(token, 'GET',
@@ -1516,19 +1546,21 @@ class LogWatcher:
         if data is not None:
             return  # already a member
 
-        if _is_404(err):
-            # Thread was deleted — invalidate and trigger recreation
-            self._recover_deleted_thread(account, thread_id, token)
+        if _is_429(err):
+            self.log(f"🤖 Rate limited checking membership for thread {thread_id} — skipping this pass")
             return
 
-        # Not a member (other error or absent) — attempt to add
+        if _is_404(err):
+            self._recover_deleted_thread(account, ch_name, thread_id, token)
+            return
+
+        # Not a member — attempt to add
         def _put():
             return bot_api(token, 'PUT',
                            f'/channels/{thread_id}/thread-members/{user_id}')
 
         _, err = _put()
-        if err and '429' in err:
-            # Rate limited — parse retry_after and wait once
+        if _is_429(err):
             m = _re.search(r'"retry_after"\s*:\s*([\d.]+)', err)
             wait = float(m.group(1)) if m else 5.0
             self._dbg(f'Rate limited adding user to thread {thread_id} — retrying after {wait:.1f}s')
@@ -1536,36 +1568,47 @@ class LogWatcher:
             _, err = _put()
         if err:
             if _is_404(err):
-                self._recover_deleted_thread(account, thread_id, token)
+                self._recover_deleted_thread(account, ch_name, thread_id, token)
+            elif _is_429(err):
+                self.log(f"🤖 Rate limited adding user to thread {thread_id} — will retry next session")
             else:
                 self.log(f"🤖 Could not add user to thread {thread_id}: {err}")
         else:
             self.log(f"🤖 Added user to thread {thread_id}")
 
-    def _recover_deleted_thread(self, account, thread_id, token):
-        """Invalidate a deleted thread ID and trigger recreation.
-        Called when _bot_add_user_to_thread receives a 404 / 10003.
+    def _recover_deleted_thread(self, account, ch_name, thread_id, token):
+        """Invalidate a deleted thread ID and trigger one controlled recreation.
+        Guards against loops: if recovery was already attempted for this
+        account/channel this session, logs and stops instead of retrying.
         Only invalidates the specific thread — does not touch channel or webhook.
         """
+        guard_key = (account, ch_name)
+
+        if guard_key in self._threads_recovery_attempted:
+            self.log(
+                f"🔧 [{account}] Recovery already attempted for #{ch_name} this session "
+                f"— skipping to avoid duplicate threads / rate limit loop"
+            )
+            return
+
+        self._threads_recovery_attempted.add(guard_key)
+
+        # Invalidate the stale thread ID from config
         thread_ids   = self.cfg.get('bot_thread_ids', {})
         acct_threads = thread_ids.get(account, {})
-        ch_name = next(
-            (ch for ch, tid in acct_threads.items() if str(tid) == str(thread_id)),
-            None
-        )
-        if ch_name:
+        if ch_name and ch_name in acct_threads:
             del acct_threads[ch_name]
             thread_ids[account] = acct_threads
             self.cfg['bot_thread_ids'] = thread_ids
             self._save_cfg()
-            self.log(f"🔧 [{account}] Stale thread {thread_id} (#{ch_name}) removed — will recreate")
+            self.log(f"🔧 [{account}] Stale thread {thread_id} (#{ch_name}) removed — recreating")
         else:
             self.log(f"🔧 [{account}] Stale thread {thread_id} not found in config — skipping invalidation")
 
-        # Evict from verified set so _ensure_threads_for_account runs fresh
+        # Evict from verified so the next _ensure_threads_for_account pass picks up the gap
         self._threads_verified.discard(account)
 
-        # Recreate only the missing thread in a background thread
+        # Recreate only the missing thread — one controlled pass in a background thread
         threading.Thread(
             target=self._ensure_threads_for_account,
             args=(account,),
@@ -1640,6 +1683,6 @@ class LogWatcher:
             # _bot_add_user_to_thread must not receive a channel ID.
             tid = self.cfg.get('bot_thread_ids', {}).get(account, {}).get('monitor')
             if tid:
-                self._bot_add_user_to_thread(account, tid, token)
+                self._bot_add_user_to_thread(account, 'monitor', tid, token)
 
 
