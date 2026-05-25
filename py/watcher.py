@@ -1500,13 +1500,24 @@ class LogWatcher:
             self.cfg['bot_thread_ids'] = thread_ids
             self._save_cfg()
             self.log(f"🤖 Threads ready for account: {account}")
+            # Defer membership add for newly created threads — adding immediately
+            # in this pass would trigger the recovery loop. A short delay lets
+            # Discord propagate the new thread before we try to join it.
+            if newly_created:
+                newly_snapshot = {ch: acct_threads[ch] for ch in newly_created if ch in acct_threads}
+                def _deferred_add(acc=account, snap=newly_snapshot, tok=token):
+                    import time as _time
+                    _time.sleep(3)
+                    for ch, tid in snap.items():
+                        self._bot_add_user_to_thread(acc, ch, tid, tok)
+                threading.Thread(target=_deferred_add, daemon=True).start()
 
         # Verify membership for pre-existing threads only — skip newly created ones
-        # to avoid redundant Discord calls and prevent recovery loops on brand-new threads.
-        # Iterate over a snapshot so recovery mutations don't cause RuntimeError.
+        # (handled above via deferred add). Iterate over a snapshot so recovery
+        # mutations don't cause RuntimeError.
         for ch_name, tid in list(acct_threads.items()):
             if ch_name in newly_created:
-                continue  # just created — skip membership check this pass
+                continue  # handled by deferred add above
             self._bot_add_user_to_thread(account, ch_name, tid, token)
 
         # Only mark verified if all channels have thread IDs
