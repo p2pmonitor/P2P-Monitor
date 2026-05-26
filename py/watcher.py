@@ -673,7 +673,9 @@ class LogWatcher:
           script_start_ts  - timestamp of first 'Connecting to server' in oldest
                              session file (= DreamBot client session start time)
           total_break_secs - sum of ALL 'Break over N' ms across all session files
-          logged_in / on_break - from the most recent state line in active file
+          logged_in / on_break / script_running - reconstructed by scanning ALL
+                             session files oldest→newest on cold start; active file
+                             only on rotation (preserves in-memory state)
           last_task / last_activity - from the last NEW TASK block in active file
 
         Session grouping: logfile-X.log is active; logfile-X.log.1, .log.2 etc.
@@ -712,8 +714,9 @@ class LogWatcher:
 
             # Newest first for scanning; we'll reverse where needed
             session_files_newest_first = sorted(session_files, key=_rot_key, reverse=True)
+            session_files_oldest_first = list(reversed(session_files_newest_first))
 
-            # ── Read active file lines (task/login scan) ───────────────────────
+            # ── Read active file lines (reused for state scan + task scan) ────
             try:
                 with open(active_path, 'r', encoding='utf-8', errors='replace') as f:
                     active_lines = [l.rstrip('\n') for l in f]
@@ -721,59 +724,135 @@ class LogWatcher:
                 self.log(f"⚠ [{folder}] Could not read active log: {e}")
                 active_lines = []
 
-            # ── Login / break state: forward scan to find final state ────────────
-            # Forward scan is the correct algorithm — it tracks the last unmatched
-            # BREAK START, giving the true current break state regardless of how
-            # many completed breaks appear in the file.
-            # On rotation: preserve last known good state — only override if new
-            # log contains explicit state-changing lines (break, stop, solvers etc.)
-            # On cold start: reset all state and rebuild from scratch.
+            # ── Debug: show what we're working with ───────────────────────────
+            self._dbg(
+                f'[{folder}] _startup_catchup: '
+                f'{"rotation" if is_rotation else "cold start"} | '
+                f'active={active_name} | '
+                f'session files (oldest→newest): '
+                f'{[f.name for f in session_files_oldest_first]}'
+            )
+
+            # ── Login / break state scan ──────────────────────────────────────
+            # Forward scan is the correct algorithm — tracks the last unmatched
+            # BREAK START giving the true current break state regardless of how
+            # many completed breaks appear in the files.
+            #
+            # Cold start: reset all state then walk ALL session files oldest→newest
+            # so that startup/login lines in rotated siblings are not missed.
+            # Active file lines are already in active_lines — reuse them for the
+            # active file pass to avoid reading it twice.
+            #
+            # Rotation: preserve last known good in-memory state — only override
+            # if the new active file contains explicit state-changing lines.
             break_start_log_ts = None
             if not is_rotation:
                 state.on_break       = False
                 state.logged_in      = False
                 state.script_running = False
-            for line in active_lines:
-                b = strip_prefix(line).strip()
-                if _is_break_start(line):
-                    state.on_break  = True
-                    state.logged_in = False
-                    m = LOG_TS_RE.match(line)
-                    if m:
-                        try:
-                            break_start_log_ts = datetime.strptime(
-                                m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                        except Exception as e:
-                            self._dbg(f'Break start timestamp parse failed: {e}')
-                            break_start_log_ts = None
-                elif _is_break_over(b.lower()):
-                    state.on_break       = False
-                    state.logged_in      = True
-                    state.script_running = True
-                    break_start_log_ts   = None
-                elif 'you have successfully been logged in' in b.lower():
-                    state.on_break      = False
-                    state.logged_in     = True
-                    break_start_log_ts  = None
-                elif 'starting p2p master ai now' in b.lower() or \
-                     'script set to running' in b.lower() or \
-                     'awaiting login' in b.lower():
-                    state.script_running = True
-                    state.logged_in      = False
-                elif 'solvers all finished' in b.lower():
-                    state.script_running = True
-                    state.logged_in      = True
-                    state.on_break       = False
-                elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
-                    # Script is processing tasks — definitively in game
-                    # Don't override on_break — break state takes priority
-                    state.logged_in = True
-                elif 'stopped p2p master ai' in b.lower():
-                    state.script_running = False
-                    state.logged_in      = False
-                    state.on_break       = False
-                    state._break_start_ts = None
-                    state.logged_in     = False
+
+                def _state_lines_for(sf):
+                    """Return lines for sf, reusing active_lines to avoid double read."""
+                    if sf.name == active_name:
+                        return active_lines
+                    try:
+                        with open(str(sf), 'r', encoding='utf-8', errors='replace') as fh:
+                            return [l.rstrip('\n') for l in fh]
+                    except Exception as e:
+                        self.log(f"⚠ [{folder}] Could not read {sf.name} for state scan: {e}")
+                        return []
+
+                for sf in session_files_oldest_first:
+                    for line in _state_lines_for(sf):
+                        b = strip_prefix(line).strip()
+                        if _is_break_start(line):
+                            state.on_break  = True
+                            state.logged_in = False
+                            m = LOG_TS_RE.match(line)
+                            if m:
+                                try:
+                                    break_start_log_ts = datetime.strptime(
+                                        m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
+                                except Exception as e:
+                                    self._dbg(f'Break start timestamp parse failed: {e}')
+                                    break_start_log_ts = None
+                        elif _is_break_over(b.lower()):
+                            state.on_break       = False
+                            state.logged_in      = True
+                            state.script_running = True
+                            break_start_log_ts   = None
+                        elif 'you have successfully been logged in' in b.lower():
+                            state.on_break      = False
+                            state.logged_in     = True
+                            break_start_log_ts  = None
+                        elif 'starting p2p master ai now' in b.lower() or \
+                             'script set to running' in b.lower() or \
+                             'awaiting login' in b.lower():
+                            state.script_running = True
+                            state.logged_in      = False
+                        elif 'solvers all finished' in b.lower():
+                            state.script_running = True
+                            state.logged_in      = True
+                            state.on_break       = False
+                        elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+                            # Script is processing tasks — definitively in game
+                            # Don't override on_break — break state takes priority
+                            state.logged_in = True
+                        elif 'stopped p2p master ai' in b.lower():
+                            state.script_running  = False
+                            state.logged_in       = False
+                            state.on_break        = False
+                            state._break_start_ts = None
+            else:
+                # Rotation: only scan the new active file for state changes
+                for line in active_lines:
+                    b = strip_prefix(line).strip()
+                    if _is_break_start(line):
+                        state.on_break  = True
+                        state.logged_in = False
+                        m = LOG_TS_RE.match(line)
+                        if m:
+                            try:
+                                break_start_log_ts = datetime.strptime(
+                                    m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
+                            except Exception as e:
+                                self._dbg(f'Break start timestamp parse failed: {e}')
+                                break_start_log_ts = None
+                    elif _is_break_over(b.lower()):
+                        state.on_break       = False
+                        state.logged_in      = True
+                        state.script_running = True
+                        break_start_log_ts   = None
+                    elif 'you have successfully been logged in' in b.lower():
+                        state.on_break      = False
+                        state.logged_in     = True
+                        break_start_log_ts  = None
+                    elif 'starting p2p master ai now' in b.lower() or \
+                         'script set to running' in b.lower() or \
+                         'awaiting login' in b.lower():
+                        state.script_running = True
+                        state.logged_in      = False
+                    elif 'solvers all finished' in b.lower():
+                        state.script_running = True
+                        state.logged_in      = True
+                        state.on_break       = False
+                    elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+                        state.logged_in = True
+                    elif 'stopped p2p master ai' in b.lower():
+                        state.script_running  = False
+                        state.logged_in       = False
+                        state.on_break        = False
+                        state._break_start_ts = None
+
+            # Debug: show reconstructed state
+            self._dbg(
+                f'[{folder}] reconstructed state: '
+                f'script_running={state.script_running} '
+                f'logged_in={state.logged_in} '
+                f'on_break={state.on_break} '
+                f'script_start_ts={state.script_start_ts} '
+                f'total_break_secs={state.total_break_secs:.1f}'
+            )
 
             # If we started mid-break, find the break length for expected_end calculation
             if state.on_break:
@@ -789,7 +868,6 @@ class LogWatcher:
             # Walk oldest-first to find client start time and sum all completed breaks.
             # Uses timestamp math (BREAK START → Break over N) — ignores logged ms value
             # since DreamBot logs -100 for manually skipped breaks.
-            session_files_oldest_first = list(reversed(session_files_newest_first))
             total_break_ms  = 0
             client_start_ts = None
             pending_break_start = None

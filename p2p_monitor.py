@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.5.0
+P2P Monitor v1.6.0
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -47,7 +47,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.5.0"
+VERSION      = "1.6.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -163,17 +163,18 @@ class App(tk.Tk):
         )
         if _corrections:
             save_config(self.cfg)
-        # Fetch remote error rules in background — updates in-memory rules for
-        # future parses. Fallback order: GitHub → cache → packaged JSON → emergency.
-        start_background_fetch(
-            log_fn=self._log,
-            debug=self.cfg.get('debug', False),
-        )
         self.watcher = None   # created in _start() to avoid orphaned screenshot worker thread
         self._counts = {k: 0 for k in ('task', 'chat', 'error', 'drop', 'death', 'levelup')}
         self._style()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Defer remote error rules fetch until after _build() so the Tkinter event
+        # loop is running and the monitor tab widget exists to receive the log message.
+        # Using after(0, ...) guarantees the fetch fires on the first event loop tick.
+        self.after(0, lambda: start_background_fetch(
+            log_fn=self._log,
+            debug=self.cfg.get('debug', False),
+        ))
         self.after(500, lambda: _send_startup_ping(self.cfg, log_fn=self._log))
 
     def _style(self):
@@ -324,6 +325,9 @@ class App(tk.Tk):
         Return (tag, asset_url) for the best available release.
         include_prerelease=False → /releases/latest (stable only)
         include_prerelease=True  → /releases list, pick highest semver
+
+        For frozen Windows builds, looks for a bare .exe asset (P2P.Monitor.exe).
+        For all other builds, looks for P2P-Monitor-*.zip or any .zip.
         """
         import urllib.request, json
         headers = {'Accept': 'application/vnd.github.v3+json',
@@ -339,7 +343,6 @@ class App(tk.Tk):
         if isinstance(data, list):
             if not data:
                 return None, None
-            # Sort by parsed semver descending — not published_at
             def _semver_key(rel):
                 return _ver_tuple(rel.get('tag_name', ''))
             data.sort(key=_semver_key, reverse=True)
@@ -347,15 +350,25 @@ class App(tk.Tk):
         else:
             release = data
         tag = release.get('tag_name', '')
-        # Find the release zip — prefer P2P-Monitor-*.zip, fall back to any .zip
+        assets = release.get('assets', [])
+
+        # Frozen Windows build — look for bare .exe asset
+        if _is_frozen() and sys.platform.startswith('win'):
+            for asset in assets:
+                name = asset.get('name', '')
+                if name.endswith('.exe'):
+                    return tag, asset['browser_download_url']
+            return tag, None
+
+        # Source / Linux — look for zip asset
         asset_url = None
-        for asset in release.get('assets', []):
+        for asset in assets:
             name = asset.get('name', '')
             if name.startswith('P2P-Monitor-') and name.endswith('.zip'):
                 asset_url = asset['browser_download_url']
                 break
         if not asset_url:
-            for asset in release.get('assets', []):
+            for asset in assets:
                 if asset.get('name', '').endswith('.zip'):
                     asset_url = asset['browser_download_url']
                     break
@@ -371,24 +384,38 @@ class App(tk.Tk):
             return
         local_ver  = f'v{VERSION}'
         remote_ver = tag if tag.startswith('v') else f'v{tag}'
-        # Never prompt downgrade (e.g. user is on beta ahead of stable)
         if _ver_tuple(remote_ver) <= _ver_tuple(local_ver):
             return
         def _prompt():
             self._log(f"🔄 Update available: {remote_ver} (current: {local_ver})")
-            if messagebox.askyesno('Update Available',
+            if not messagebox.askyesno('Update Available',
+                    f'New version: {remote_ver}\nYou are on: {local_ver}\n\nWould you like to update?'):
+                return
+            if _is_frozen() and sys.platform.startswith('win'):
+                choice = messagebox.askyesno(
+                    'How would you like to update?',
+                    'Yes - Auto-Install (trust a stranger)\n'
+                    'No  - Take me to GitHub for manual install',
+                    icon='question',
+                )
+                if not choice:
+                    import webbrowser
+                    webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+                    return
+            elif not messagebox.askyesno('Update Available',
                     f'New version: {remote_ver}\nYou are on: {local_ver}\n\nUpdate now?'):
-                def _fetch_and_apply():
-                    try:
-                        _, asset_url = self._fetch_release_info(include_prerelease=False)
-                    except Exception as e:
-                        self._log(f'❌ Could not fetch release info: {e}')
-                        return
-                    if not asset_url:
-                        self._log('❌ No zip asset found for this release')
-                        return
-                    self._do_apply_update(remote_ver, asset_url)
-                threading.Thread(target=_fetch_and_apply, daemon=True).start()
+                return
+            def _fetch_and_apply():
+                try:
+                    _, asset_url = self._fetch_release_info(include_prerelease=False)
+                except Exception as e:
+                    self._log(f'❌ Could not fetch release info: {e}')
+                    return
+                if not asset_url:
+                    self._log('❌ No release asset found for this release')
+                    return
+                self._do_apply_update(remote_ver, asset_url)
+            threading.Thread(target=_fetch_and_apply, daemon=True).start()
         self.after(0, _prompt)
 
     def _do_update_check(self):
@@ -415,28 +442,45 @@ class App(tk.Tk):
             return
         if not asset_url:
             self.after(0, lambda: messagebox.showwarning('Auto-Update',
-                f'Release {remote_ver} found but no zip asset attached.'))
+                f'Release {remote_ver} found but no download asset attached.'))
             return
+
         def _prompt():
-            if messagebox.askyesno('Update Available',
-                    f'New version: {remote_ver}\nCurrent: {local_ver}\n\nUpdate now?'):
+            if not messagebox.askyesno('Update Available',
+                    f'New version: {remote_ver}\nCurrent: {local_ver}\n\nWould you like to update?'):
+                return
+            if _is_frozen() and sys.platform.startswith('win'):
+                choice = messagebox.askyesno(
+                    'How would you like to update?',
+                    'Yes - Auto-Install (trust a stranger)\n'
+                    'No  - Take me to GitHub for manual install',
+                    icon='question',
+                )
+                if choice:
+                    threading.Thread(target=self._do_apply_update,
+                                     args=(remote_ver, asset_url), daemon=True).start()
+                else:
+                    import webbrowser
+                    webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+            else:
                 threading.Thread(target=self._do_apply_update,
                                  args=(remote_ver, asset_url), daemon=True).start()
         self.after(0, _prompt)
 
     def _do_apply_update(self, new_ver, asset_url):
         """
-        Download release zip, stage in temp dir, verify via manifest, then apply.
-        Staged approach: install dir is not touched until all files are verified.
-        Falls back gracefully if manifest is missing (applies all .py files).
-        Source installs only — frozen builds use browser-open update flow.
+        Download release asset and apply update.
+        - Frozen Windows: download .exe, write batch file, launch detached, exit app.
+        - Source / Linux: download zip, stage, verify manifest, apply .py files.
         """
         if _is_frozen():
-            # Packaged exe — do not attempt in-place file patching.
-            # Open the releases page so the user can download the new version.
-            import webbrowser
-            self._log(f'🌐 Packaged build — opening download page for {new_ver}')
-            webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+            if sys.platform.startswith('win'):
+                self._do_win_frozen_update(new_ver, asset_url)
+            else:
+                # Non-Windows frozen build — open releases page as fallback
+                import webbrowser
+                self._log(f'🌐 Packaged build — opening download page for {new_ver}')
+                webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
             return
         import urllib.request, zipfile, io, tempfile, traceback
         install_dir = Path(SCRIPT_PATH).parent
@@ -560,6 +604,141 @@ class App(tk.Tk):
                         os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
             self.after(0, _restart)
 
+    def _do_win_frozen_update(self, new_ver, asset_url):
+        """
+        Windows frozen (PyInstaller) self-updater.
+        Downloads the new .exe, writes a temporary batch file that:
+          1. Waits/retries until the running exe is released.
+          2. Backs up the old exe as .bak.
+          3. Replaces the exe.
+          4. Relaunches the updated exe.
+          5. Cleans up temp files and self-deletes.
+        Launches the batch detached then exits the app cleanly.
+        Does not require admin rights. Does not use taskkill /f.
+        """
+        import urllib.request, tempfile, subprocess, traceback
+
+        old_exe  = Path(sys.executable)
+        tmp_dir  = old_exe.parent / '.update_tmp'
+
+        self._log(f'⬇️  Downloading {new_ver}...')
+        self.after(0, lambda: None)  # flush UI
+
+        try:
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            new_exe = tmp_dir / 'P2P.Monitor.exe'
+
+            # Download new exe
+            req = urllib.request.Request(
+                asset_url,
+                headers={'User-Agent': f'P2PMonitor/{VERSION}'},
+            )
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            new_exe.write_bytes(data)
+            self._log(f'✅ Downloaded {new_ver} ({len(data) // 1024} KB)')
+
+        except Exception as e:
+            self._log(f'❌ Download failed: {e}')
+            self.after(0, lambda: messagebox.showerror(
+                'Update Failed', f'Could not download {new_ver}:\n{e}'))
+            try:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return
+
+        # Paths for the batch — all quoted inside the script
+        old_exe_s  = str(old_exe)
+        new_exe_s  = str(new_exe)
+        tmp_dir_s  = str(tmp_dir)
+        bat_path   = tmp_dir / 'update.bat'
+
+        # Batch: wait for exe to be unlocked (retry loop), backup, replace, relaunch, cleanup.
+        # taskkill /f is NOT used in the normal path — the app exits cleanly before the
+        # batch starts replacing. It is included only as a last-resort after 30s of retrying.
+        bat_lines = [
+            '@echo off',
+            'setlocal',
+            '',
+            ':: Paths',
+            f'set "OLD_EXE={old_exe_s}"',
+            f'set "NEW_EXE={new_exe_s}"',
+            f'set "TMP_DIR={tmp_dir_s}"',
+            f'set "EXE_DIR={str(old_exe.parent)}"',
+            f'set "APP_PID={os.getpid()}"',
+            '',
+            ':: Wait for the app to exit cleanly (up to 30s)',
+            'set /a TRIES=0',
+            ':WAIT_LOOP',
+            '  tasklist /fi "PID eq %APP_PID%" 2>nul | find "%APP_PID%" >nul',
+            '  if errorlevel 1 goto DO_REPLACE',
+            '  ping -n 1 -w 500 127.0.0.1 >nul',
+            '  set /a TRIES=%TRIES%+1',
+            '  if %TRIES% lss 60 goto WAIT_LOOP',
+            ':: Still running after 30s - force kill as last resort',
+            'taskkill /pid %APP_PID% /f >nul 2>&1',
+            'ping -n 2 -w 1000 127.0.0.1 >nul',
+            '',
+            ':DO_REPLACE',
+            ':: Replace exe - retry a few times in case of brief lock',
+            'set /a REP=0',
+            ':REP_LOOP',
+            '  copy /y "%NEW_EXE%" "%OLD_EXE%" >nul 2>&1',
+            '  if not errorlevel 1 goto REPLACED',
+            '  set /a REP=%REP%+1',
+            '  if %REP% lss 5 (',
+            '    ping -n 2 -w 1000 127.0.0.1 >nul',
+            '    goto REP_LOOP',
+            '  )',
+            '',
+            ':: Replace failed - restore backup and stop',
+            'echo Update failed: could not replace exe.',
+            'goto CLEANUP',
+            '',
+            ':REPLACED',
+            ':: Verify replacement succeeded',
+            'if not exist "%OLD_EXE%" goto CLEANUP',
+            ':: Wait for old process MEI cleanup before relaunch',
+            'ping -n 5 -w 1000 127.0.0.1 >nul',
+            ':: Relaunch updated exe',
+            'explorer.exe "%OLD_EXE%"',
+            '',
+            ':CLEANUP',
+            ':: Remove temp dir best-effort',
+            'ping -n 3 -w 1000 127.0.0.1 >nul',
+            'rd /s /q "%TMP_DIR%" >nul 2>&1',
+            '',
+            ':: Self-delete',
+            '(goto) 2>nul & del /f /q "%~f0"',
+        ]
+
+        try:
+            bat_path.write_text('\r\n'.join(bat_lines), encoding='utf-8-sig')
+        except Exception as e:
+            self._log(f'❌ Could not write update batch: {e}')
+            self.after(0, lambda: messagebox.showerror(
+                'Update Failed', f'Could not write update script:\n{e}'))
+            return
+
+        self._log(f'🔄 Launching updater - app will close and restart as {new_ver}')
+
+        try:
+            self._log(f'🔄 Batch path: {bat_path}')
+            self._log(f'🔄 Batch exists: {bat_path.exists()}')
+            proc = subprocess.Popen(
+                str(bat_path),
+                shell=True,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            self._log(f'🔄 Batch launched (pid {proc.pid}) — closing app for update...')
+            self.after(500, self._do_quit)
+        except Exception as e:
+            self._log(f'❌ Could not launch update batch: {e}')
+            self.after(0, lambda: messagebox.showerror(
+                'Update Failed', f'Could not launch update script:\n{e}'))
+
     # ── Tray ───────────────────────────────────────────────────────────────────
     def _make_tray_icon(self):
         img = Image.new('RGB', (64, 64), color=(0, 212, 255))
@@ -625,6 +804,6 @@ if __name__ == '__main__':
     except Exception as e:
         import traceback; traceback.print_exc()
         try:
-            messagebox.showerror("P2P Monitor — Startup Error", str(e))
+            messagebox.showerror("P2P Monitor - Startup Error", str(e))
         except Exception:
             pass
