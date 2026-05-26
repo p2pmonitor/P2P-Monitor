@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "error_triggers": [
+    {
+      "key": "high_severity",
+      "pattern": "High severity server response",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Script force-stopped by server"
+    },
+    {
+      "key": "start_problem",
+      "pattern": "This script had a problem starting",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Script failed to start"
+    },
+    {
+      "key": "stuckness",
+      "pattern": "Stuckness detected, stopping script",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Stuckness detected \u2014 script stopped"
+    },
+    {
+      "key": "overcrowded",
+      "pattern": "LOCATION OVERCROWDED - SKIPPING TASK",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 300,
+      "label": "Location overcrowded \u2014 task skipped"
+    },
+    {
+      "key": "pathing_fail",
+      "pattern": "Pathing failed -> lockout",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Pathing lockout"
+    },
+    {
+      "key": "login_fail",
+      "pattern": "Failed to login, waiting before trying again",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Login failure"
+    },
+    {
+      "key": "hop_fail",
+      "pattern": "Failed to hop worlds!",
+      "threshold": 2,
+      "window_sec": 300,
+      "dedupe_sec": 600,
+      "label": "Repeated world hop failures"
+    },
+    {
+      "key": "ge_fail",
+      "pattern": "GE failed to add item|I couldn't buy any of the items",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Grand Exchange failure"
+    },
+    {
+      "key": "live_prices",
+      "pattern": "There was a problem parsing the LivePrices data",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 3600,
+      "label": "LivePrices data error"
+    },
+    {
+      "key": "script_crash",
+      "pattern": "This script threw an error|Exception has occurred while running",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Script exception/crash"
+    },
+    {
+      "key": "impossible",
+      "pattern": ">>> Impossible to do anything in (.+?)!",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Impossible to do anything"
+    },
+    {
+      "key": "construction",
+      "pattern": "Failed to clear floor!",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Construction error \u2014 failed to clear floor"
+    }
+  ],
+  "lock_reason_patterns": [
+    {
+      "pattern": "^(?!.*\\(virtual\\))Resource check failed \\[(.+?)\\]",
+      "label": "Missing: {item}",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "Don't have any bank tp",
+      "label": "No teleport to exit area",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "Don't have tp there(?:\\s*\\[([^\\]]+?)(?:\\s+true\\s+(?:true|false))?\\])?",
+      "label": "No teleport to reach area{item}",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "You need a stake to continue",
+      "label": "Missing: stake (Vampyre Slayer)",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "Missing items can and will cause quest failure",
+      "label": "Missing quest items",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "If you don't like this, get a bottomless bucket",
+      "label": "Low inventory space \u2014 get a bottomless bucket",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "Quest state repeated too many times",
+      "label": "Quest state loop \u2014 auto-skipped",
+      "flags": [
+        "IGNORECASE"
+      ]
+    },
+    {
+      "pattern": "QuestStep traversal failed",
+      "label": "Quest step traversal failed (script could not determine next step)",
+      "flags": [
+        "IGNORECASE"
+      ]
+    }
+  ],
+  "silent_lock_names": [
+    "attack",
+    "strength",
+    "defence",
+    "range",
+    "ranged",
+    "prayer",
+    "magic",
+    "runecrafting",
+    "construction",
+    "agility",
+    "herblore",
+    "thieving",
+    "crafting",
+    "fletching",
+    "slayer",
+    "hunter",
+    "mining",
+    "smithing",
+    "fishing",
+    "cooking",
+    "firemaking",
+    "woodcutting",
+    "farming",
+    "sailing",
+    "questing",
+    "birdhouses",
+    "port tasks"
+  ]
+}

@@ -3,9 +3,11 @@
 # The updater applies exactly these files from the release zip.
 
 p2p_monitor.py
+error_rules.json
 py/__init__.py
 py/platform_ops.py
 py/reader.py
+py/error_rules.py
 py/history.py
 py/config.py
 py/util.py

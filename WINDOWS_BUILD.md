@@ -27,18 +27,26 @@ python -c "import discord; print('discord.py OK:', discord.__version__)"
 # 5. Verify Pillow is importable
 python -c "from PIL import Image, ImageGrab, ImageChops; print('Pillow OK')"
 
-# 6. Build the executable
+# 6. Verify error_rules.json is present in the repo root
+#    The spec bundles it into the exe — if it's missing the build will fail.
+python -c "import json; json.load(open('error_rules.json')); print('error_rules.json OK')"
+
+# 7. Build the executable
 pyinstaller p2p_monitor.spec
 
-# 7. Output location
+# 8. Output location
 #    dist/P2P Monitor.exe
 ```
 
 The output is a single `.exe` — no installer needed. Place it anywhere and run directly.
 
-> **Important:** Steps 4 and 5 are not optional. If either check fails, fix the
-> missing dependency before running PyInstaller. A build that starts without
-> discord.py installed will produce an exe that cannot use the Discord bot feature.
+> **Important:** Steps 4, 5, and 6 are not optional. If any check fails, fix the
+> issue before running PyInstaller.
+>
+> `error_rules.json` is bundled into the exe by the spec file. It provides the
+> packaged fallback rule set used when GitHub is unreachable and no cache exists.
+> On startup the monitor fetches the latest `error_rules.json` from GitHub in the
+> background and updates its in-memory rules automatically.
 
 ## Known Limitations (Beta)
 
@@ -78,6 +86,15 @@ pip install Pillow
 pyinstaller p2p_monitor.spec
 ```
 Then verify with step 5 above before rebuilding.
+
+**error_rules.json missing from build**
+The spec expects `error_rules.json` in the repo root. If it's missing:
+```
+# Verify it exists
+python -c "import json; json.load(open('error_rules.json')); print('OK')"
+```
+If absent, download it from the GitHub releases page or repo root and place it
+next to `p2p_monitor.py` before rebuilding.
 
 **UPX not found warning during build**
 Safe to ignore — UPX is optional compression. The exe will still build correctly.

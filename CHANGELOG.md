@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.5.0
+### Remote Error Rules
+
+Error detection patterns (`ERROR_TRIGGERS`, `_LOCK_REASON_PATTERNS`, `_SILENT_LOCK_NAMES`) have been moved out of `py/reader.py` into a GitHub-hosted JSON file (`error_rules.json`). Error patterns can now be added or updated without requiring users to upgrade the monitor.
+
+**Fallback order:**
+1. **GitHub remote** — fetched from repo on startup in a background thread
+2. **Local cache** — `~/.p2p_monitor/error_rules_cache.json` — last valid downloaded copy
+3. **Packaged JSON** — `error_rules.json` bundled with the app release
+4. **Emergency fallback** — tiny hardcoded Python dict (empty rule set); monitor never crashes even if all other sources fail
+
+**How it works:**
+- On startup, `start_background_fetch()` is called after config loads — non-blocking, UI is never delayed
+- Initial rules load synchronously from packaged JSON before the background fetch completes, so the first log poll always has a valid rule set
+- If remote fetch succeeds, in-memory rules are replaced immediately and the result is saved to cache
+- `parse_lines()` calls `get_rules()` at parse time — remote updates apply to future log polls without restarting
+- Full-file validation on every source — bad regex or missing fields reject the entire file and fall back safely
+- Debug mode logs which source was used: `[ERROR_RULES] Loaded from remote / cache / packaged JSON / emergency fallback`
+
+**Files changed:**
+- `py/error_rules.py` — new module: loader, validator, compiler, cache manager, fallback handler
+- `py/reader.py` — removed hardcoded rule data; imports `get_rules()` from `error_rules`
+- `error_rules.json` — new file in repo root; upload to GitHub and bundle with each release
+- `p2p_monitor.spec` — updated `datas` to bundle `error_rules.json` with the Windows exe
+- `update_manifest.txt` — added `py/error_rules.py` and `error_rules.json`
+- `p2p_monitor.py` — wires `start_background_fetch()` in `App.__init__` after config loads
+
 ## v1.4.2
 ### Discord Thread Duplication & Deleted Thread Recovery Fix
 

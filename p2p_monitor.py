@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.4.4
+P2P Monitor v1.5.0
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
   p2p_monitor.py          — App shell, wiring, tray, lifecycle
+  error_rules.json        — Bundled error rule data (repo root; also fetched from GitHub)
   py/reader.py            — Pure log parsing (parse_lines, slice_*)
+  py/error_rules.py       — Remote error rule loader (GitHub → cache → packaged → emergency)
   py/history.py           — History file I/O
   py/config.py            — Config load/save (config.json)
   py/util.py              — Shared helpers (now_str, fmt_ts)
@@ -37,6 +39,7 @@ except ImportError:
 
 from py.history      import migrate_history
 from py.config       import save_config, load_config, sanitize_config
+from py.error_rules  import start_background_fetch
 from py.watcher      import LogWatcher
 from ui.monitor_tab   import MonitorTab
 from ui.status_tab    import StatusTab
@@ -44,7 +47,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.4.4"
+VERSION      = "1.5.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -160,6 +163,12 @@ class App(tk.Tk):
         )
         if _corrections:
             save_config(self.cfg)
+        # Fetch remote error rules in background — updates in-memory rules for
+        # future parses. Fallback order: GitHub → cache → packaged JSON → emergency.
+        start_background_fetch(
+            log_fn=self._log,
+            debug=self.cfg.get('debug', False),
+        )
         self.watcher = None   # created in _start() to avoid orphaned screenshot worker thread
         self._counts = {k: 0 for k in ('task', 'chat', 'error', 'drop', 'death', 'levelup')}
         self._style()

@@ -17,7 +17,12 @@ a = Analysis(
     ['p2p_monitor.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[
+        # Bundle error_rules.json so the packaged exe has a full rule set
+        # without needing internet access on first run.
+        # error_rules.py finds this via sys._MEIPASS at runtime.
+        ('error_rules.json', '.'),
+    ],
     hiddenimports=[
         # discord.py and all required submodules
         'discord',

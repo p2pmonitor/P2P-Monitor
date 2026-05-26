@@ -1,11 +1,18 @@
 """
-reader.py — Pure log parsing for P2P Monitor v1.4.0
+reader.py — Pure log parsing for P2P Monitor v1.5.0
 Zero side effects: accepts lines, returns typed event dicts.
 All slice_* functions live here. parse_lines() is the single entry point
 used by both the live watcher and backfill — eliminates the triple-pipeline bug.
+
+Error rule DATA (ERROR_TRIGGERS, _LOCK_REASON_PATTERNS, _SILENT_LOCK_NAMES)
+is loaded from py/error_rules.py which fetches from GitHub on startup and
+falls back to cache then bundled defaults. parse_lines() calls
+error_rules.get_rules() at parse time so updates take effect immediately
+without restarting the parser.
 """
 
 import re
+from py.error_rules import get_rules
 
 # ── Regex / pattern constants ──────────────────────────────────────────────────
 STRIP_PREFIX_RE = re.compile(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[[A-Z]+\]\s*>?\s*', re.IGNORECASE)
@@ -27,73 +34,19 @@ SCRIPT_STOP_RE  = re.compile(r'Stopped P2P Master AI!', re.I)
 SCRIPT_PAUSE_RE = re.compile(r'Script P2P Master AI paused\.\.\.')
 SCRIPT_RESUME_RE= re.compile(r'Script P2P Master AI resumed!')
 
-# Names that appear after '> Locking' that are normal task completions or
-# internal categories — not errors. Bare locks with no reason line are only
-# pinged if the name is NOT in this set (i.e. it's a named quest).
-_SILENT_LOCK_NAMES = {
-    'attack', 'strength', 'defence', 'range', 'ranged', 'prayer', 'magic',
-    'runecrafting', 'construction', 'agility', 'herblore', 'thieving', 'crafting',
-    'fletching', 'slayer', 'hunter', 'mining', 'smithing', 'fishing', 'cooking',
-    'firemaking', 'woodcutting', 'farming', 'sailing', 'questing', 'birdhouses',
-    'port tasks',
-}
-
-# Regex for '> Locking X' lines
+# Regex for '> Locking X' lines — structural parser, stays local
 _LOCKING_RE = re.compile(r'\]\s*>\s*Locking\s+(.+)', re.IGNORECASE)
 
 # Regex for reset lines that make the subsequent 'impossible' ping redundant
 _RESET_RE = re.compile(r'(Escaped ship|Stuck walking)\s*->\s*Startup', re.IGNORECASE)
 
-# Reason patterns scanned 1-5 lines before a lock line (same timestamp window)
-# Tuples of (regex, label_template) — {item} replaced with captured group 1 if present
-_LOCK_REASON_PATTERNS = [
-    # Real resource check failed — exclude (virtual) prefix
-    (re.compile(r'^(?!.*\(virtual\))Resource check failed \[(.+?)\]', re.IGNORECASE),
-     'Missing: {item}'),
-    # No bank teleport to exit dungeon
-    (re.compile(r"Don't have any bank tp", re.IGNORECASE),
-     'No teleport to exit area'),
-    # No teleport available
-    (re.compile(r"Don't have tp there(?:\s*\[([^\]]+?)(?:\s+true\s+(?:true|false))?\])?", re.IGNORECASE),
-     'No teleport to reach area{item}'),
-    # Quest-specific failures
-    (re.compile(r'You need a stake to continue', re.IGNORECASE),
-     'Missing: stake (Vampyre Slayer)'),
-    (re.compile(r'Missing items can and will cause quest failure', re.IGNORECASE),
-     'Missing quest items'),
-    # Farming inv space
-    (re.compile(r"If you don't like this, get a bottomless bucket", re.IGNORECASE),
-     'Low inventory space — get a bottomless bucket'),
-    # Quest state loop — always co-occurs with > Locking on same timestamp
-    (re.compile(r'Quest state repeated too many times', re.IGNORECASE),
-     'Quest state loop — auto-skipped'),
-    # QuestStep traversal failure
-    (re.compile(r'QuestStep traversal failed', re.IGNORECASE),
-     'Quest step traversal failed (script could not determine next step)'),
-]
-
-# Farming patch skip detection
+# Farming patch skip detection — structural parser, stays local
 _FARM_REMOVE_RE = re.compile(r'Removing\s+(\S+)\s+due to low expected inv space', re.IGNORECASE)
 _FARM_BUCKET_RE = re.compile(r"If you don't like this, get a bottomless bucket", re.IGNORECASE)
 
 # Quest missing items block anchors
 _QUEST_ITEMS_START_RE = re.compile(r'If any of these items are needed, make sure you have them', re.IGNORECASE)
 _QUEST_ITEMS_END_RE   = re.compile(r'It is up to the human to manually re-obtain', re.IGNORECASE)
-
-ERROR_TRIGGERS = [
-    ('high_severity',  re.compile(r'High severity server response', re.I),                    1, 0,   600,  'Script force-stopped by server'),
-    ('start_problem',  re.compile(r'This script had a problem starting', re.I),               1, 0,   600,  'Script failed to start'),
-    ('stuckness',      re.compile(r'Stuckness detected, stopping script', re.I),              1, 0,   600,  'Stuckness detected — script stopped'),
-    ('overcrowded',    re.compile(r'LOCATION OVERCROWDED - SKIPPING TASK', re.I),             1, 0,   300,  'Location overcrowded — task skipped'),
-    ('pathing_fail',   re.compile(r'Pathing failed -> lockout', re.I),                        1, 0,   600,  'Pathing lockout'),
-    ('login_fail',     re.compile(r'Failed to login, waiting before trying again', re.I),     1, 0,   600,  'Login failure'),
-    ('hop_fail',       re.compile(r'Failed to hop worlds!', re.I),                            2, 300, 600,  'Repeated world hop failures'),
-    ('ge_fail',        re.compile(r"(GE failed to add item|I couldn't buy any of the items)", re.I), 1, 0, 600, 'Grand Exchange failure'),
-    ('live_prices',    re.compile(r'There was a problem parsing the LivePrices data', re.I),  1, 0,   3600, 'LivePrices data error'),
-    ('script_crash',   re.compile(r'(This script threw an error|Exception has occurred while running)', re.I), 1, 0, 600, 'Script exception/crash'),
-    ('impossible',     re.compile(r'>>> Impossible to do anything in (.+?)!', re.I),          1, 0,   600,  'Impossible to do anything'),
-    ('construction',   re.compile(r'Failed to clear floor!', re.I),                          1, 0,   600,  'Construction error — failed to clear floor'),
-]
 
 # ── String helpers ─────────────────────────────────────────────────────────────
 def strip_prefix(line):
@@ -759,7 +712,8 @@ def parse_lines(lines):
             if m:
                 _reset_ts.add(m.group(1))
 
-    for (key, pattern, threshold, window_sec, dedupe_sec, label) in ERROR_TRIGGERS:
+    _rules = get_rules()
+    for (key, pattern, threshold, window_sec, dedupe_sec, label) in _rules['error_triggers']:
         matches = [(i, l) for i, l in enumerate(arr) if pattern.search(l)]
         if not matches:
             continue
@@ -809,7 +763,7 @@ def parse_lines(lines):
         locked_name = m.group(1).strip()
         lock_ts     = LOG_TS_RE.match(line)
         lock_ts_str = lock_ts.group(1) if lock_ts else None
-        is_silent   = locked_name.lower() in _SILENT_LOCK_NAMES
+        is_silent   = locked_name.lower() in _rules['silent_lock_names']
 
         # Scan back up to 5 lines within the same timestamp for a reason
         # Also scan forward a few lines at the same timestamp (e.g. quest state loop
@@ -825,7 +779,7 @@ def parse_lines(lines):
             prev_ts  = LOG_TS_RE.match(prev_raw)
             if prev_ts and lock_ts_str and prev_ts.group(1) != lock_ts_str:
                 continue
-            for pat, label_tpl in _LOCK_REASON_PATTERNS:
+            for pat, label_tpl in _rules['lock_reason_patterns']:
                 rm = pat.search(prev_b)
                 if rm:
                     item = rm.group(1).strip() if rm.lastindex and rm.lastindex >= 1 else ''
