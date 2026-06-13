@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.8.0-beta.1
+### Safe Launcher Backend + Discord `/launch` (Stage 1 of v1.8.0)
+
+**New: `py/launcher.py`** — shared launcher backend used by both the Launcher tab and Discord slash commands.
+
+- `build_command(jar, preset)` — command construction moved out of the UI; single source of truth for both the tab and Discord
+- `launch_account(cfg, account)` — fresh launch; refuses with a clear message if the account is already running (preserves UI safety behaviour)
+- `relaunch_account(cfg, account)` — safely identifies and closes the existing DreamBot client, waits 15 seconds, then relaunches
+- `smart_launch(cfg, account)` — auto-dispatch: relaunch if running, fresh launch if not (used by Discord and launch_all)
+- `launch_all(cfg)` — smart-launch every preset account with a 5-second stagger between launches
+
+**Safety contract (never violated):**
+- Never kills by generic process name (`java.exe`, `DreamBot` wildcard, etc.)
+- Only closes a client when the DreamBot window title can be matched to the requested account name
+- If multiple windows match (ambiguous) → refuses with explanation
+- If saved PID exists but window match fails → refuses with explanation
+- Saved PID state (`~/.p2p_monitor/launcher_state.json`) is always validated before use; it is a cache, not truth
+
+**New platform helpers in `py/platform_ops.py`:**
+- `get_pid_for_window(window_id)` — Linux: xdotool getwindowpid; Windows: GetWindowThreadProcessId
+- `is_pid_running(pid)` — psutil preferred, falls back to OS primitives
+- `get_process_cmdline(pid)` — psutil preferred, falls back to /proc on Linux
+- `terminate_process_tree(pid)` — psutil preferred; falls back to taskkill /T /F (Win) or SIGTERM/SIGKILL (Linux)
+- `find_account_window_and_pid(account)` — window-title lookup + PID resolution; raises ValueError on ambiguous matches
+
+**New Discord slash command: `/launch account:<name>`**
+- If not running → launch it
+- If running → close safely + wait 15s + relaunch
+- `/launch account:all` → smart-launch all preset accounts with stagger
+- Autocomplete shows all configured launcher presets + "All accounts"
+- Per-account result icons: ✅ launched/relaunched, ⚠️ skipped (ambiguous/already-up), ❌ failed
+
+**Launcher tab refactored:**
+- `_do_launch` now delegates entirely to `launcher.launch_account`
+- `_build_command` removed from the tab; UI imports `build_command` from `py/launcher.py`
+- Existing UI behaviour preserved: error dialog if already running, log on success/failure
+
+**Wiring:**
+- `p2p_monitor.py` creates `on_launch_cb` / `on_launch_all_cb` lambdas using `_launcher.smart_launch` and `_launcher.launch_all`
+- `LogWatcher` accepts and forwards these callbacks to `GatewayRunner` as thin passthrough (no launcher logic in watcher)
+
+---
+
 ## v1.7.0
 ### Inferno Tracker
 

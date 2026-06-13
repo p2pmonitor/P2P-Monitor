@@ -5,12 +5,11 @@ Allows saving account launch presets and launching DreamBot instances via CLI.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import subprocess
 import threading
 import shlex
 import os
-from py.config       import save_config
-from py.platform_ops import is_account_process_running
+from py.config   import save_config
+from py.launcher import launch_account, build_command
 
 
 
@@ -151,6 +150,9 @@ class LauncherTab:
                 self._do_launch(selected[idx])
 
     def _do_launch(self, preset):
+        account = preset.get('account', '?')
+
+        # Early jar validation for immediate UI feedback (launcher also validates).
         jar = self._jar_var.get().strip()
         if not jar:
             messagebox.showerror('Launcher', 'Please set the path to Launcher.jar first.')
@@ -160,34 +162,16 @@ class LauncherTab:
                 f'Launcher.jar not found at:\n{jar}\n\nPlease check the path in Settings.')
             return
 
-        account = preset.get('account', '?')
-
-        # Check if this account is already running
-        try:
-            if is_account_process_running(account, jar_path=jar):
-                messagebox.showerror('Already Running',
-                    f'"{account}" appears to already be running.\n'
-                    f'Close the existing client before launching again.')
-                return
-        except Exception:
-            pass  # allow launch if check fails
-
-        cmd = _build_command(jar, preset)
-        self.app._log(f'🚀 [{account}] Launching: {" ".join(shlex.quote(c) for c in cmd)}')
-
         def _run():
-            try:
-                import sys
-                kwargs = dict(stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL,
-                              start_new_session=True)
-                if sys.platform == 'win32':
-                    # Suppress the blank CMD window that appears on Windows
-                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-                subprocess.Popen(cmd, **kwargs)
-                self.app.after(0, lambda: self.app._log(f'✅ [{account}] Launch started.'))
-            except Exception as e:
-                self.app.after(0, lambda: self.app._log(f'❌ [{account}] Launch failed: {e}'))
+            result = launch_account(self.app.cfg, account, log_fn=self.app._log)
+            def _show():
+                if result.ok:
+                    pass  # launch_account already logged success via log_fn
+                elif result.action == 'skipped':
+                    messagebox.showerror('Already Running', result.message)
+                else:
+                    self.app._log(f'❌ [{account}] {result.message}')
+            self.app.after(0, _show)
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -225,67 +209,6 @@ class LauncherTab:
             self.app.cfg['launcher_presets'] = presets
             save_config(self.app.cfg)
             self._refresh_tree()
-
-
-def _build_command(jar, preset):
-    """Build the java launch command list from a preset dict."""
-    cmd = []
-
-    mem = preset.get('mem', '')
-    if mem:
-        try:
-            m = int(mem)
-            cmd += ['java', f'-Xmx{m}M', '-jar', jar]
-        except ValueError:
-            cmd += ['java', '-jar', jar]
-    else:
-        cmd += ['java', '-jar', jar]
-
-    script = preset.get('script', 'P2P Master AI').strip()
-    if script:
-        cmd += ['-script', script]
-
-    account = preset.get('account', '').strip()
-    if account:
-        cmd += ['-account', account]
-
-    proxy = preset.get('proxy', '').strip()
-    if proxy:
-        cmd += ['-proxy', proxy]
-
-    if preset.get('covert'):
-        cmd.append('-covert')
-    if preset.get('nofresh'):
-        cmd.append('-nofresh')
-    if preset.get('fresh'):
-        cmd.append('-fresh')
-    if preset.get('menu_manipulation'):
-        cmd.append('-menuManipulation')
-    if preset.get('no_click_walk'):
-        cmd.append('-noClickWalk')
-
-    world = preset.get('world', '').strip()
-    if world:
-        cmd += ['-world', world]
-
-    custom = preset.get('custom', '').strip()
-    if custom:
-        # Parse custom args safely
-        try:
-            try:
-                cmd += shlex.split(custom)
-            except ValueError as e:
-                from tkinter import messagebox as _mb
-                _mb.showerror('Launcher', f'Invalid custom args: {e}')
-                return cmd[:3]  # return base command only
-        except ValueError:
-            cmd.append(custom)
-
-    params = preset.get('params', '').strip()
-    if params:
-        cmd += ['-params', params]
-
-    return cmd
 
 
 class _PresetDialog:
@@ -430,7 +353,7 @@ class _PresetDialog:
     def _update_preview(self):
         p   = self._get_preset()
         jar = self.app.cfg.get('launcher_jar', '/path/to/Launcher.jar').strip() or '/path/to/Launcher.jar'
-        cmd = _build_command(jar, p)
+        cmd = build_command(jar, p)
         self._preview.configure(text=' '.join(shlex.quote(c) for c in cmd))
 
     def _save(self):

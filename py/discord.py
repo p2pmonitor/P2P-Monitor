@@ -762,15 +762,17 @@ class GatewayRunner:
     and dispatches interactions back to the watcher via callbacks.
 
     Replaces BotRunner (polling) — no channel ID needed, no message polling.
-    Slash commands: /ss [account], /s
+    Slash commands: /ss [account], /s, /force, /launch
 
-    Callbacks supplied by LogWatcher:
-        get_rows()                           → list of account row dicts
-        get_accounts()                       → list of account name strings
-        on_screenshot(account, ch_id, token) → None
+    Callbacks supplied by LogWatcher (passed through from p2p_monitor.py):
+        get_rows()                            → list of account row dicts
+        get_accounts()                        → list of monitored account name strings
+        on_screenshot(account, ch_id, token)  → None
+        on_launch(account)                    → LaunchResult
+        on_launch_all()                       → list[LaunchResult]
         log(msg)
-        get_cfg()                            → live cfg dict
-        is_running()                         → bool
+        get_cfg()                             → live cfg dict
+        is_running()                          → bool
     """
 
     COMMANDS = [
@@ -816,6 +818,17 @@ class GatewayRunner:
                     'max_value':    20,
                 },
             ],
+        },
+        {
+            'name':        'launch',
+            'description': 'Launch or relaunch a DreamBot account by preset name',
+            'options': [{
+                'name':         'account',
+                'description':  'Account name, or "all" to launch all presets',
+                'type':         3,   # STRING
+                'required':     True,
+                'autocomplete': True,
+            }],
         },
     ]
 
@@ -897,6 +910,21 @@ class GatewayRunner:
                         choices = [{'name': k, 'value': k}
                                    for k in all_adjustments if typed in k.lower()]
                         _respond(choices)
+                        return
+
+            if cmd == 'launch':
+                for opt in interaction.data.get('options', []):
+                    if opt.get('name') == 'account' and opt.get('focused'):
+                        typed   = opt.get('value', '').lower()
+                        cfg_now = cfg_ref
+                        presets = cfg_now.get('launcher_presets', [])
+                        choices = [{'name': 'All accounts', 'value': 'all'}]
+                        choices += [
+                            {'name': p['account'], 'value': p['account']}
+                            for p in presets
+                            if p.get('account') and typed in p['account'].lower()
+                        ]
+                        _respond(choices[:25])
                         return
 
         async def _dispatch(interaction, client):
@@ -1027,6 +1055,62 @@ class GatewayRunner:
                         await interaction.followup.send(
                             f"🎯 Forcing {adjustment} for {matched}",
                             ephemeral=True)
+
+                elif cmd == 'launch':
+                    account_arg = opts.get('account', '').strip()
+                    if not account_arg:
+                        await interaction.response.send_message(
+                            'Please specify an account name or "all".',
+                            ephemeral=True)
+                        return
+
+                    on_launch     = cb.get('on_launch')
+                    on_launch_all = cb.get('on_launch_all')
+                    if not on_launch or not on_launch_all:
+                        await interaction.response.send_message(
+                            '⚠ Launch callbacks not available — is the monitor running?',
+                            ephemeral=True)
+                        return
+
+                    await interaction.response.defer(ephemeral=True)
+                    import asyncio as _asyncio
+                    loop = _asyncio.get_event_loop()
+
+                    if account_arg.lower() == 'all':
+                        results = await loop.run_in_executor(None, on_launch_all)
+                        launched = sum(1 for r in results
+                                       if r.ok and r.action in ('launched', 'relaunched'))
+                        skipped  = sum(1 for r in results if r.action == 'skipped')
+                        failed   = sum(1 for r in results
+                                       if not r.ok and r.action == 'failed')
+                        lines = ['**Launch all complete:**']
+                        for r in results:
+                            icon = ('✅' if r.ok else
+                                    ('⚠️' if r.action == 'skipped' else '❌'))
+                            lines.append(f'{icon} **{r.account}**: {r.message}')
+                        summary = (f'\n✅ {launched} launched/relaunched  '
+                                   f'⚠️ {skipped} skipped  ❌ {failed} failed')
+                        lines.append(summary)
+                        msg = '\n'.join(lines)
+                        # Discord message cap: 2000 chars. If too long, send summary only.
+                        if len(msg) > 1900:
+                            msg = (f'**Launch all complete:**\n'
+                                   f'✅ {launched} launched/relaunched  '
+                                   f'⚠️ {skipped} skipped  ❌ {failed} failed\n'
+                                   f'_(Per-account detail truncated — see monitor log)_')
+                        await interaction.followup.send(msg, ephemeral=True)
+
+                    else:
+                        result = await loop.run_in_executor(
+                            None, lambda: on_launch(account_arg))
+                        if result.ok:
+                            icon = '🔄' if result.action == 'relaunched' else '✅'
+                        elif result.action == 'skipped':
+                            icon = '⚠️'
+                        else:
+                            icon = '❌'
+                        await interaction.followup.send(
+                            f'{icon} {result.message}', ephemeral=True)
 
             except Exception as e:
                 cb['log'](f"🤖 Interaction error ({cmd}): {e}")

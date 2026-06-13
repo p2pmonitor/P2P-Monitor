@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.7.0
+P2P Monitor v1.8.0-beta.1
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -45,13 +45,14 @@ from py.config       import save_config, load_config, sanitize_config
 from py.error_rules  import start_background_fetch
 from py.inferno_rules import start_background_fetch as start_inferno_fetch
 from py.watcher      import LogWatcher
+from py              import launcher as _launcher
 from ui.monitor_tab   import MonitorTab
 from ui.status_tab    import StatusTab
 from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.7.0"
+VERSION      = "1.8.0-beta.1"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -308,8 +309,14 @@ class App(tk.Tk):
             v.set('0')
         self._log("=" * 60)
         self._log(f"▶ Starting P2P Monitor v{VERSION}...")
-        self.watcher = LogWatcher(self._log, self._on_event, self._on_status_refresh,
-                                   backfill_cb=lambda: self.after(0, self._history.load))
+        self.watcher = LogWatcher(
+            self._log, self._on_event, self._on_status_refresh,
+            backfill_cb=lambda: self.after(0, self._history.load),
+            on_launch_cb=lambda account: _launcher.smart_launch(
+                self.cfg, account, log_fn=self._log),
+            on_launch_all_cb=lambda: _launcher.launch_all(
+                self.cfg, log_fn=self._log),
+        )
         self.watcher.start(self.cfg)
 
     def _stop(self):

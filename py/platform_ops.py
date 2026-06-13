@@ -1102,6 +1102,222 @@ def supports_paint_detection():
     return False
 
 
+# ── Process / PID helpers (used by py/launcher.py) ────────────────────────────
+
+def get_pid_for_window(window_id) -> 'Optional[int]':
+    """
+    Resolve a window ID (str or int) to the PID of the owning process.
+
+    Linux:   xdotool getwindowpid <wid>
+    Windows: GetWindowThreadProcessId via ctypes
+
+    Returns int PID on success, None on failure.
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            return _get_pid_for_window_linux(window_id)
+        elif sys.platform == 'win32':
+            return _get_pid_for_window_windows(window_id)
+        else:
+            return _get_pid_for_window_linux(window_id)
+    except Exception:
+        return None
+
+
+def _get_pid_for_window_linux(window_id) -> 'Optional[int]':
+    try:
+        result = subprocess.run(
+            ['xdotool', 'getwindowpid', str(window_id)],
+            capture_output=True, text=True, timeout=5,
+        )
+        pid_str = result.stdout.strip()
+        if pid_str and pid_str.isdigit():
+            return int(pid_str)
+        return None
+    except Exception:
+        return None
+
+
+def _get_pid_for_window_windows(window_id) -> 'Optional[int]':
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(int(window_id), ctypes.byref(pid))
+        return pid.value if pid.value else None
+    except Exception:
+        return None
+
+
+def is_pid_running(pid: int) -> bool:
+    """
+    Return True if a process with the given PID is currently alive.
+
+    Prefers psutil (most reliable, handles zombies correctly).
+    Falls back to:
+      Windows: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION
+      Linux/macOS: os.kill(pid, 0)
+    """
+    try:
+        import psutil
+        try:
+            p = psutil.Process(pid)
+            return p.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+    except ImportError:
+        pass
+
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True   # process exists; we lack permission to signal it
+        except Exception:
+            return False
+
+
+def get_process_cmdline(pid: int) -> 'Optional[list]':
+    """
+    Return the command-line argument list for the process with the given PID.
+
+    Prefers psutil; falls back to /proc/<pid>/cmdline on Linux.
+    Returns None on any failure.
+    """
+    try:
+        import psutil
+        return psutil.Process(pid).cmdline()
+    except Exception:
+        pass
+    if sys.platform.startswith('linux'):
+        try:
+            raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+            parts = raw.split(b'\x00')
+            return [p.decode(errors='replace') for p in parts if p]
+        except Exception:
+            pass
+    return None
+
+
+def terminate_process_tree(pid: int, timeout: int = 10) -> None:
+    """
+    Terminate a process and all its children by PID.
+
+    Prefers psutil (handles full process tree).
+    Falls back to:
+      Windows: taskkill /PID <pid> /T /F
+      Linux:   SIGTERM → wait → SIGKILL
+
+    Caller is responsible for validating ownership before calling.
+    This function never validates — it just kills.
+    """
+    try:
+        import psutil
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+            # Send SIGTERM to everyone first
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            try:
+                parent.terminate()
+            except psutil.NoSuchProcess:
+                pass
+            # Wait; force-kill survivors
+            gone, alive = psutil.wait_procs([parent] + children, timeout=timeout)
+            for p in alive:
+                try:
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            return
+        except psutil.NoSuchProcess:
+            return  # already gone
+    except ImportError:
+        pass
+
+    # psutil not available — platform fallback
+    if sys.platform == 'win32':
+        try:
+            subprocess.run(
+                ['taskkill', '/PID', str(pid), '/T', '/F'],
+                capture_output=True, timeout=timeout,
+            )
+        except Exception:
+            pass
+    else:
+        import signal as _signal
+        try:
+            os.kill(pid, _signal.SIGTERM)
+            time.sleep(2)
+            if is_pid_running(pid):
+                os.kill(pid, _signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def find_account_window_and_pid(account: str) -> 'Optional[dict]':
+    """
+    Find the DreamBot client window for 'account' and resolve its PID.
+
+    Returns:
+        dict with keys 'window_id' (str) and 'pid' (int)  — exactly one match
+        None                                               — no window found
+
+    Raises:
+        ValueError  — multiple windows matched; caller must refuse and explain
+
+    Validation:
+        Uses find_window_ids_by_name() (existing, tested, cross-platform).
+        PID is resolved via get_pid_for_window().
+        Only returns a result when exactly one window matches.
+    """
+    try:
+        wids = find_window_ids_by_name(account)
+    except Exception:
+        return None
+
+    if not wids:
+        return None
+
+    if len(wids) > 1:
+        raise ValueError(
+            f'{len(wids)} DreamBot windows matched "{account}" — ownership is ambiguous'
+        )
+
+    wid = wids[0]
+    pid = get_pid_for_window(wid)
+    if not pid:
+        # Window found but can't get PID — still return window info, pid=None
+        return {'window_id': wid, 'pid': None}
+
+    return {'window_id': wid, 'pid': pid}
+
+
 # ── Path utilities ─────────────────────────────────────────────────────────────
 
 def normalize_path(path):

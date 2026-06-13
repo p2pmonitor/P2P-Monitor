@@ -3,6 +3,10 @@
 # The updater applies exactly these files from the release zip.
 
 p2p_monitor.py
+CHANGELOG.md
+README.md
+install.sh
+update_manifest.txt
 error_rules.json
 inferno_patterns.json
 py/__init__.py
@@ -17,6 +21,7 @@ py/discord.py
 py/screenshot.py
 py/paint.py
 py/watcher.py
+py/launcher.py
 py/inferno.py
 ui/__init__.py
 ui/monitor_tab.py

@@ -168,11 +168,14 @@ class LogWatcher:
         'error':           'monitor_errors',
     }
 
-    def __init__(self, log_cb, event_cb, status_cb, backfill_cb=None):
+    def __init__(self, log_cb, event_cb, status_cb, backfill_cb=None,
+                 on_launch_cb=None, on_launch_all_cb=None):
         self.log       = log_cb
         self.on_event  = event_cb
         self.on_status = status_cb
-        self._on_backfill_done = backfill_cb  # called after each account backfill completes
+        self._on_backfill_done  = backfill_cb      # called after each account backfill completes
+        self._on_launch_cb      = on_launch_cb     # passed through to GatewayRunner
+        self._on_launch_all_cb  = on_launch_all_cb # passed through to GatewayRunner
         self._running  = False
         self._thread   = None
         self._bot_thread = None
@@ -264,6 +267,8 @@ class LogWatcher:
                                      account, action,
                                      log=self.log, window_lock=self._window_lock),
                 'on_force_panel': self._bot_force_panel,
+                'on_launch':      self._on_launch_cb,
+                'on_launch_all':  self._on_launch_all_cb,
                 'is_running':    lambda: self._running,
                 'get_cfg':       lambda: self.cfg,
             })
