@@ -213,7 +213,7 @@ The monitor checks:
 - The local DreamBot window title, for example:
 
 ```text
-DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - Lumi Proxy
+DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - <proxy name>
 ```
 
 - The cached latest SDN script version from the monitor update endpoint
