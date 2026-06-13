@@ -1,6 +1,6 @@
 # P2P Monitor
 
-A desktop monitor for [DreamBot](https://dreambot.org) P2P Master AI — tracks multiple RuneScape accounts in real time, posts Discord notifications for in-game events, and keeps a searchable event history.
+A desktop monitor for [DreamBot](https://dreambot.org) P2P Master AI — tracks multiple RuneScape accounts in real time, posts Discord notifications for in-game events, launches/relaunches DreamBot clients, watches for script/client updates, and keeps a searchable event history.
 
 Runs on **Linux** (Debian/Ubuntu) and **Windows 10/11**. Requires DreamBot with the P2P Master AI script running.
 
@@ -30,15 +30,36 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Auto-detects new accounts when DreamBot starts a new log file
 - If no active sessions exist on startup, monitor waits up to 10 minutes before stopping
 
+### DreamBot launcher and relaunching
+- Launcher tab stores DreamBot launch presets per account
+- `/launch <account>` starts a client only if that account is not already open
+- `/launch all` starts all configured presets that are currently closed and skips already-open clients
+- `/relaunch <account>` force-restarts that account’s DreamBot client even if it is already open
+- `/relaunch all` force-restarts all configured launcher presets with a small stagger
+- Launcher command preview shows the exact Java/DreamBot command that will be used
+
+### Auto restart after Script Stopped
+- Optional auto-restart when P2P Master AI logs `Script Stopped`
+- Skips auto-restart when the stop was manually initiated from the Control Bar
+- Can respect active break state so accounts are not restarted during a break
+- Supports random min/max restart delay
+- A selected `0` minute restart delay is treated as about **10 seconds**, not a true instant restart
+- Pending auto-restart is cancelled if the script starts again before the timer fires
+
+### Update awareness
+- Checks the local DreamBot window title against the latest P2P Master AI version reported by the monitor’s cached update endpoint
+- Runs once when the monitor starts and once daily around **2:00 PM local PC time**
+- Detects when the local P2P Master AI script version is behind the SDN version
+- Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
+- Sends one deduped alert to the main monitor Discord channel and recommends `/relaunch` when useful
+
 ### Discord notifications
-- Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, and script lifecycle events
-- Supports per-event-type webhooks or a single default webhook
+- Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, script lifecycle events, launcher events, update alerts, and daily summaries
+- Supports webhook mode with per-event-type webhooks or a single default webhook
 - Supports Discord bot mode with per-account monitor threads
+- **Discord webhooks are not required when using Discord bot mode**
 - Mute individual accounts without stopping monitoring
 - Screenshot on event: attach a game screenshot to any Discord post
-- `/ss [account]` — on-demand screenshot
-- `/s` — live status summary of all accounts
-- `/force <account> <action> [amount]` — force a skill, action, or time adjustment from Discord
 - Self-healing: automatically detects and recovers from deleted Discord threads, channels, and webhooks — no restart needed
 - Level 99 detection: special "🎆 Level 99! 🎆" embed title, always notifies regardless of the level-up interval
 
@@ -95,21 +116,30 @@ python3 ~/.p2p_monitor/p2p_monitor.py
 
 No Python, no dependencies, no installer needed.
 
-### Option B — Run from source
-If you prefer to run from source or build your own `.exe`:
+### Option B — Run from source or build your own `.exe`
+Use this option only if you cloned/downloaded the full source repository. The release `.zip` is intended for normal app installation and may not include every Windows build helper file.
 
-```
+Run from source:
+
+```powershell
 pip install -r requirements-windows.txt
 python p2p_monitor.py
 ```
 
-To build your own executable:
-```
+Build your own executable:
+
+```powershell
 pip install pyinstaller
 pyinstaller p2p_monitor.spec
 ```
 
-Output will be at `dist/P2P Monitor.exe`. See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full details.
+Output will be at:
+
+```text
+dist/P2P Monitor.exe
+```
+
+See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full Windows build details.
 
 ---
 
@@ -123,13 +153,96 @@ Set your DreamBot log folder path in **Settings → Log Folder**. This should be
 
 > **Note:** If you set the path to an account subfolder (e.g. `...\Logs\Accname`) the monitor will still work for that single account, but Discord thread IDs will be lost on every restart causing new threads to be created. A warning will appear in Settings if this is detected.
 
+### Required OSRS / DreamBot message settings
+For several pings to work correctly, the game/client must actually write those events into the DreamBot log. In OSRS, make sure the relevant messages are enabled before relying on Discord alerts.
+
+Recommended settings to turn on:
+
+- **Collection log notifications** — needed for collection log pings
+- **Valuable loot / drop notifications** — needed for valuable loot and drop pings
+- **Level-up and level 99 messages** — needed for normal level pings and special 99 pings
+
+If these are disabled in-game, the monitor may be running correctly but never see the log lines it needs to send those Discord notifications.
+
+### Launcher tab setup
+The Launcher tab is used by `/launch`, `/relaunch`, and auto-restart after `Script Stopped`.
+
+For each account preset, set up the launcher fields to match the same account, script, and proxy information you use in the DreamBot client:
+
+| Field | What to enter |
+|---|---|
+| `Account (-account)` | The DreamBot account name/preset account |
+| `Script (-script)` | `P2P Master AI` |
+| `Proxy (-proxy)` | The same proxy name configured in DreamBot, if that account uses one |
+| `Memory -Xmx (MB)` | Recommended: `1024` |
+| `-covert` | Enable if you have DreamBot VIP and use Covert Mode |
+| `Params (-params, last)` | Your P2P Master AI profile/params so the script can auto-start correctly |
+
+The **Params** field is important. If the correct P2P Master AI profile/params are not set, the launcher can still restart DreamBot, but the script may not press Start or load the intended profile automatically. That makes `/relaunch` and auto-restart after `Script Stopped` much less useful because the client may reopen and sit idle.
+
+Before relying on auto-restart, test one preset manually:
+
+```text
+/launch <account>
+```
+
+Confirm that DreamBot opens, selects the correct account/script/proxy, and starts P2P Master AI with the intended profile. Then test:
+
+```text
+/relaunch <account>
+```
+
+Confirm the client closes, reopens, and starts the script again without manual clicks.
+
+### Auto restart setup
+Auto restart is configured in Settings.
+
+Recommended starting settings:
+
+- Enable auto restart after `Script Stopped`
+- Use a small random delay range, such as `1` to `30` minutes
+- Enable break-respect behavior if you do not want accounts restarted during active breaks
+
+If you set the minimum and maximum delay to `0`, the monitor treats that as about **10 seconds**. This avoids relaunching instantly before Windows/DreamBot fully closes the old process.
+
+### Update awareness setup
+Update awareness is enabled by default.
+
+The monitor checks:
+
+- The local DreamBot window title, for example:
+
+```text
+DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - Lumi Proxy
+```
+
+- The cached latest SDN script version from the monitor update endpoint
+- Whether the DreamBot title contains `(NEW CLIENT AVAILABLE)`
+
+Alerts go to the main monitor Discord channel, the same place daily summaries are posted.
+
+Example outcomes:
+
+| Local title state | Latest SDN version | Alert |
+|---|---:|---|
+| `P2P Master AI v2.141` | `2.143` | Script update available; recommend `/relaunch` |
+| `P2P Master AI v2.141 (NEW CLIENT AVAILABLE)` | `2.143` | Script update and DreamBot client update available |
+| `P2P Master AI v2.143 (NEW CLIENT AVAILABLE)` | `2.143` | DreamBot client update available only |
+| `P2P Master AI v2.143` | `2.143` | No alert |
+
 ### Discord — webhook mode
+Webhook mode is the simplest setup if you do not want to create a Discord bot.
+
 1. Create a Discord webhook in any channel
 2. Paste the URL into **Settings → Webhooks → Default Webhook**
 3. Optionally add per-event webhooks (drops, deaths, errors, etc.)
 4. Hit **Save**
 
 ### Discord — bot mode
+Bot mode is recommended if you want slash commands, account monitor threads, and cleaner Discord management.
+
+Discord webhooks are **not required** when using bot mode. You can leave webhook fields blank unless you intentionally want webhook fallback behavior.
+
 1. Go to [discord.com/developers/home](https://discord.com/developers/home) → New Application → Bot → Reset Token → copy token
 2. Enable **Message Content Intent** under Privileged Gateway Intents
 3. OAuth2 → URL Generator → Scope: `bot` → Permissions: Send Messages, Read Message History, Manage Channels, Manage Webhooks, View Channels, Embed Links, Attach Files, Create Public Threads, Send Messages in Threads, Manage Threads, Use Slash Commands
@@ -139,11 +252,21 @@ Set your DreamBot log folder path in **Settings → Log Folder**. This should be
 7. Hit **Save** then **🤖 Run Bot Setup**
 
 ### Slash commands
+Slash commands are available when using Discord bot mode.
+
 | Command | Description |
 |---|---|
 | `/ss [account]` | Screenshot → post to account thread |
 | `/s` | Post live status of all accounts |
 | `/force <account> <action> [amount]` | Force a skill, action, or time adjustment |
+| `/launch <account>` | Launch an account only if its DreamBot client is currently closed |
+| `/launch all` | Launch all configured presets that are currently closed |
+| `/relaunch <account>` | Force-restart an account’s DreamBot client, even if it is already open |
+| `/relaunch all` | Force-restart all configured launcher presets with a small stagger |
+
+`/launch` is safe and non-destructive. It skips already-open clients.
+
+`/relaunch` is intentionally destructive. It closes and reopens the matching DreamBot client so it can load the latest script/client state.
 
 ---
 
@@ -157,6 +280,7 @@ Config is automatically sanitized on startup: stale keys from older versions are
 | `~/.p2p_monitor/history/<account>/history.jsonl` | Per-account event log |
 | `~/.p2p_monitor/offsets.json` | Log file read positions |
 | `~/.p2p_monitor/screenshots/` | Screenshot files (auto-deleted after 24h) |
+| `~/.p2p_monitor/update_check_state.json` | Deduping state for script/client update alerts |
 
 On Windows, `~` resolves to `C:\Users\<you>`.
 
