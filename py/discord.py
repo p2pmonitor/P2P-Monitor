@@ -735,7 +735,7 @@ class DiscordRouter:
             payload['embeds'][0]['footer'] = {'text': footer_override}
         self.post_event(account, 'task', payload, url=url)
 
-    def post_script_event(self, account, ev_key):
+    def post_script_event(self, account, ev_key, detail=''):
         """Post a script lifecycle event (no screenshot)."""
         if self._cb['is_muted'](account):
             return
@@ -744,7 +744,7 @@ class DiscordRouter:
             url = self._wh('default')
         if not url:
             return
-        payload = script_event_payload(self.mention(), account, ev_key)
+        payload = script_event_payload(self.mention(), account, ev_key, detail=detail)
         ok, err = post_discord(url, payload)
         if not ok:
             def _retry(new_url, _p=payload):

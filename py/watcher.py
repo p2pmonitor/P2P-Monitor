@@ -1332,7 +1332,14 @@ class LogWatcher:
                             levelup_payload(mention, account, value, level,
                                             total_level=total_lvl, is_99=is_99), url=url)
                 elif etype == 'script_event':
-                    self._router.post_script_event(account, value)
+                    ar_detail = ''
+                    if value == 'stop':
+                        ar_status = ev.get('_ar_status', '')
+                        if ar_status:
+                            ar_detail = f'Auto restart: {ar_status}'
+                    elif value == 'start' and ev.get('_ar_cancelled'):
+                        ar_detail = 'Auto restart cancelled — script started before scheduled restart.'
+                    self._router.post_script_event(account, value, detail=ar_detail)
             except Exception as e:
                 self.log(f"⚠ [{account}] discord dispatch failed for {etype}: {e}")
 
@@ -1384,61 +1391,59 @@ class LogWatcher:
             return False  # fail safe
 
     def _maybe_schedule_auto_restart(self, folder: str, lines: list,
-                                     state: 'AccountState') -> None:
+                                     state: 'AccountState') -> str:
         """
         Called from _process_lines after a 'script_event / stop' fires for 'folder'.
+        Returns a status string used to annotate the Script Stopped Discord embed:
+          'disabled'                                       — feature off (silent in monitor)
+          'skipped — <reason>'                             — gate blocked it
+          'scheduled in Nm' / 'scheduled at H:MM AM/PM'   — timer armed
 
-        Gate checks (in order — first failing gate skips with a log line):
+        Gate checks (in order):
           1. auto_restart_enabled in cfg
           2. suppress window — monitor-initiated relaunch in progress
           3. manual-stop signature in recent log lines
           4. game update window gate (if auto_restart_game_update_window_only)
           5. preset still exists for this account
-
-        If all gates pass: compute delay (break-end or random min/max),
-        cancel any existing pending timer, schedule threading.Timer.
-
-        The timer callback (_do_auto_restart) re-checks running state and
-        preset existence before calling launcher.relaunch_account.
         """
         account = folder  # folder == account name throughout watcher
 
         # ── Gate 1: feature enabled ────────────────────────────────────────────
         if not self.cfg.get('auto_restart_enabled', False):
-            return  # silent — not enabled; no log spam
+            return 'disabled'  # silent in monitor tab; shown in Discord embed only
 
         # ── Gate 2: suppress window (monitor-initiated relaunch) ──────────────
         try:
             from py.launcher import is_relaunch_suppressed
             if is_relaunch_suppressed(account):
-                self.log(f'🔄 [{account}] Auto restart skipped — '
-                         f'monitor-initiated relaunch in progress.')
-                return
+                status = 'skipped — monitor-initiated relaunch in progress'
+                self.log(f'🔄 [{account}] Auto restart {status}.')
+                return status
         except Exception:
             pass
 
         # ── Gate 3: manual-stop signature ─────────────────────────────────────
-        # Check current batch first (fast path), then rolling buffer (split-batch edge case)
         sig = 'user initiated script stop via control bar.'
-        recent_snapshot = list(state._recent_lines)  # snapshot before timer thread could race
+        recent_snapshot = list(state._recent_lines)
         all_recent = list(lines) + recent_snapshot
         if any(sig in ln.lower() for ln in all_recent):
-            self.log(f'🔄 [{account}] Auto restart skipped — manual script stop detected.')
-            return
+            status = 'skipped — manual stop detected'
+            self.log(f'🔄 [{account}] Auto restart {status}.')
+            return status
 
         # ── Gate 4: game update window ─────────────────────────────────────────
         if self.cfg.get('auto_restart_game_update_window_only', True):
             if not self._in_game_update_window():
-                self.log(f'🔄 [{account}] Auto restart skipped — '
-                         f'outside game update window (Tue/Wed 1–4 AM PT).')
-                return
+                status = 'skipped — outside game update window (Tue/Wed 1–4 AM PT)'
+                self.log(f'🔄 [{account}] Auto restart {status}.')
+                return status
 
         # ── Gate 5: preset exists ──────────────────────────────────────────────
         from py.launcher import find_preset
         if not find_preset(self.cfg, account):
-            self.log(f'🔄 [{account}] Auto restart skipped — '
-                     f'no launcher preset found for this account.')
-            return
+            status = 'skipped — no launcher preset found'
+            self.log(f'🔄 [{account}] Auto restart {status}.')
+            return status
 
         # ── Compute delay ──────────────────────────────────────────────────────
         delay_secs, delay_desc = self._compute_restart_delay(account, state)
@@ -1450,18 +1455,24 @@ class LogWatcher:
             state._pending_restart_timer = None
 
         # ── Schedule ───────────────────────────────────────────────────────────
-        self.log(f'⏰ [{account}] Auto restart scheduled {delay_desc} after Script Stopped.')
+        status = f'scheduled {delay_desc}'
+        self.log(f'⏰ [{account}] Auto restart {status} after Script Stopped.')
 
         def _do_auto_restart():
-            # Re-check running state — watcher may have been stopped during the delay
+            # Gate: watcher stopped during delay
             if not self._running:
                 return
-            # Re-check preset still exists
+            # Gate: timer was cancelled or superseded (Script Started, newer stop, stop())
+            # t is assigned in enclosing scope just below; safe to reference at call time.
+            if state._pending_restart_timer is not t:
+                return
+            state._pending_restart_timer = None  # clear before running
+            # Gate: preset removed during delay
             from py.launcher import find_preset as _fp, relaunch_account, is_relaunch_suppressed
             if not _fp(self.cfg, account):
                 self.log(f'🔄 [{account}] Auto restart cancelled — preset removed during delay.')
                 return
-            # Re-check suppress (e.g. user ran /launch manually during the delay)
+            # Gate: suppress window (e.g. /launch ran during delay)
             if is_relaunch_suppressed(account):
                 self.log(f'🔄 [{account}] Auto restart cancelled — '
                          f'monitor-initiated relaunch started during delay.')
@@ -1478,6 +1489,7 @@ class LogWatcher:
         t.daemon = True
         t.start()
         state._pending_restart_timer = t
+        return status
 
     def _compute_restart_delay(self, account: str,
                                state: 'AccountState') -> 'tuple[float, str]':
@@ -1714,12 +1726,25 @@ class LogWatcher:
                 self.log(f"{prefix} [{folder}] Level up: {skill} → {level}")
 
             elif etype == 'script_event':
-                # ── Auto-restart: runs regardless of notification/mute settings ──
+                # ── Auto-restart logic: runs regardless of notification/mute settings ──
+                ar_status = None
                 if value == 'stop':
                     try:
-                        self._maybe_schedule_auto_restart(folder, lines, state)
+                        ar_status = self._maybe_schedule_auto_restart(folder, lines, state)
                     except Exception as _ar_exc:
                         self._dbg(f'[auto_restart] scheduling error for {folder}: {_ar_exc}')
+                elif value == 'start':
+                    # Cancel pending restart if script started before timer fired
+                    if state._pending_restart_timer is not None:
+                        state._pending_restart_timer.cancel()
+                        state._pending_restart_timer = None
+                        self.log(f'🔄 [{folder}] Auto restart cancelled — '
+                                 f'Script Started detected before scheduled restart.')
+                        ev = dict(ev, _ar_cancelled=True)
+
+                # Annotate ev for Discord embed BEFORE continue guards
+                if ar_status is not None:
+                    ev = dict(ev, _ar_status=ar_status)
 
                 cfg_key_map = {
                     'start':  'monitor_script_start',  'stop':   'monitor_script_stop',
