@@ -1,4 +1,3 @@
-```yaml
 name: Build Windows EXE
 
 on:
@@ -223,4 +222,3 @@ jobs:
             echo "- Manual run only: release assets were not uploaded" >> $env:GITHUB_STEP_SUMMARY
             echo "- Manual run only: main branch EXE was not committed" >> $env:GITHUB_STEP_SUMMARY
           }
-```
