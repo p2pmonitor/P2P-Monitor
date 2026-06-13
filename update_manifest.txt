@@ -4,10 +4,12 @@
 
 p2p_monitor.py
 error_rules.json
+inferno_patterns.json
 py/__init__.py
 py/platform_ops.py
 py/reader.py
 py/error_rules.py
+py/inferno_rules.py
 py/history.py
 py/config.py
 py/util.py
@@ -15,6 +17,7 @@ py/discord.py
 py/screenshot.py
 py/paint.py
 py/watcher.py
+py/inferno.py
 ui/__init__.py
 ui/monitor_tab.py
 ui/status_tab.py

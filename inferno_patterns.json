@@ -1,0 +1,51 @@
+{
+  "_comment": "inferno_patterns.json — Soft pattern config for InfernoTracker (py/inferno.py). Update patterns here without a full build. Fetched from GitHub on startup; falls back to this packaged copy.",
+  "version": 2,
+
+  "gear_check_start_patterns": [
+    "You have the stats and quests needed for Inferno",
+    "Possible gear clear for Infernal Cape"
+  ],
+
+  "gear_check_pass_patterns": [
+    "You have the gear needed for Inferno",
+    "All checks passed"
+  ],
+
+  "requirements_failed_patterns": [
+    "Inferno requirements not met"
+  ],
+
+  "resource_check_failed_pattern": "Resource check failed\\s+(\\S+)\\s+\\[(.+?)\\]",
+
+  "suspicious_failure_pattern": "(?i)(inferno.*not met|requirements not met|resource check failed|can't|cannot|unable|failed|missing|not enough|could not)",
+
+  "ping_pattern": "Ping is\\s+(\\d+)\\s+needs to be\\s+(\\d+)\\s+or less for Inferno",
+
+  "bad_ping_override_patterns": [
+    "ALLOW BAD PING"
+  ],
+
+  "wave_game_pattern": "\\[GAME\\].*?Wave:\\s*(\\d+)",
+
+  "wave_internal_pattern": "\\bWAVE\\s+(\\d+)\\b",
+
+  "death_patterns": [
+    "\\[GAME\\] You have been defeated!",
+    "Inferno death detected!"
+  ],
+
+  "success_pattern": "(?i)Your TzKal-Zuk kill count is:\\s*(?:<[^>]+>)*(\\d+)",
+
+  "gear_check_reset_patterns": [
+    "Resetting via Startup",
+    "NEW TASK",
+    "Stopped P2P Master AI"
+  ],
+
+  "milestone_waves": [7, 15, 24, 31, 41, 48, 56, 63, 67, 68, 69],
+
+  "gear_check_window_timeout_sec": 300,
+
+  "resource_detail_cap": 6
+}

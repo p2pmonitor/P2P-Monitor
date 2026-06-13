@@ -1,5 +1,5 @@
 """
-watcher.py — Log watching engine for P2P Monitor v1.4.3
+watcher.py — Log watching engine for P2P Monitor v1.7.0
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 """
@@ -39,6 +39,7 @@ from py.screenshot import (get_focused_wid,
                             SS_PRIORITY_ONDEMAND,
                             SS_PRIORITY_EVENT, SS_PRIORITY_SCHEDULED,
                             ScreenshotService)
+from py.inferno import InfernoTracker
 
 LOG_PATTERN = "logfile-*.log"
 
@@ -129,6 +130,7 @@ class AccountState:
         self.notified_levels     = {}
         self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
         self._startup_done       = False  # guards _startup_catchup to run only once per state
+        self.inferno             = InfernoTracker()  # stateful Inferno gear-check and attempt tracker
 
     def should_alert(self, key, threshold, window_sec, dedupe_sec):
         now = time.time()
@@ -998,6 +1000,10 @@ class LogWatcher:
 
             bf_last_task     = ''
             bf_last_activity = ''
+            # One InfernoTracker per account for the full backfill — state must
+            # persist across chunks so gear-check windows and attempt waves that
+            # span chunk boundaries are handled correctly.
+            bf_inferno = InfernoTracker()
 
             for f in log_files:
                 fstr = str(f)
@@ -1065,6 +1071,24 @@ class LogWatcher:
                         entries_this_file += 1
 
                     # (last_seen marker updated at file level after all chunks)
+
+                    # ── Inferno backfill ──────────────────────────────────────
+                    # Feed same chunk through the Inferno tracker (state persists
+                    # across chunks via bf_inferno declared in outer scope).
+                    # Only write history — no Discord, no on_event, no status update.
+                    try:
+                        _bf_ui, bf_inferno_disc = bf_inferno.feed(chunk)
+                        for inf_ev in bf_inferno_disc:
+                            append_history(
+                                account,
+                                'task',
+                                'Inferno',
+                                inf_ev.get('value', ''),
+                                timestamp=inf_ev.get('ts'),
+                            )
+                            entries_this_file += 1
+                    except Exception as ie:
+                        self._dbg(f'Inferno backfill error [{account}]: {ie}')
 
                 for line in lines:
                     chunk.append(line)
@@ -1359,6 +1383,7 @@ class LogWatcher:
                 state.logged_in       = False
                 state.on_break        = False
                 state._break_start_ts = None
+                state.inferno.reset()
 
         # Parse all events through the unified reader pipeline.
         parsed = parse_lines(lines)
@@ -1521,8 +1546,48 @@ class LogWatcher:
                 }
                 self.handle_event(reset_ev, folder, source='live')
 
+        # ── Inferno tracker ────────────────────────────────────────────────────
+        # Feed every live line batch through the stateful Inferno tracker.
+        # ui_updates  → update last_task/last_activity for status/monitor tab display
+        # disc_events → emit as 'inferno' type events (routed to Tasks channel)
+        inferno_ui, inferno_disc = state.inferno.feed(lines)
+
+        for (task, activity) in inferno_ui:
+            state.last_task     = task
+            state.last_activity = activity
+
+        for ev in inferno_disc:
+            ts_ev    = ev.get('ts', now_str())
+            activity = ev.get('activity', '')   # sub-type: gear_check, attempt_start, wave, death, success
+            msg      = ev.get('value', '')
+
+            # Log to monitor tab
+            icon = '🌋'
+            self.log(f"{icon} [{folder}] {msg}")
+
+            # Fire UI callback so the Monitor tab TASKS counter increments
+            # (same as handle_event does for etype=='task')
+            try:
+                self.on_event('task', folder, 'Inferno', msg)
+            except Exception as e:
+                self.log(f"⚠ [{folder}] inferno on_event failed: {e}")
+
+            # Route to Tasks channel via post_task
+            if not self._is_muted(folder):
+                self._router.post_task(folder, 'Inferno', msg)
+
+            # Persist to history as a task event so it appears in History tab
+            try:
+                from py.history import append_history
+                append_history(folder, 'task', 'Inferno', msg, timestamp=ts_ev,
+                               log_fn=self.log, debug=self.cfg.get('debug', False))
+            except Exception as e:
+                self.log(f"⚠ [{folder}] inferno history write failed: {e}")
+
+            events.append(ev)
+
         # Push status tab update if any events fired or state changed
-        if events:
+        if events or inferno_ui:
             self.on_status()
         return events
 

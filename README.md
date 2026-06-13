@@ -50,6 +50,16 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 ### Error detection
 - Detects and pings on: login failures, world hop failures, pathing lockouts, stuckness, script crashes, server force-stops, GE failures, quest state loops, task locks, farming patch skips, overcrowded locations, and more
 - Errors enriched with last known task and activity context
+- Error detection patterns fetched from GitHub on startup — simple pattern fixes apply without a new build
+
+### Inferno tracking
+- Gear-check outcome detection: passed, requirements not met, missing gear/supplies, or unknown failure
+- Resource check failures are buffered during gear prep — only the final outcome is sent, not every checked item
+- Active attempt wave tracking: start, milestone updates (waves 7 15 24 31 41 48 56 63 67 68 69), death, and success
+- Wave milestones deduplicated — replayed log lines never double-send
+- High ping cached and merged into the attempt start message
+- Success requires TzKal-Zuk kill count confirmation — Wave 69 alone is only a milestone
+- Status tab shows current wave in real time; Discord receives milestone events only
 
 ### Uptime and break tracking
 - Tracks total session uptime and cumulative break time per account
@@ -156,7 +166,9 @@ On Windows, `~` resolves to `C:\Users\<you>`.
 
 **In-app (Linux):** Settings → 🔄 Check for Update — downloads and applies the update automatically, then prompts to restart.
 
-**In-app (Windows packaged):** The update prompt opens the GitHub releases page so you can download the new `.exe` manually and replace the old one.
+**In-app (Windows packaged):** Settings → 🔄 Check for Update — downloads the new `.exe` directly from the GitHub release, replaces the current binary, and prompts to relaunch. No manual steps needed.
+
+**Manual fallback:** Download the latest release from the [Releases](https://github.com/p2pmonitor/P2P-Monitor/releases/latest) page and replace the existing file.
 
 **Via git (Linux):**
 ```bash

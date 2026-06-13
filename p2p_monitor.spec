@@ -22,6 +22,9 @@ a = Analysis(
         # without needing internet access on first run.
         # error_rules.py finds this via sys._MEIPASS at runtime.
         ('error_rules.json', '.'),
+        # Bundle inferno_patterns.json — soft regex/milestone config for InfernoTracker.
+        # inferno.py finds this via sys._MEIPASS at runtime.
+        ('inferno_patterns.json', '.'),
     ],
     hiddenimports=[
         # discord.py and all required submodules

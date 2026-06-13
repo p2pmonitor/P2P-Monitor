@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.6.0
+P2P Monitor v1.7.0
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
   p2p_monitor.py          — App shell, wiring, tray, lifecycle
   error_rules.json        — Bundled error rule data (repo root; also fetched from GitHub)
+  inferno_patterns.json   — Bundled Inferno pattern config (repo root; also fetched from GitHub)
   py/reader.py            — Pure log parsing (parse_lines, slice_*)
   py/error_rules.py       — Remote error rule loader (GitHub → cache → packaged → emergency)
+  py/inferno_rules.py     — Remote Inferno pattern loader (GitHub → cache → packaged → emergency)
+  py/inferno.py           — Stateful Inferno gear-check and attempt tracker
   py/history.py           — History file I/O
   py/config.py            — Config load/save (config.json)
   py/util.py              — Shared helpers (now_str, fmt_ts)
@@ -40,6 +43,7 @@ except ImportError:
 from py.history      import migrate_history
 from py.config       import save_config, load_config, sanitize_config
 from py.error_rules  import start_background_fetch
+from py.inferno_rules import start_background_fetch as start_inferno_fetch
 from py.watcher      import LogWatcher
 from ui.monitor_tab   import MonitorTab
 from ui.status_tab    import StatusTab
@@ -47,7 +51,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.6.0"
+VERSION      = "1.7.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -172,6 +176,10 @@ class App(tk.Tk):
         # loop is running and the monitor tab widget exists to receive the log message.
         # Using after(0, ...) guarantees the fetch fires on the first event loop tick.
         self.after(0, lambda: start_background_fetch(
+            log_fn=self._log,
+            debug=self.cfg.get('debug', False),
+        ))
+        self.after(0, lambda: start_inferno_fetch(
             log_fn=self._log,
             debug=self.cfg.get('debug', False),
         ))

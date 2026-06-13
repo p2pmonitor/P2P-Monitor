@@ -1,6 +1,78 @@
 # Changelog
 
-## v1.5.0
+## v1.7.0
+### Inferno Tracker
+
+Added a stateful Inferno tracker that monitors gear checks and active Inferno attempts, posting outcomes and milestones to the Tasks Discord channel.
+
+**Two tracked concepts:**
+
+**Inferno Gear Check**
+- Opens a gear-check window on `You have the stats and quests needed for Inferno` or `Possible gear clear for Infernal Cape`
+- `Inferno requirements not met` emits its event unconditionally — no gear-check window required, covering the real-world path where only `Bossing Step 0` precedes the failure
+- Buffers `Resource check failed N [...]` lines (no-colon format only — prevents false positives from Fishing/Questing resource checks)
+- Emits exactly one outcome per gear-check window:
+  - `Inferno gear check passed` — on `You have the gear needed for Inferno!` (resource buffer discarded)
+  - `Inferno requirements not met` — on requirements failure line (unconditional)
+  - `Inferno gear check failed: missing usable gear/supplies — <detail>` — if window closes with buffered failures; detail is capped and included in the message
+  - `Inferno gear check failed: unknown reason — <detail>` — if window closes with suspicious lines but no resource failures or known pass/fail
+- Status/monitor tab updates to `Task: Inferno / Activity: Gear Check` when window opens
+
+**Inferno Attempt**
+- Starts only on `[GAME] Wave: 1` — not on `Jumping in`
+- Caches high-ping data and merges it into the start message: `Inferno started — Wave 1, ping 194ms, high ping override used`
+- Tracks every wave internally; status tab shows current wave for all waves
+- Discord milestone events sent only at waves: 7, 15, 24, 31, 41, 48, 56, 63, 67, 68, 69
+- Each milestone deduplicated per attempt — replayed or duplicate log lines never double-send
+- Death: `Inferno failed — died on Wave X after Yh Mm Ss` (highest wave before death)
+- Success requires `Your TzKal-Zuk kill count is: X` — Wave 69 alone is only a milestone
+- State resets cleanly on death, success, and script stop
+
+**Architecture:**
+- Hard state machine in `py/inferno.py` (`InfernoTracker` class)
+- Soft regex patterns and milestone list in `inferno_patterns.json`, fetched from GitHub on startup (same fallback chain as `error_rules.json`: remote → cache → packaged → emergency)
+- Pattern loader in `py/inferno_rules.py` — mirrors `py/error_rules.py`; bad remote JSON never crashes the monitor
+- One `InfernoTracker` instance per `AccountState` in `watcher.py`
+- All events route to the Tasks Discord channel via `post_task()`
+- History tab records Inferno events as task-type entries
+
+**Files changed:**
+- `py/inferno.py` — new: `InfernoTracker` state machine, `_CompiledPatterns`
+- `py/inferno_rules.py` — new: remote pattern loader (GitHub → cache → packaged → emergency)
+- `inferno_patterns.json` — new: soft regex/milestone config (bundle with each release)
+- `py/watcher.py` — added `InfernoTracker` to `AccountState`; feeds lines in `_process_lines`; resets on script stop
+- `p2p_monitor.py` — version bump to 1.7.0; wires `inferno_rules.start_background_fetch()`
+- `p2p_monitor.spec` — added `inferno_patterns.json` to bundled datas
+- `install.sh` — added `inferno_patterns.json`, `py/inferno.py`, `py/inferno_rules.py`
+- `update_manifest.txt` — added all new Inferno files
+- `README.md` — added Inferno tracking to features; updated Windows updating section
+
+---
+
+## v1.6.0
+### Windows Packaged Self-Updater & Source Update Improvements
+
+**Windows packaged auto-update**
+- The Windows `.exe` can now detect and apply updates from within the app (Settings → 🔄 Check for Update)
+- On update, the new `.exe` is downloaded from the GitHub release asset, the old binary is replaced, and the app prompts to relaunch — no manual download required
+- Manual download from the [Releases](https://github.com/p2pmonitor/P2P-Monitor/releases/latest) page remains available as a safe fallback
+
+**Update manifest (`update_manifest.txt`)**
+- Introduced `update_manifest.txt` at the repo root — a plain list of files the updater applies from each release zip
+- Linux/source updates now apply only the files listed in the manifest rather than replacing everything, allowing selective updates without re-running `install.sh`
+- The manifest is checked on every update so new files added in future versions are automatically included
+
+**Reliability fixes**
+- Discord thread self-healing: if a monitored thread is deleted while the bot is running, the monitor detects the 404 on next post, invalidates the stale thread ID, and re-creates the thread automatically — no restart needed
+- Discord channel and webhook self-healing follows the same pattern: stale IDs are evicted and re-created on detection
+
+**Files changed:**
+- `p2p_monitor.py` — Windows updater logic; version bump to 1.6.0
+- `update_manifest.txt` — new: manifest for selective file updates
+- `py/discord.py` — thread/channel/webhook self-healing on post failure
+
+---
+
 ### Remote Error Rules
 
 Error detection patterns (`ERROR_TRIGGERS`, `_LOCK_REASON_PATTERNS`, `_SILENT_LOCK_NAMES`) have been moved out of `py/reader.py` into a GitHub-hosted JSON file (`error_rules.json`). Error patterns can now be added or updated without requiring users to upgrade the monitor.
