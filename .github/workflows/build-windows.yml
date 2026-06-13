@@ -1,35 +1,226 @@
+```yaml
 name: Build Windows EXE
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
+
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout release tag or current ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Read version and validate release tag
+        shell: pwsh
+        run: |
+          $content = Get-Content "p2p_monitor.py" -Raw
+          $m = [regex]::Match($content, 'VERSION\s*=\s*"([^"]+)"')
+
+          if (-not $m.Success) {
+            throw "Could not find VERSION in p2p_monitor.py"
+          }
+
+          $version = $m.Groups[1].Value
+          $tag = "v$version"
+          $zipName = "P2P-Monitor-$tag.zip"
+          $exeName = "P2P Monitor.exe"
+
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+          "EXE_NAME=$exeName" >> $env:GITHUB_ENV
+
+          if ("${{ github.event_name }}" -eq "release") {
+            $releaseTag = "${{ github.event.release.tag_name }}"
+            if ($releaseTag -ne $tag) {
+              throw "Release tag '$releaseTag' does not match p2p_monitor.py VERSION '$tag'"
+            }
+          }
+
+          Write-Host "VERSION: $version"
+          Write-Host "TAG: $tag"
+          Write-Host "ZIP: $zipName"
+          Write-Host "EXE: $exeName"
+
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-windows.txt
           pip install pyinstaller
 
-      - name: Build
+      - name: Clean old build outputs
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force build, dist, release_stage, temp_release -ErrorAction SilentlyContinue
+          Remove-Item -Force $env:ZIP_NAME -ErrorAction SilentlyContinue
+          Remove-Item -Force $env:EXE_NAME -ErrorAction SilentlyContinue
+
+      - name: Build Windows EXE
         shell: pwsh
         run: |
           pyinstaller p2p_monitor.spec
 
-      - name: Upload artifact
+          $builtExe = "dist/P2P Monitor.exe"
+
+          if (-not (Test-Path $builtExe)) {
+            throw "Build failed: $builtExe was not created"
+          }
+
+          Copy-Item $builtExe $env:EXE_NAME -Force
+
+          if (-not (Test-Path $env:EXE_NAME)) {
+            throw "Failed to copy built EXE to repo root"
+          }
+
+      - name: Create Linux/source update ZIP
+        shell: pwsh
+        run: |
+          $stage = "release_stage"
+
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          if (-not (Test-Path "update_manifest.txt")) {
+            throw "Missing update_manifest.txt"
+          }
+
+          $manifestFiles = Get-Content "update_manifest.txt" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") }
+
+          foreach ($file in $manifestFiles) {
+            if ($file.Contains("..") -or $file.StartsWith("/") -or $file.StartsWith("\")) {
+              throw "Unsafe path in update_manifest.txt: $file"
+            }
+
+            if (-not (Test-Path $file)) {
+              throw "Manifest-listed file missing from repo: $file"
+            }
+
+            $dest = Join-Path $stage $file
+            $destDir = Split-Path $dest -Parent
+
+            if ($destDir) {
+              New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            }
+
+            Copy-Item $file $dest -Force
+          }
+
+          # Extra files useful for fresh Linux/source installs and documentation.
+          # These do not have to be in update_manifest.txt.
+          $extraFiles = @(
+            "install.sh",
+            "README.md",
+            "CHANGELOG.md",
+            "LICENSE",
+            "WINDOWS_BUILD.md",
+            "requirements-windows.txt"
+          )
+
+          foreach ($file in $extraFiles) {
+            if (Test-Path $file) {
+              $dest = Join-Path $stage $file
+              $destDir = Split-Path $dest -Parent
+
+              if ($destDir) {
+                New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+              }
+
+              Copy-Item $file $dest -Force
+            }
+          }
+
+          Remove-Item -Force $env:ZIP_NAME -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$stage/*" -DestinationPath $env:ZIP_NAME -Force
+
+          if (-not (Test-Path $env:ZIP_NAME)) {
+            throw "ZIP was not created: $env:ZIP_NAME"
+          }
+
+          Write-Host "Created $env:ZIP_NAME"
+
+      - name: Upload workflow artifact copy
         uses: actions/upload-artifact@v6
         with:
-          name: P2P-Monitor
-          path: dist/**
+          name: P2P-Monitor-${{ env.TAG }}
+          path: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.EXE_NAME }}
+
+      - name: Upload assets to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          gh release upload $env:TAG `
+            $env:ZIP_NAME `
+            $env:EXE_NAME `
+            --repo ${{ github.repository }} `
+            --clobber
+
+      - name: Commit built EXE back to main
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          New-Item -ItemType Directory -Force -Path temp_release | Out-Null
+          Copy-Item $env:EXE_NAME "temp_release/$env:EXE_NAME" -Force
+
+          git fetch origin main
+          git checkout -B main origin/main
+
+          Copy-Item "temp_release/$env:EXE_NAME" $env:EXE_NAME -Force
+
+          git add $env:EXE_NAME
+
+          $changes = git status --porcelain
+
+          if (-not $changes) {
+            Write-Host "No EXE changes to commit."
+            exit 0
+          }
+
+          git commit -m "$env:TAG"
+          git push origin main
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          echo "## P2P Monitor build complete" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "- Version: $env:VERSION" >> $env:GITHUB_STEP_SUMMARY
+          echo "- Tag: $env:TAG" >> $env:GITHUB_STEP_SUMMARY
+          echo "- ZIP: $env:ZIP_NAME" >> $env:GITHUB_STEP_SUMMARY
+          echo "- EXE: $env:EXE_NAME" >> $env:GITHUB_STEP_SUMMARY
+
+          if ("${{ github.event_name }}" -eq "release") {
+            echo "- Release assets uploaded: yes" >> $env:GITHUB_STEP_SUMMARY
+            echo "- Main branch EXE committed: yes" >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            echo "- Manual run only: release assets were not uploaded" >> $env:GITHUB_STEP_SUMMARY
+            echo "- Manual run only: main branch EXE was not committed" >> $env:GITHUB_STEP_SUMMARY
+          }
+```
