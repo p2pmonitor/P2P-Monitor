@@ -356,6 +356,40 @@ class SettingsTab:
                    bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(side='left', padx=(4, 0))
         self._vars['screenshot_minutes'] = int_var
 
+        # ── Auto Restart ──────────────────────────────────────────────────────
+        _, ar_body, _ = collapsible("AUTO RESTART", 'ui_section_auto_restart_open')
+
+        tk.Label(ar_body,
+            text="  Automatically relaunch accounts after Script Stopped is detected.",
+            font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(anchor='w', padx=8, pady=(4, 2))
+
+        boolfield("Auto restart client after Script Stopped",
+                  'auto_restart_enabled', default=False, parent=ar_body)
+        boolfield("Only auto restart during game update window  (Tue/Wed 1–4 AM PT)",
+                  'auto_restart_game_update_window_only', default=True, parent=ar_body)
+        boolfield("Respect breaks on relaunch",
+                  'auto_restart_respect_breaks', default=True, parent=ar_body)
+
+        tk.Label(ar_body, text="  Restart delay (random within window, ignored when respecting breaks):",
+                 font=app.MONO, bg=app.BG2, fg=app.FG2).pack(anchor='w', padx=8, pady=(6, 0))
+
+        delay_row = tk.Frame(ar_body, bg=app.BG2); delay_row.pack(fill='x', padx=16, pady=2)
+        tk.Label(delay_row, text="Min minutes:", font=app.MONO, bg=app.BG2, fg=app.FG2,
+                 width=16, anchor='w').pack(side='left')
+        ar_min_var = tk.IntVar(value=int(app.cfg.get('auto_restart_min_minutes', 1)))
+        tk.Spinbox(delay_row, from_=0, to=1440, textvariable=ar_min_var, width=6, font=app.MONO,
+                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4,
+                   relief='flat').pack(side='left', padx=(4, 16))
+        self._vars['auto_restart_min_minutes'] = ar_min_var
+
+        tk.Label(delay_row, text="Max minutes:", font=app.MONO, bg=app.BG2, fg=app.FG2,
+                 width=14, anchor='w').pack(side='left')
+        ar_max_var = tk.IntVar(value=int(app.cfg.get('auto_restart_max_minutes', 30)))
+        tk.Spinbox(delay_row, from_=1, to=1440, textvariable=ar_max_var, width=6, font=app.MONO,
+                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4,
+                   relief='flat').pack(side='left', padx=(4, 0))
+        self._vars['auto_restart_max_minutes'] = ar_max_var
+
         # ── Auto-update ───────────────────────────────────────────────────────
         section("AUTO-UPDATE")
         upd_row = tk.Frame(inner, bg=app.BG2); upd_row.pack(fill='x', padx=16, pady=6)

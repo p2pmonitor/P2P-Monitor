@@ -821,7 +821,7 @@ class GatewayRunner:
         },
         {
             'name':        'launch',
-            'description': 'Launch or relaunch a DreamBot account by preset name',
+            'description': 'Launch a DreamBot account by preset name (skips if already running)',
             'options': [{
                 'name':         'account',
                 'description':  'Account name, or "all" to launch all presets',
@@ -1078,8 +1078,7 @@ class GatewayRunner:
 
                     if account_arg.lower() == 'all':
                         results = await loop.run_in_executor(None, on_launch_all)
-                        launched = sum(1 for r in results
-                                       if r.ok and r.action in ('launched', 'relaunched'))
+                        launched = sum(1 for r in results if r.ok and r.action == 'launched')
                         skipped  = sum(1 for r in results if r.action == 'skipped')
                         failed   = sum(1 for r in results
                                        if not r.ok and r.action == 'failed')
@@ -1088,14 +1087,14 @@ class GatewayRunner:
                             icon = ('✅' if r.ok else
                                     ('⚠️' if r.action == 'skipped' else '❌'))
                             lines.append(f'{icon} **{r.account}**: {r.message}')
-                        summary = (f'\n✅ {launched} launched/relaunched  '
-                                   f'⚠️ {skipped} skipped  ❌ {failed} failed')
+                        summary = (f'\n✅ {launched} launched  '
+                                   f'⚠️ {skipped} skipped (already open or unsafe)  '
+                                   f'❌ {failed} failed')
                         lines.append(summary)
                         msg = '\n'.join(lines)
-                        # Discord message cap: 2000 chars. If too long, send summary only.
                         if len(msg) > 1900:
                             msg = (f'**Launch all complete:**\n'
-                                   f'✅ {launched} launched/relaunched  '
+                                   f'✅ {launched} launched  '
                                    f'⚠️ {skipped} skipped  ❌ {failed} failed\n'
                                    f'_(Per-account detail truncated — see monitor log)_')
                         await interaction.followup.send(msg, ephemeral=True)
@@ -1104,7 +1103,7 @@ class GatewayRunner:
                         result = await loop.run_in_executor(
                             None, lambda: on_launch(account_arg))
                         if result.ok:
-                            icon = '🔄' if result.action == 'relaunched' else '✅'
+                            icon = '✅'
                         elif result.action == 'skipped':
                             icon = '⚠️'
                         else:

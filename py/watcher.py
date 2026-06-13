@@ -126,11 +126,16 @@ class AccountState:
         self.logged_in       = False
         self.total_break_secs    = 0
         self._break_start_ts     = None
+        self._break_length_ms    = None   # parsed from "Break length N" log line; ms int or None
         self.script_running      = False  # True once script start confirmed; False on stop
         self.notified_levels     = {}
         self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
         self._startup_done       = False  # guards _startup_catchup to run only once per state
         self.inferno             = InfernoTracker()  # stateful Inferno gear-check and attempt tracker
+        # Auto-restart state
+        self._recent_lines       = deque(maxlen=30)  # rolling buffer; manual-stop signature check
+        self._pending_restart_timer: 'threading.Timer | None' = None
+        self._pre_stop_break_snap = None  # break snapshot captured before script-stop clears it
 
     def should_alert(self, key, threshold, window_sec, dedupe_sec):
         now = time.time()
@@ -278,6 +283,13 @@ class LogWatcher:
 
     def stop(self):
         self._running = False
+        # Cancel any pending auto-restart timers before tearing down
+        with self._accounts_lock:
+            for state in self._accounts.values():
+                t = getattr(state, '_pending_restart_timer', None)
+                if t is not None:
+                    t.cancel()
+                    state._pending_restart_timer = None
         if self._ss_svc:
             self._ss_svc.stop()
         with self._backfill_lock:
@@ -870,6 +882,8 @@ class LogWatcher:
                         last_break_idx = i
                 if last_break_idx is not None:
                     break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
+                    if break_length_ms is not None:
+                        state._break_length_ms = break_length_ms  # persist for break-end scheduling
 
             # ── Uptime + break time: scan ALL session files ───────────────────
             # Walk oldest-first to find client start time and sum all completed breaks.
@@ -1324,6 +1338,200 @@ class LogWatcher:
 
         return True
 
+    # ── Auto-restart helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _in_game_update_window() -> bool:
+        """
+        Return True when within the hardcoded game update window:
+            Tuesday   1:00 AM – 4:00 AM  America/Los_Angeles
+            Wednesday 1:00 AM – 4:00 AM  America/Los_Angeles
+
+        Primary path: stdlib zoneinfo (Python 3.9+).
+        Fallback:     manual UTC-offset using US DST rules — for Windows frozen
+                      builds where IANA tzdata is not bundled.
+        Returns False on any unexpected error (fail-safe, do not auto-restart).
+        """
+        import datetime as _dt
+
+        # ── Primary: zoneinfo with IANA data ──────────────────────────────────
+        try:
+            from zoneinfo import ZoneInfo
+            now = _dt.datetime.now(ZoneInfo('America/Los_Angeles'))
+            return now.weekday() in (1, 2) and 1 <= now.hour < 4
+        except Exception:
+            pass  # ZoneInfoNotFoundError on Windows without tzdata, or other error
+
+        # ── Fallback: manual US Pacific offset from UTC ────────────────────────
+        # US DST rules (since Energy Policy Act 2007):
+        #   Spring forward: 2nd Sunday in March  at 2 AM PST  → UTC 10:00
+        #   Fall back:      1st Sunday in November at 2 AM PDT → UTC 09:00
+        try:
+            utc_now = _dt.datetime.utcnow()
+            year = utc_now.year
+
+            def _nth_sunday(month: int, nth: int) -> _dt.datetime:
+                d = _dt.datetime(year, month, 1)
+                d += _dt.timedelta(days=(6 - d.weekday()) % 7)  # first Sunday
+                return d + _dt.timedelta(weeks=nth - 1)
+
+            dst_start = _nth_sunday(3, 2).replace(hour=10)   # 2AM PST = 10:00 UTC
+            dst_end   = _nth_sunday(11, 1).replace(hour=9)   # 2AM PDT = 09:00 UTC
+            offset    = -7 if dst_start <= utc_now < dst_end else -8
+            la_now    = utc_now + _dt.timedelta(hours=offset)
+            return la_now.weekday() in (1, 2) and 1 <= la_now.hour < 4
+        except Exception:
+            return False  # fail safe
+
+    def _maybe_schedule_auto_restart(self, folder: str, lines: list,
+                                     state: 'AccountState') -> None:
+        """
+        Called from _process_lines after a 'script_event / stop' fires for 'folder'.
+
+        Gate checks (in order — first failing gate skips with a log line):
+          1. auto_restart_enabled in cfg
+          2. suppress window — monitor-initiated relaunch in progress
+          3. manual-stop signature in recent log lines
+          4. game update window gate (if auto_restart_game_update_window_only)
+          5. preset still exists for this account
+
+        If all gates pass: compute delay (break-end or random min/max),
+        cancel any existing pending timer, schedule threading.Timer.
+
+        The timer callback (_do_auto_restart) re-checks running state and
+        preset existence before calling launcher.relaunch_account.
+        """
+        account = folder  # folder == account name throughout watcher
+
+        # ── Gate 1: feature enabled ────────────────────────────────────────────
+        if not self.cfg.get('auto_restart_enabled', False):
+            return  # silent — not enabled; no log spam
+
+        # ── Gate 2: suppress window (monitor-initiated relaunch) ──────────────
+        try:
+            from py.launcher import is_relaunch_suppressed
+            if is_relaunch_suppressed(account):
+                self.log(f'🔄 [{account}] Auto restart skipped — '
+                         f'monitor-initiated relaunch in progress.')
+                return
+        except Exception:
+            pass
+
+        # ── Gate 3: manual-stop signature ─────────────────────────────────────
+        # Check current batch first (fast path), then rolling buffer (split-batch edge case)
+        sig = 'user initiated script stop via control bar.'
+        recent_snapshot = list(state._recent_lines)  # snapshot before timer thread could race
+        all_recent = list(lines) + recent_snapshot
+        if any(sig in ln.lower() for ln in all_recent):
+            self.log(f'🔄 [{account}] Auto restart skipped — manual script stop detected.')
+            return
+
+        # ── Gate 4: game update window ─────────────────────────────────────────
+        if self.cfg.get('auto_restart_game_update_window_only', True):
+            if not self._in_game_update_window():
+                self.log(f'🔄 [{account}] Auto restart skipped — '
+                         f'outside game update window (Tue/Wed 1–4 AM PT).')
+                return
+
+        # ── Gate 5: preset exists ──────────────────────────────────────────────
+        from py.launcher import find_preset
+        if not find_preset(self.cfg, account):
+            self.log(f'🔄 [{account}] Auto restart skipped — '
+                     f'no launcher preset found for this account.')
+            return
+
+        # ── Compute delay ──────────────────────────────────────────────────────
+        delay_secs, delay_desc = self._compute_restart_delay(account, state)
+
+        # ── Cancel any already-pending timer for this account ─────────────────
+        old_timer = state._pending_restart_timer
+        if old_timer is not None:
+            old_timer.cancel()
+            state._pending_restart_timer = None
+
+        # ── Schedule ───────────────────────────────────────────────────────────
+        self.log(f'⏰ [{account}] Auto restart scheduled {delay_desc} after Script Stopped.')
+
+        def _do_auto_restart():
+            # Re-check running state — watcher may have been stopped during the delay
+            if not self._running:
+                return
+            # Re-check preset still exists
+            from py.launcher import find_preset as _fp, relaunch_account, is_relaunch_suppressed
+            if not _fp(self.cfg, account):
+                self.log(f'🔄 [{account}] Auto restart cancelled — preset removed during delay.')
+                return
+            # Re-check suppress (e.g. user ran /launch manually during the delay)
+            if is_relaunch_suppressed(account):
+                self.log(f'🔄 [{account}] Auto restart cancelled — '
+                         f'monitor-initiated relaunch started during delay.')
+                return
+            self.log(f'🔄 [{account}] Auto restart launching now...')
+            try:
+                result = relaunch_account(self.cfg, account, log_fn=self.log)
+                if not result.ok:
+                    self.log(f'❌ [{account}] Auto restart failed: {result.message}')
+            except Exception as exc:
+                self.log(f'❌ [{account}] Auto restart exception: {exc}')
+
+        t = threading.Timer(delay_secs, _do_auto_restart)
+        t.daemon = True
+        t.start()
+        state._pending_restart_timer = t
+
+    def _compute_restart_delay(self, account: str,
+                               state: 'AccountState') -> 'tuple[float, str]':
+        """
+        Return (delay_seconds, human_description) for the scheduled restart.
+
+        Priority:
+          1. Respect breaks (if enabled): use break end from the pre-stop snapshot
+             captured before script-stop cleared break state.
+          2. Random delay between auto_restart_min_minutes and auto_restart_max_minutes.
+
+        min == max is valid and results in exactly that many minutes.
+        """
+        import random, datetime as _dt
+
+        # ── Validated min/max from config ──────────────────────────────────────
+        try:
+            lo = max(0, int(self.cfg.get('auto_restart_min_minutes', 1)))
+        except (ValueError, TypeError):
+            lo = 1
+        try:
+            hi = int(self.cfg.get('auto_restart_max_minutes', 30))
+        except (ValueError, TypeError):
+            hi = 30
+        if hi < lo:
+            hi = lo   # clamp; randint(n, n) == n, which is correct
+
+        # ── Break-end path — uses pre-stop snapshot ────────────────────────────
+        if self.cfg.get('auto_restart_respect_breaks', True):
+            try:
+                snap = state._pre_stop_break_snap or {}
+                if (snap.get('on_break')
+                        and snap.get('break_start_ts') is not None
+                        and snap.get('break_length_ms') is not None
+                        and snap['break_length_ms'] > 0):
+                    break_end_ts = snap['break_start_ts'] + (snap['break_length_ms'] / 1000.0)
+                    delay = break_end_ts - time.time()
+                    if delay > 0:
+                        end_dt   = _dt.datetime.fromtimestamp(break_end_ts)
+                        time_str = end_dt.strftime('%I:%M %p').lstrip('0') or '12:00 AM'
+                        desc = f'at {time_str} (break end)'
+                        return delay, desc
+                    # Break already past end — fall through to random delay
+                    self._dbg(f'[auto_restart] Break end already passed for {account} — '
+                              f'using random delay instead.')
+            except Exception as exc:
+                self._dbg(f'[auto_restart] Break-end calc failed for {account}: {exc} — '
+                          f'using random delay.')
+
+        # ── Random delay ───────────────────────────────────────────────────────
+        mins = random.randint(lo, hi)
+        desc = f'in {mins}m'
+        return mins * 60.0, desc
+
     # ── Process lines (live) ───────────────────────────────────────────────────
     def _process_lines(self, lines, folder):
         # TODO: _process_lines handles state mutation, suppression, event filtering,
@@ -1335,6 +1543,7 @@ class LogWatcher:
         # Update login/break state from this batch
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
+            state._recent_lines.append(line)          # rolling buffer for manual-stop detection
             if _is_break_start(line):
                 state.on_break  = True
                 state.logged_in = False
@@ -1342,6 +1551,8 @@ class LogWatcher:
                     state._break_start_ts = time.time()
                 from py.util import parse_break_length_ms
                 bl_ms = parse_break_length_ms(lines, idx + 1, max_search=3)
+                if bl_ms is not None:
+                    state._break_length_ms = bl_ms    # persist for break-end scheduling
             elif _is_break_over(b.lower()):
                 # Real completed break — not 'Break over -> Startup'
                 state.on_break = False
@@ -1349,7 +1560,8 @@ class LogWatcher:
                 state.script_running = True
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
-                    state._break_start_ts = None
+                    state._break_start_ts  = None
+                state._break_length_ms = None   # break consumed; clear for next cycle
             elif 'interacting (widget) logout' in b.lower():
                 state.logged_in = False
                 # Do NOT set _break_start_ts here — logout is not a break
@@ -1384,6 +1596,13 @@ class LogWatcher:
                 # Don't touch on_break — break state takes priority
                 state.logged_in = True
             elif 'stopped p2p master ai' in b.lower():
+                # Capture break context before clearing — used by _compute_restart_delay
+                # if 'Respect breaks on relaunch' is enabled.
+                state._pre_stop_break_snap = {
+                    'on_break':       state.on_break,
+                    'break_start_ts': state._break_start_ts,
+                    'break_length_ms': state._break_length_ms,
+                }
                 state.script_running  = False
                 state.logged_in       = False
                 state.on_break        = False
@@ -1495,6 +1714,13 @@ class LogWatcher:
                 self.log(f"{prefix} [{folder}] Level up: {skill} → {level}")
 
             elif etype == 'script_event':
+                # ── Auto-restart: runs regardless of notification/mute settings ──
+                if value == 'stop':
+                    try:
+                        self._maybe_schedule_auto_restart(folder, lines, state)
+                    except Exception as _ar_exc:
+                        self._dbg(f'[auto_restart] scheduling error for {folder}: {_ar_exc}')
+
                 cfg_key_map = {
                     'start':  'monitor_script_start',  'stop':   'monitor_script_stop',
                     'pause':  'monitor_script_pause',   'resume': 'monitor_script_resume',

@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.8.0-beta.2
+### Auto Restart After Script Stopped (Stage 2 of v1.8.0)
+
+**Auto restart client after Script Stopped**
+- New setting: **Auto restart client after Script Stopped** (default off)
+- When enabled, the monitor schedules a `relaunch_account()` call after detecting `Stopped P2P Master AI!` — this closes the DreamBot client, waits 10 seconds, and launches the account fresh (the script was stopped but the client is still open)
+- All restarts use the Stage 1 launcher backend (`py/launcher.py`) — no duplicate process-control logic
+
+**Relaunch safe delay shortened: 15 s → 10 s**
+
+**Random restart delay window**
+- New settings: **Restart delay min minutes** (default 1) and **Restart delay max minutes** (default 30)
+- Each account gets an independently random delay within the window, so accounts do not all relaunch at the same moment
+- Monitor tab logs the scheduled delay: `⏰ [Account] Auto restart scheduled in 7m after Script Stopped`
+
+**Respect breaks on relaunch**
+- New setting: **Respect breaks on relaunch** (default on)
+- When enabled and the account was mid-break when the script stopped, restart is scheduled at the break's calculated end time instead of the random window
+- Falls back to random delay if break end cannot be determined safely
+- Monitor tab logs the schedule: `⏰ [Account] Auto restart scheduled at 6:40 AM (break end) after Script Stopped`
+
+**Game update window gate**
+- New setting: **Only auto restart during game update window (Tue/Wed 1–4 AM PT)** (default on)
+- Hardcoded window: Tuesday and Wednesday 1:00 AM – 4:00 AM `America/Los_Angeles` (handles PST/PDT automatically)
+- When the checkbox is off, every Script Stopped can schedule auto restart
+- Monitor tab logs when skipped: `🔄 [Account] Auto restart skipped — outside game update window (Tue/Wed 1–4 AM PT)`
+
+**Manual stop suppression**
+- Detects manual stop signature in recent log lines: `User initiated script stop via Control Bar.`
+- When found, auto restart is suppressed: `🔄 [Account] Auto restart skipped — manual script stop detected`
+- Checked across the current log batch and a 30-line rolling buffer per account (handles split-batch edge case)
+
+**Monitor-initiated relaunch loop prevention**
+- When the monitor closes a client (via `/launch`, relaunch_account, or auto restart), a 5-minute suppress window is set before `terminate_process_tree` is called
+- The resulting `Stopped P2P Master AI!` log line does not re-trigger auto restart during this window
+- Monitor tab logs when suppressed: `🔄 [Account] Auto restart skipped — monitor-initiated relaunch in progress`
+
+**Pending timer cleanup**
+- If the monitor is stopped while a restart timer is pending, the timer is cancelled cleanly in `LogWatcher.stop()`
+- Timer callbacks re-check `_running`, preset existence, and suppress state before calling relaunch
+
+---
+
 ## v1.8.0-beta.1
 ### Safe Launcher Backend + Discord `/launch` (Stage 1 of v1.8.0)
 

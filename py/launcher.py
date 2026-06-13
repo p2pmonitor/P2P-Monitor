@@ -1,5 +1,5 @@
 """
-py/launcher.py — Safe DreamBot account launcher backend for P2P Monitor v1.8.0-beta.1
+py/launcher.py — Safe DreamBot account launcher backend for P2P Monitor v1.8.0-beta.2
 
 Owns all high-level account launch logic:
   - Preset lookup and command building
@@ -33,6 +33,31 @@ from typing import Optional
 
 # Lazy import — platform_ops is available whenever the app runs.
 # We import at call time in helpers to avoid circular import issues during testing.
+
+# ── Monitor-initiated relaunch suppress window ─────────────────────────────────
+# When the monitor closes a DreamBot client (via relaunch_account), the resulting
+# "Stopped P2P Master AI!" log line would normally trigger auto-restart.
+# These helpers let the watcher skip that spurious re-trigger.
+
+_relaunch_suppress: dict = {}          # account → suppress_until epoch timestamp
+_relaunch_suppress_lock = threading.Lock()
+
+
+def set_relaunch_suppress(account: str, duration_secs: float = 300.0) -> None:
+    """
+    Mark 'account' as having a monitor-initiated relaunch in progress.
+    Auto-restart will be suppressed for 'duration_secs' seconds (default 5 minutes).
+    Called by relaunch_account() immediately before terminate_process_tree().
+    """
+    with _relaunch_suppress_lock:
+        _relaunch_suppress[account] = time.time() + duration_secs
+
+
+def is_relaunch_suppressed(account: str) -> bool:
+    """Return True if 'account' is within a monitor-initiated relaunch suppress window."""
+    with _relaunch_suppress_lock:
+        return time.time() < _relaunch_suppress.get(account, 0.0)
+
 
 # ── State file ─────────────────────────────────────────────────────────────────
 
@@ -305,12 +330,11 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
     Fresh launch for 'account'.
 
     - Fails with action='skipped' if the account appears already running.
-      (Preserves the UI safety behaviour: show error, do not close anything.)
+      (Preserves the UI and Discord safety behaviour: report it, do not close anything.)
     - Spawns the process and starts background PID discovery.
     - Returns immediately — PID confirmation happens in a daemon thread.
 
-    Use smart_launch() if you want auto-relaunch when already running
-    (i.e. the Discord /launch behaviour).
+    Use relaunch_account() to explicitly close an existing client first.
     """
     def _log(msg):
         if log_fn:
@@ -363,7 +387,7 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
 
 
 def relaunch_account(cfg: dict, account: str, log_fn=None,
-                     safe_delay_seconds: int = 15) -> LaunchResult:
+                     safe_delay_seconds: int = 10) -> LaunchResult:
     """
     Safely close the existing DreamBot client for 'account', wait, then relaunch.
 
@@ -450,6 +474,9 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     # ── Step 3: safe close ─────────────────────────────────────────────────────
     _log(f'🔴 [{account}] Closing client (PID {target_pid}, via {discovery_method})...')
     _set_pid(account, None)  # clear stale state before close
+    # Mark suppress window BEFORE terminating — watcher detects "Stopped P2P" shortly
+    # after this and must not trigger an auto-restart loop.
+    set_relaunch_suppress(account, duration_secs=300.0)
     try:
         from py.platform_ops import terminate_process_tree
         terminate_process_tree(target_pid, timeout=10)
@@ -484,8 +511,9 @@ def smart_launch(cfg: dict, account: str, log_fn=None) -> LaunchResult:
     Smart dispatch: if the account is already running → relaunch_account;
     if not → launch_account.
 
-    Used by Discord /launch and launch_all. The UI uses launch_account directly
-    (which refuses with 'skipped' if already running, preserving the dialog flow).
+    Not used by Discord /launch or launch_all (both use launch_account so they
+    skip accounts that are already open). Retained for direct caller use where
+    relaunch-on-open is explicitly desired.
     """
     try:
         existing = discover_account_process(account)
@@ -501,15 +529,14 @@ def smart_launch(cfg: dict, account: str, log_fn=None) -> LaunchResult:
 
 def launch_all(cfg: dict, log_fn=None) -> list:
     """
-    Smart-launch every account that has a launcher preset.
+    Launch every account that has a launcher preset, skipping any already running.
 
     - Staggers launches: 5 seconds between each account.
-    - If one account fails, continues with the rest.
+    - If one account fails or is already open, continues with the rest.
     - Returns list[LaunchResult].
 
-    For fresh launches the 5s stagger separates the Popen calls.
-    For relaunches each account already waits safe_delay_seconds (15s) before
-    its Popen, so the extra 5s stagger is on top of that.
+    Uses launch_account (not smart_launch) — accounts that are already open
+    are reported as 'skipped', not force-restarted.
     """
     def _log(msg):
         if log_fn:
@@ -528,7 +555,7 @@ def launch_all(cfg: dict, log_fn=None) -> list:
         if i > 0:
             _log(f'⏳ [launch_all] Stagger: waiting 5s before next account...')
             time.sleep(5)
-        _log(f'🔁 [launch_all] Processing: {account}')
-        results.append(smart_launch(cfg, account, log_fn=log_fn))
+        _log(f'🚀 [launch_all] Processing: {account}')
+        results.append(launch_account(cfg, account, log_fn=log_fn))
 
     return results
