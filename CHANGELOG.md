@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.8.0-beta.3
+### Local DreamBot Update Awareness + `/relaunch` command
+
+**New: `/relaunch` Discord slash command**
+- `/relaunch account:<name>` — restarts the named account; closes the client if open, then launches fresh (destructive counterpart to `/launch`)
+- `/relaunch account:all` — restarts all preset accounts; open clients are closed first
+- `/launch` is unchanged — still skips already-open accounts (non-destructive)
+
+**New: DreamBot / P2P Master AI update awareness**
+- Reads local DreamBot window titles once at monitor startup and daily at 2:00 PM PC local time
+- Fetches `latest_version` from `https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest`
+- Compares numerically (so `v2.9` < `v2.143` correctly)
+- Three alert cases posted to the main monitor Discord channel:
+  - Script outdated only → ping with local vs latest version + suggest `/relaunch`
+  - Script outdated + `NEW CLIENT AVAILABLE` in title → ping both updates needed
+  - Script current + `NEW CLIENT AVAILABLE` in title → ping DreamBot client update only
+- No alert when everything is current
+- Deduplicated: state persisted in `~/.p2p_monitor/update_check_state.json`; same condition does not alert again after app restart
+- If Cloudflare endpoint is unreachable, only the `NEW CLIENT AVAILABLE` alert can still fire
+- Configurable: **Update Awareness** checkbox in Settings (default on)
+
+**Auto-restart hardening: 0-minute delay**
+- If the selected random delay is 0 minutes, schedules restart after 10 seconds instead of instantly
+- Logged/reported as "in 10 seconds" — not "0 minutes"
+- Preserves normal behavior for delays > 0
+
+---
+
 ## v1.8.0-beta.2
 ### Auto Restart After Script Stopped (Stage 2 of v1.8.0)
 

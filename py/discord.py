@@ -761,74 +761,43 @@ class GatewayRunner:
     Connects to the Discord Gateway via discord.py, registers slash commands,
     and dispatches interactions back to the watcher via callbacks.
 
-    Replaces BotRunner (polling) — no channel ID needed, no message polling.
-    Slash commands: /ss [account], /s, /force, /launch
+    Slash commands: /ss [account], /s, /force, /launch, /relaunch
 
-    Callbacks supplied by LogWatcher (passed through from p2p_monitor.py):
-        get_rows()                            → list of account row dicts
-        get_accounts()                        → list of monitored account name strings
-        on_screenshot(account, ch_id, token)  → None
-        on_launch(account)                    → LaunchResult
-        on_launch_all()                       → list[LaunchResult]
-        log(msg)
-        get_cfg()                             → live cfg dict
-        is_running()                          → bool
+    Callbacks: get_rows, get_accounts, on_screenshot, on_launch, on_launch_all,
+               on_relaunch, on_relaunch_all, log, get_cfg, is_running
     """
 
     COMMANDS = [
         {
             'name':        'ss',
             'description': 'Take a screenshot for an account',
-            'options': [{
-                'name':         'account',
-                'description':  'Account name (leave blank for all)',
-                'type':         3,   # STRING
-                'required':     False,
-                'autocomplete': True,
-            }],
+            'options': [{'name': 'account', 'description': 'Account name (leave blank for all)',
+                         'type': 3, 'required': False, 'autocomplete': True}],
         },
-        {
-            'name':        's',
-            'description': 'Post status of all monitored accounts to #monitor',
-        },
+        {'name': 's', 'description': 'Post status of all monitored accounts to #monitor'},
         {
             'name':        'force',
             'description': 'Force a skill, action, or time adjustment for an account',
             'options': [
-                {
-                    'name':         'account',
-                    'description':  'Account name',
-                    'type':         3,   # STRING
-                    'required':     True,
-                    'autocomplete': True,
-                },
-                {
-                    'name':         'adjustment',
-                    'description':  'Action to perform',
-                    'type':         3,   # STRING
-                    'required':     True,
-                    'autocomplete': True,
-                },
-                {
-                    'name':         'amount',
-                    'description':  'Number of times to click — only used for -10m / +10m (1-20)',
-                    'type':         4,   # INTEGER
-                    'required':     False,
-                    'min_value':    1,
-                    'max_value':    20,
-                },
+                {'name': 'account',    'description': 'Account name',
+                 'type': 3, 'required': True,  'autocomplete': True},
+                {'name': 'adjustment', 'description': 'Action to perform',
+                 'type': 3, 'required': True,  'autocomplete': True},
+                {'name': 'amount',     'description': 'Clicks — only for -10m/+10m (1-20)',
+                 'type': 4, 'required': False, 'min_value': 1, 'max_value': 20},
             ],
         },
         {
             'name':        'launch',
-            'description': 'Launch a DreamBot account by preset name (skips if already running)',
-            'options': [{
-                'name':         'account',
-                'description':  'Account name, or "all" to launch all presets',
-                'type':         3,   # STRING
-                'required':     True,
-                'autocomplete': True,
-            }],
+            'description': 'Launch a DreamBot account by preset (skips if already running)',
+            'options': [{'name': 'account', 'description': 'Account name, or "all"',
+                         'type': 3, 'required': True, 'autocomplete': True}],
+        },
+        {
+            'name':        'relaunch',
+            'description': 'Restart a DreamBot account — closes if open, launches fresh',
+            'options': [{'name': 'account', 'description': 'Account name, or "all"',
+                         'type': 3, 'required': True, 'autocomplete': True}],
         },
     ]
 
@@ -912,12 +881,11 @@ class GatewayRunner:
                         _respond(choices)
                         return
 
-            if cmd == 'launch':
+            if cmd in ('launch', 'relaunch'):
                 for opt in interaction.data.get('options', []):
                     if opt.get('name') == 'account' and opt.get('focused'):
                         typed   = opt.get('value', '').lower()
-                        cfg_now = cfg_ref
-                        presets = cfg_now.get('launcher_presets', [])
+                        presets = cfg_ref.get('launcher_presets', [])
                         choices = [{'name': 'All accounts', 'value': 'all'}]
                         choices += [
                             {'name': p['account'], 'value': p['account']}
@@ -1110,6 +1078,50 @@ class GatewayRunner:
                             icon = '❌'
                         await interaction.followup.send(
                             f'{icon} {result.message}', ephemeral=True)
+
+                elif cmd == 'relaunch':
+                    account_arg = opts.get('account', '').strip()
+                    if not account_arg:
+                        await interaction.response.send_message(
+                            'Please specify an account name or "all".', ephemeral=True)
+                        return
+
+                    on_relaunch     = cb.get('on_relaunch')
+                    on_relaunch_all = cb.get('on_relaunch_all')
+                    if not on_relaunch or not on_relaunch_all:
+                        await interaction.response.send_message(
+                            '⚠ Relaunch callbacks not available — is the monitor running?',
+                            ephemeral=True)
+                        return
+
+                    await interaction.response.defer(ephemeral=True)
+                    import asyncio as _asyncio
+                    loop = _asyncio.get_event_loop()
+
+                    if account_arg.lower() == 'all':
+                        results = await loop.run_in_executor(None, on_relaunch_all)
+                        relaunched = sum(1 for r in results if r.ok)
+                        skipped    = sum(1 for r in results if r.action == 'skipped')
+                        failed     = sum(1 for r in results if not r.ok and r.action == 'failed')
+                        lines_out  = ['**Relaunch all complete:**']
+                        for r in results:
+                            icon = ('✅' if r.ok else ('⚠️' if r.action == 'skipped' else '❌'))
+                            lines_out.append(f'{icon} **{r.account}**: {r.message}')
+                        lines_out.append(f'\n✅ {relaunched} relaunched  '
+                                         f'⚠️ {skipped} skipped  ❌ {failed} failed')
+                        msg = '\n'.join(lines_out)
+                        if len(msg) > 1900:
+                            msg = (f'**Relaunch all complete:**\n'
+                                   f'✅ {relaunched} relaunched  ⚠️ {skipped} skipped  '
+                                   f'❌ {failed} failed\n'
+                                   f'_(Detail truncated — see monitor log)_')
+                        await interaction.followup.send(msg, ephemeral=True)
+                    else:
+                        result = await loop.run_in_executor(None, lambda: on_relaunch(account_arg))
+                        icon = ('🔄' if result.ok and result.action == 'relaunched' else
+                                '✅' if result.ok else
+                                '⚠️' if result.action == 'skipped' else '❌')
+                        await interaction.followup.send(f'{icon} {result.message}', ephemeral=True)
 
             except Exception as e:
                 cb['log'](f"🤖 Interaction error ({cmd}): {e}")

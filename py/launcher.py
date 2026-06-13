@@ -559,3 +559,36 @@ def launch_all(cfg: dict, log_fn=None) -> list:
         results.append(launch_account(cfg, account, log_fn=log_fn))
 
     return results
+
+
+def relaunch_all(cfg: dict, log_fn=None) -> list:
+    """
+    Relaunch (close-if-open then launch) every account that has a launcher preset.
+    Uses smart_launch — running accounts are closed and relaunched; closed accounts
+    are launched fresh. This is the destructive counterpart to launch_all.
+
+    - Staggers launches: 5 seconds between each account.
+    - Continues on individual failures.
+    - Returns list[LaunchResult].
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    presets = list_presets(cfg)
+    if not presets:
+        return [LaunchResult(ok=False, account='(all)', action='failed',
+                             message='No launcher presets configured.')]
+
+    results = []
+    for i, preset in enumerate(presets):
+        account = preset.get('account', '').strip()
+        if not account:
+            continue
+        if i > 0:
+            _log(f'⏳ [relaunch_all] Stagger: waiting 5s before next account...')
+            time.sleep(5)
+        _log(f'🔄 [relaunch_all] Processing: {account}')
+        results.append(smart_launch(cfg, account, log_fn=log_fn))
+
+    return results

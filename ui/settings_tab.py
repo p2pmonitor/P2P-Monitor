@@ -390,6 +390,16 @@ class SettingsTab:
                    relief='flat').pack(side='left', padx=(4, 0))
         self._vars['auto_restart_max_minutes'] = ar_max_var
 
+        # ── Update Awareness ─────────────────────────────────────────────────
+        section("UPDATE AWARENESS")
+        boolfield("Check for P2P Master AI / DreamBot client updates",
+                  'update_check_enabled', default=True)
+        tk.Label(inner,
+            text="  Reads DreamBot window titles daily at 2 PM and on startup. "
+                 "Sends a Discord alert when a script or client update is detected.",
+            font=app.MONO, bg=app.BG2, fg=app.FG2,
+            wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 4))
+
         # ── Auto-update ───────────────────────────────────────────────────────
         section("AUTO-UPDATE")
         upd_row = tk.Frame(inner, bg=app.BG2); upd_row.pack(fill='x', padx=16, pady=6)

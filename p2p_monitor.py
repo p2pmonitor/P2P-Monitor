@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.8.0-beta.2
+P2P Monitor v1.8.0-beta.3
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -52,7 +52,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.8.0-beta.2"
+VERSION      = "1.8.0-beta.3"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -99,6 +99,7 @@ DEFAULT_CFG = {
     "auto_restart_max_minutes": 30,
     "auto_restart_game_update_window_only": True,
     "auto_restart_respect_breaks": True,
+    "update_check_enabled": True,
     "hist_col_widths": {},
     "ui_section_discord_open": True,
     "ui_section_notifications_open": True,
@@ -321,6 +322,10 @@ class App(tk.Tk):
             on_launch_cb=lambda account: _launcher.launch_account(
                 self.cfg, account, log_fn=self._log),
             on_launch_all_cb=lambda: _launcher.launch_all(
+                self.cfg, log_fn=self._log),
+            on_relaunch_cb=lambda account: _launcher.smart_launch(
+                self.cfg, account, log_fn=self._log),
+            on_relaunch_all_cb=lambda: _launcher.relaunch_all(
                 self.cfg, log_fn=self._log),
         )
         self.watcher.start(self.cfg)

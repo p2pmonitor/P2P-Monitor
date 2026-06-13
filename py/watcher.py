@@ -3,6 +3,7 @@ watcher.py — Log watching engine for P2P Monitor v1.7.0
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 """
+import json
 import os
 import re
 import threading
@@ -174,13 +175,16 @@ class LogWatcher:
     }
 
     def __init__(self, log_cb, event_cb, status_cb, backfill_cb=None,
-                 on_launch_cb=None, on_launch_all_cb=None):
+                 on_launch_cb=None, on_launch_all_cb=None,
+                 on_relaunch_cb=None, on_relaunch_all_cb=None):
         self.log       = log_cb
         self.on_event  = event_cb
         self.on_status = status_cb
-        self._on_backfill_done  = backfill_cb      # called after each account backfill completes
-        self._on_launch_cb      = on_launch_cb     # passed through to GatewayRunner
-        self._on_launch_all_cb  = on_launch_all_cb # passed through to GatewayRunner
+        self._on_backfill_done  = backfill_cb
+        self._on_launch_cb      = on_launch_cb
+        self._on_launch_all_cb  = on_launch_all_cb
+        self._on_relaunch_cb     = on_relaunch_cb      # passed through to GatewayRunner
+        self._on_relaunch_all_cb = on_relaunch_all_cb  # passed through to GatewayRunner
         self._running  = False
         self._thread   = None
         self._bot_thread = None
@@ -202,6 +206,7 @@ class LogWatcher:
         self._cached_dirs     = []
         self._dirs_last_check = 0
         self._last_summary_date = None
+        self._last_update_check_date = None    # dedupe: date string of last update-awareness check
 
     def _dbg(self, msg):
         """Log msg only when debug mode is enabled in config."""
@@ -274,6 +279,8 @@ class LogWatcher:
                 'on_force_panel': self._bot_force_panel,
                 'on_launch':      self._on_launch_cb,
                 'on_launch_all':  self._on_launch_all_cb,
+                'on_relaunch':     self._on_relaunch_cb,
+                'on_relaunch_all': self._on_relaunch_all_cb,
                 'is_running':    lambda: self._running,
                 'get_cfg':       lambda: self.cfg,
             })
@@ -483,6 +490,177 @@ class LogWatcher:
             trigger = 'startup' if is_startup else 'scheduled'
             self._enqueue_screenshot(SS_PRIORITY_SCHEDULED, name, trigger)
 
+    # ── DreamBot / P2P Master AI update awareness ──────────────────────────────
+
+    _UPDATE_CHECK_URL  = 'https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest'
+    _UPDATE_STATE_FILE = Path.home() / '.p2p_monitor' / 'update_check_state.json'
+
+    @staticmethod
+    def _ver_tuple(v: str) -> tuple:
+        """Convert '2.143' or 'v2.143' to (2, 143) for numeric comparison."""
+        try:
+            return tuple(int(x) for x in v.lstrip('v').strip().split('.'))
+        except Exception:
+            return (0,)
+
+    @staticmethod
+    def _parse_dreambot_title(title: str) -> 'dict | None':
+        """
+        Parse a DreamBot window title.
+        Example: 'DreamBot 4.1.67 - AccountName - P2P Master AI v2.141 - proxy (NEW CLIENT AVAILABLE)'
+        Returns: {'script_version': '2.141', 'new_client': bool} or None if not a DreamBot title.
+        """
+        import re as _re
+        if 'dreambot' not in title.lower():
+            return None
+        m = _re.search(r'P2P Master AI v(\d+\.\d+)', title, _re.IGNORECASE)
+        if not m:
+            return None
+        return {
+            'script_version': m.group(1),
+            'new_client':     '(NEW CLIENT AVAILABLE)' in title.upper(),
+        }
+
+    def _fetch_latest_version(self) -> 'str | None':
+        """Fetch latest_version from Cloudflare Worker. Returns version string or None."""
+        import urllib.request, json as _json
+        try:
+            req = urllib.request.Request(
+                self._UPDATE_CHECK_URL,
+                headers={'User-Agent': 'P2PMonitor/update-check'},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            ver = data.get('latest_version', '').strip()
+            return ver if ver else None
+        except Exception as exc:
+            self._dbg(f'[update_check] fetch failed: {exc}')
+            return None
+
+    def _load_update_state(self) -> set:
+        try:
+            if self._UPDATE_STATE_FILE.exists():
+                return set(json.loads(self._UPDATE_STATE_FILE.read_text()))
+        except Exception:
+            pass
+        return set()
+
+    def _save_update_state(self, alerted: set) -> None:
+        try:
+            self._UPDATE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._UPDATE_STATE_FILE.write_text(json.dumps(sorted(alerted)))
+        except Exception:
+            pass
+
+    def _check_update_awareness(self, force: bool = False) -> None:
+        """
+        Run the update-awareness check.
+        - force=True: run unconditionally (startup call).
+        - force=False: only run once per day at 14:00 PC local time.
+        """
+        if not self.cfg.get('update_check_enabled', True):
+            return
+        if not force:
+            now   = datetime.now()
+            today = now.strftime('%Y-%m-%d')
+            if self._last_update_check_date == today:
+                return
+            if now.hour != 14:
+                return
+            self._last_update_check_date = today
+
+        # Read all DreamBot window titles using existing platform helpers
+        try:
+            from py.platform_ops import find_window_ids_by_name, get_window_title
+            wids   = find_window_ids_by_name('P2P Master AI')
+            titles = [get_window_title(w) for w in wids]
+        except Exception as exc:
+            self._dbg(f'[update_check] window read failed: {exc}')
+            return
+
+        parsed = [self._parse_dreambot_title(t) for t in titles]
+        parsed = [p for p in parsed if p]
+
+        if not parsed:
+            self.log('ℹ Update awareness: no DreamBot windows found with P2P Master AI — no alert.')
+            # Still allow NEW CLIENT AVAILABLE alerts if we somehow got titles
+            return
+
+        latest_ver = self._fetch_latest_version()  # None if unreachable
+
+        alerted = self._load_update_state()
+        new_alerts = []
+
+        for info in parsed:
+            local_ver  = info['script_version']
+            new_client = info['new_client']
+            key = f"{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
+
+            if key in alerted:
+                continue  # already sent this alert combination
+
+            script_outdated = (
+                latest_ver is not None
+                and self._ver_tuple(local_ver) < self._ver_tuple(latest_ver)
+            )
+
+            if not script_outdated and not new_client:
+                if latest_ver is None:
+                    self.log(f'⚠ Update awareness: local P2P Master AI v{local_ver}, latest SDN unavailable, DreamBot client update={new_client} — no script alert.')
+                else:
+                    self.log(f'✅ Update awareness: local P2P Master AI v{local_ver}, latest SDN v{latest_ver}, DreamBot client update={new_client} — current, no alert.')
+                continue
+
+            new_alerts.append((key, local_ver, latest_ver, new_client, script_outdated))
+
+        if not new_alerts:
+            return
+
+        # Dedupe: only the unique combinations not yet sent
+        url = self._router.resolve_url(None, 'default')
+        if not url:
+            self._dbg('[update_check] No default webhook — cannot send update alert.')
+            return
+
+        from py.discord import post_discord
+        for key, local_ver, latest_ver, new_client, script_outdated in new_alerts:
+            payload = self._build_update_alert_payload(local_ver, latest_ver,
+                                                        new_client, script_outdated)
+            ok, err = post_discord(url, payload)
+            if ok:
+                alerted.add(key)
+                self.log(f'🔔 Update alert sent: script={local_ver} latest={latest_ver} '
+                         f'new_client={new_client}')
+            else:
+                self.log(f'⚠ Update alert failed: {err}')
+
+        self._save_update_state(alerted)
+
+    def _build_update_alert_payload(self, local_ver: str, latest_ver: 'str | None',
+                                    new_client: bool, script_outdated: bool) -> dict:
+        """Build the Discord embed for an update alert."""
+        from py.discord import _embed
+        fields = []
+        lines  = []
+
+        if script_outdated and latest_ver:
+            lines.append(f'**P2P Master AI** update available.')
+            fields.append({'name': 'Local script',  'value': f'v{local_ver}',  'inline': True})
+            fields.append({'name': 'Latest script', 'value': f'v{latest_ver}', 'inline': True})
+            lines.append('Use `/relaunch <account>` to restart and load the latest script.')
+
+        if new_client:
+            lines.append('**DreamBot client** update available (`NEW CLIENT AVAILABLE` in title).')
+            lines.append('Relaunch DreamBot to apply the client update.')
+
+        title = '🔔 Update Available'
+        desc  = '\n'.join(lines)
+        color = 0xffaa00  # amber
+
+        return _embed(title, desc, fields, color)
+
+    # ── Daily summary ──────────────────────────────────────────────────────────
+
     def _check_daily_summary(self):
         if not self.cfg.get('summary_enabled'):
             return
@@ -666,6 +844,11 @@ class LogWatcher:
         last_periodic   = time.time()
         self.on_status()  # populate status tab immediately after startup catchup
 
+        # Startup update-awareness check — runs once in background, non-blocking
+        if self.cfg.get('update_check_enabled', True):
+            threading.Thread(target=self._check_update_awareness,
+                             kwargs={'force': True}, daemon=True).start()
+
         while self._running:
             current_dirs = self._get_log_dirs()
             for d in current_dirs:
@@ -678,6 +861,7 @@ class LogWatcher:
                 last_periodic = now
                 self._check_screenshots(ss_min)
                 self._check_daily_summary()
+                self._check_update_awareness()
                 self._prune_screenshots()
                 self._prune_dedupe()
                 self.on_status()
@@ -1541,6 +1725,8 @@ class LogWatcher:
 
         # ── Random delay ───────────────────────────────────────────────────────
         mins = random.randint(lo, hi)
+        if mins == 0:
+            return 10.0, 'in 10 seconds'   # safety floor: Windows needs time to fully close
         desc = f'in {mins}m'
         return mins * 60.0, desc
 
