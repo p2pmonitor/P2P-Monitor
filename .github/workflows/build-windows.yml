@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to upload assets to, e.g. v1.7.0. Leave blank for build-only."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -17,10 +22,10 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Checkout release tag or current ref
+      - name: Checkout release tag, manual tag, or current ref
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.release_tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -43,22 +48,36 @@ jobs:
           $zipName = "P2P-Monitor-$tag.zip"
           $exeName = "P2P Monitor.exe"
 
-          "VERSION=$version" >> $env:GITHUB_ENV
-          "TAG=$tag" >> $env:GITHUB_ENV
-          "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
-          "EXE_NAME=$exeName" >> $env:GITHUB_ENV
+          $eventName = "${{ github.event_name }}"
+          $releaseTag = ""
 
-          if ("${{ github.event_name }}" -eq "release") {
+          if ($eventName -eq "release") {
             $releaseTag = "${{ github.event.release.tag_name }}"
+          } elseif ("${{ github.event.inputs.release_tag }}" -ne "") {
+            $releaseTag = "${{ github.event.inputs.release_tag }}"
+          }
+
+          $uploadToRelease = "false"
+
+          if ($releaseTag -ne "") {
+            $uploadToRelease = "true"
+
             if ($releaseTag -ne $tag) {
               throw "Release tag '$releaseTag' does not match p2p_monitor.py VERSION '$tag'"
             }
           }
 
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+          "EXE_NAME=$exeName" >> $env:GITHUB_ENV
+          "UPLOAD_TO_RELEASE=$uploadToRelease" >> $env:GITHUB_ENV
+
           Write-Host "VERSION: $version"
           Write-Host "TAG: $tag"
           Write-Host "ZIP: $zipName"
           Write-Host "EXE: $exeName"
+          Write-Host "UPLOAD_TO_RELEASE: $uploadToRelease"
 
       - name: Install dependencies
         shell: pwsh
@@ -70,22 +89,32 @@ jobs:
       - name: Clean old build outputs
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force build, dist, release_stage, temp_release -ErrorAction SilentlyContinue
-          Remove-Item -Force $env:ZIP_NAME -ErrorAction SilentlyContinue
-          Remove-Item -Force $env:EXE_NAME -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force build, dist, release_stage, temp_release, artifacts -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path artifacts | Out-Null
 
       - name: Build Windows EXE
         shell: pwsh
         run: |
           pyinstaller p2p_monitor.spec
 
-          $builtExe = "dist/P2P Monitor.exe"
+          $exeFiles = Get-ChildItem -Path "dist" -Recurse -Filter "*.exe"
 
-          if (-not (Test-Path $builtExe)) {
-            throw "Build failed: $builtExe was not created"
+          if (-not $exeFiles -or $exeFiles.Count -lt 1) {
+            Write-Host "Contents of dist:"
+            Get-ChildItem -Path "dist" -Recurse | Format-List FullName
+            throw "Build failed: no .exe file was created anywhere under dist/"
           }
 
+          $builtExe = $exeFiles[0].FullName
+
+          Write-Host "Found built EXE: $builtExe"
+
+          Copy-Item $builtExe "artifacts/$env:EXE_NAME" -Force
           Copy-Item $builtExe $env:EXE_NAME -Force
+
+          if (-not (Test-Path "artifacts/$env:EXE_NAME")) {
+            throw "Failed to stage EXE artifact"
+          }
 
           if (-not (Test-Path $env:EXE_NAME)) {
             throw "Failed to copy built EXE to repo root"
@@ -126,8 +155,6 @@ jobs:
             Copy-Item $file $dest -Force
           }
 
-          # Extra files useful for fresh Linux/source installs and documentation.
-          # These do not have to be in update_manifest.txt.
           $extraFiles = @(
             "install.sh",
             "README.md",
@@ -150,43 +177,39 @@ jobs:
             }
           }
 
-          Remove-Item -Force $env:ZIP_NAME -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$stage/*" -DestinationPath "artifacts/$env:ZIP_NAME" -Force
 
-          Compress-Archive -Path "$stage/*" -DestinationPath $env:ZIP_NAME -Force
-
-          if (-not (Test-Path $env:ZIP_NAME)) {
-            throw "ZIP was not created: $env:ZIP_NAME"
+          if (-not (Test-Path "artifacts/$env:ZIP_NAME")) {
+            throw "ZIP was not created: artifacts/$env:ZIP_NAME"
           }
 
-          Write-Host "Created $env:ZIP_NAME"
+          Write-Host "Created artifacts/$env:ZIP_NAME"
 
       - name: Upload workflow artifact copy
         uses: actions/upload-artifact@v6
         with:
           name: P2P-Monitor-${{ env.TAG }}
-          path: |
-            ${{ env.ZIP_NAME }}
-            ${{ env.EXE_NAME }}
+          path: artifacts/*
 
       - name: Upload assets to GitHub release
-        if: github.event_name == 'release'
+        if: env.UPLOAD_TO_RELEASE == 'true'
         shell: pwsh
         run: |
           gh release upload $env:TAG `
-            $env:ZIP_NAME `
-            $env:EXE_NAME `
+            "artifacts/$env:ZIP_NAME" `
+            "artifacts/$env:EXE_NAME" `
             --repo ${{ github.repository }} `
             --clobber
 
       - name: Commit built EXE back to main
-        if: github.event_name == 'release'
+        if: env.UPLOAD_TO_RELEASE == 'true'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           New-Item -ItemType Directory -Force -Path temp_release | Out-Null
-          Copy-Item $env:EXE_NAME "temp_release/$env:EXE_NAME" -Force
+          Copy-Item "artifacts/$env:EXE_NAME" "temp_release/$env:EXE_NAME" -Force
 
           git fetch origin main
           git checkout -B main origin/main
@@ -214,11 +237,4 @@ jobs:
           echo "- Tag: $env:TAG" >> $env:GITHUB_STEP_SUMMARY
           echo "- ZIP: $env:ZIP_NAME" >> $env:GITHUB_STEP_SUMMARY
           echo "- EXE: $env:EXE_NAME" >> $env:GITHUB_STEP_SUMMARY
-
-          if ("${{ github.event_name }}" -eq "release") {
-            echo "- Release assets uploaded: yes" >> $env:GITHUB_STEP_SUMMARY
-            echo "- Main branch EXE committed: yes" >> $env:GITHUB_STEP_SUMMARY
-          } else {
-            echo "- Manual run only: release assets were not uploaded" >> $env:GITHUB_STEP_SUMMARY
-            echo "- Manual run only: main branch EXE was not committed" >> $env:GITHUB_STEP_SUMMARY
-          }
+          echo "- Upload to release: $env:UPLOAD_TO_RELEASE" >> $env:GITHUB_STEP_SUMMARY
