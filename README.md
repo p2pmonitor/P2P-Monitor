@@ -232,7 +232,7 @@ When any account needs an update, **one grouped Discord message** is sent to the
 | `P2P Master AI v2.143` + `NEW CLIENT AVAILABLE` | `2.143` | DreamBot client update needed |
 | `P2P Master AI v2.143` | `2.143` | No alert |
 
-Multiple accounts needing updates appear in the same message. The embed includes a recommendation to use `/relaunch <account>` after updating.
+Multiple accounts needing updates appear in the same message. The embed recommends `/relaunch <account>` to restart and load the latest version.
 
 ### Discord — webhook mode
 Webhook mode is the simplest setup if you do not want to create a Discord bot.

@@ -750,7 +750,7 @@ class LogWatcher:
                 'inline': False,
             })
 
-        desc  = 'Recommended: use `/relaunch <account>` after updating/installing as needed.'
+        desc  = 'Recommended: use `/relaunch <account>` to restart and load the latest version.'
         color = 0xffaa00  # amber
 
         return _embed('🔔 Update Available', desc, fields, color)

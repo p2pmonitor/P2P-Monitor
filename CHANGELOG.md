@@ -9,7 +9,7 @@
 - The update-awareness check now sends **one Discord message per check** instead of one per account/window
 - The grouped embed lists all accounts that need updates, split into up to three fields (only included when non-empty), ordered: `Both script + DreamBot update needed` → `P2P Master AI script update needed` → `DreamBot client update needed`
 - Each account appears as a bullet with specific version detail, e.g. `• Account: v2.141 → v2.143, DreamBot 4.1.67 shows NEW CLIENT AVAILABLE`
-- Embed description: `Recommended: use /relaunch <account> after updating/installing as needed.`
+- Embed description: `Recommended: use /relaunch <account> to restart and load the latest version.`
 - Account name, DreamBot client version, and script version are now all parsed from the window title (`DreamBot 4.1.67 - Account - P2P Master AI v2.141 - proxy`)
 - Dedupe key is now per-account and includes account name, DreamBot version, local script version, latest version, and NEW CLIENT AVAILABLE flag — any of these changing allows a new alert
 
