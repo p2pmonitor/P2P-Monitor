@@ -47,6 +47,7 @@ from py.platform_ops import (find_window_ids_by_name, capture_window_image,
                              raise_and_focus_window, minimize_window,
                              click_at, supports_paint_detection,
                              get_window_dpi_scale, get_window_title,
+                             find_windows_for_pid, get_pid_for_window,
                              PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET,
                              PAINT_BTN_CROP_W, PAINT_BTN_CROP_H)
 
@@ -341,7 +342,7 @@ class ScreenshotService:
             return
         if self._cb['is_muted'](account):
             return
-        self._cb['log'](f"📸 [{account}] Screenshot queued ({trigger})...")
+        # Successful screenshot flow is intentionally silent — no log here.
         with self._seq_lock:
             self._seq += 1
             seq = self._seq
@@ -349,7 +350,16 @@ class ScreenshotService:
             self._queue.put_nowait((priority, seq, account, trigger, True,
                                     url, payload, bot_channel_id, bot_token, restore_wid))
         except queue.Full:
-            self._cb['log'](f"  ⚠ [{account}] Screenshot queue full — request dropped ({trigger})")
+            self._dbg(f"  ⚠ [{account}] Screenshot queue full — request dropped ({trigger})")
+
+    def _dbg(self, msg: str) -> None:
+        """Log msg only when debug mode is enabled in config. Screenshot-only noise is always routed here."""
+        try:
+            cfg = self._cb['get_cfg']()
+            if cfg.get('debug', False):
+                self._cb['log'](f'[DEBUG] {msg}')
+        except Exception:
+            pass  # never let a logging helper crash the worker
 
     def prune(self):
         """Remove screenshot files older than 24 hours."""
@@ -383,18 +393,24 @@ class ScreenshotService:
                     restore_wid = get_focused_wid()
                 window_lock = self._cb.get('window_lock')
                 with window_lock if window_lock else _nullctx():
-                    path, err = take_screenshot(account, restore_wid=restore_wid, hide_paint=hide_paint)
+                    path, err = take_screenshot(
+                        account,
+                        restore_wid=restore_wid,
+                        hide_paint=hide_paint,
+                        get_pid_cb=self._cb.get('get_account_pid'),
+                        set_pid_cb=self._cb.get('set_account_pid'),
+                    )
                 if not path:
-                    self._cb['log'](f"  🚫 [{account}] Screenshot failed: {err}")
+                    self._dbg(f"  🚫 [{account}] Screenshot failed: {err}")
                 else:
                     try:
                         if bot_channel_id and bot_token:
                             bot_ready = self._cb.get('bot_ready')
                             if bot_ready and not bot_ready.is_set():
-                                self._cb['log'](f"  ⏳ [{account}] Waiting for gateway before screenshot...")
+                                self._dbg(f"  ⏳ [{account}] Waiting for gateway before screenshot...")
                                 bot_ready.wait(timeout=60)
                             if bot_ready and not bot_ready.is_set():
-                                self._cb['log'](f"  ⚠ [{account}] Gateway not ready after 60s — screenshot dropped")
+                                self._dbg(f"  ⚠ [{account}] Gateway not ready after 60s — screenshot dropped")
                             else:
                                 ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
                                 if not ok:
@@ -411,7 +427,7 @@ class ScreenshotService:
                                             return False, 'No monitor channel after recovery'
                                         ok = handler(err, None, account, _retry_bot)
                                     if not ok:
-                                        self._cb['log'](f"  🚫 [{account}] Bot screenshot failed: {err}")
+                                        self._dbg(f"  🚫 [{account}] Bot screenshot failed: {err}")
                         else:
                             if url_override:
                                 url = url_override
@@ -432,16 +448,16 @@ class ScreenshotService:
                                             return post_discord(new_url, retry_p, image_path=_img)
                                         ok = handler(e, url, account, _retry_wh)
                                     if not ok:
-                                        self._cb['log'](f"  🚫 [{account}] Screenshot failed: {e}")
+                                        self._dbg(f"  🚫 [{account}] Screenshot failed: {e}")
                             else:
-                                self._cb['log'](f"  ⚠ [{account}] No default webhook configured")
+                                self._dbg(f"  ⚠ [{account}] No default webhook configured for screenshot")
                     finally:
                         try:
                             os.unlink(path)
                         except Exception:
                             pass
             except Exception as ex:
-                self._cb['log'](f"  ⚠ Screenshot worker error: {ex}")
+                self._dbg(f"  ⚠ Screenshot worker error: {ex}")
             finally:
                 self._queue.task_done()
 
@@ -518,29 +534,52 @@ def snap_paint_reference(log=None):
             except Exception:
                 pass
 
-def take_screenshot(account_name, restore_wid=None, hide_paint=False):
+def take_screenshot(account_name, restore_wid=None, hide_paint=False,
+                    get_pid_cb=None, set_pid_cb=None):
     """
     Capture DreamBot window for account. Returns (path, err).
-    restore_wid: window to raise after capture (pass for batch sequences).
+    restore_wid:  window to raise after capture (pass for batch sequences).
+    get_pid_cb:   optional callable(account) → int|None — read cached PID
+    set_pid_cb:   optional callable(account, pid) — write resolved PID to cache
     """
     try:
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-        wids = find_window_ids_by_name(account_name)
-        if not wids:
-            return None, f"No window found for account: {account_name}"
+        target_wid = None
 
-        target_wid = wids[0]
+        # ── 1. PID-first path ─────────────────────────────────────────────────
+        # find_windows_for_pid already filters: visible + 'dreambot' in title.
+        # Account name match not required — trusted PID is the ownership signal.
+        pid = get_pid_cb(account_name) if get_pid_cb else None
+        if pid:
+            pid_wids = find_windows_for_pid(pid)
+            if pid_wids:
+                target_wid = pid_wids[0]
 
-        # ── Hard guard: verify the chosen HWND actually belongs to DreamBot ──
-        confirmed_title = get_window_title(target_wid)
-        title_lower = confirmed_title.lower()
-        if 'dreambot' not in title_lower or account_name.lower() not in title_lower:
-            return None, (
-                f"HWND {target_wid} title {confirmed_title!r} does not match "
-                f"expected DreamBot account {account_name!r} — capture aborted "
-                f"to prevent wrong-window screenshot"
-            )
+        # ── 2. Title fallback ─────────────────────────────────────────────────
+        if target_wid is None:
+            wids = find_window_ids_by_name(account_name)
+            if not wids:
+                return None, f"No window found for account: {account_name}"
+            candidate = wids[0]
+            # Hard guard: must contain both 'dreambot' AND account name
+            confirmed_title = get_window_title(candidate)
+            title_lower = confirmed_title.lower()
+            if 'dreambot' not in title_lower or account_name.lower() not in title_lower:
+                return None, (
+                    f"HWND {candidate} title {confirmed_title!r} does not match "
+                    f"expected DreamBot account {account_name!r} — capture aborted "
+                    f"to prevent wrong-window screenshot"
+                )
+            target_wid = candidate
+            # Save discovered PID so PID path is used on subsequent screenshots
+            if set_pid_cb:
+                try:
+                    resolved_pid = get_pid_for_window(target_wid)
+                    if resolved_pid:
+                        set_pid_cb(account_name, resolved_pid)
+                except Exception:
+                    pass
 
         ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', account_name)

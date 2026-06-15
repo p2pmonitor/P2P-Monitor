@@ -395,8 +395,9 @@ class SettingsTab:
         boolfield("Check for P2P Master AI / DreamBot client updates",
                   'update_check_enabled', default=True)
         tk.Label(inner,
-            text="  Reads DreamBot window titles daily at 2 PM and on startup. "
-                 "Sends a Discord alert when a script or client update is detected.",
+            text="  Reads DreamBot window titles on startup and every 6 hours "
+                 "(UTC 00:20, 06:20, 12:20, 18:20). "
+                 "Sends one grouped Discord alert when any account needs a script or client update.",
             font=app.MONO, bg=app.BG2, fg=app.FG2,
             wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 4))
 

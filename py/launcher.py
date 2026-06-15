@@ -98,6 +98,24 @@ def _get_pid(account: str) -> Optional[int]:
     return _load_pid_state().get(account)
 
 
+# ── Public PID cache API (used by watcher, screenshot callback) ────────────────
+
+def get_account_pid(account: str) -> Optional[int]:
+    """Return the cached PID for account, or None. Never raises."""
+    try:
+        return _get_pid(account)
+    except Exception:
+        return None
+
+
+def set_account_pid(account: str, pid: Optional[int]) -> None:
+    """Write (or clear) the cached PID for account. Never raises."""
+    try:
+        _set_pid(account, pid)
+    except Exception:
+        pass
+
+
 # ── Result type ────────────────────────────────────────────────────────────────
 
 @dataclass

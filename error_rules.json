@@ -149,6 +149,21 @@
       ]
     },
     {
+      "pattern": "^(?!.*\\(virtual\\))Resource check failed:\\s*(?:Many|\\d+)\\s*\\[(.+?)\\]",
+      "label": "Missing: {item}",
+      "flags": ["IGNORECASE"]
+    },
+    {
+      "pattern": "If this is a missing quest untradeable",
+      "label": "Missing quest untradeable / required quest item",
+      "flags": ["IGNORECASE"]
+    },
+    {
+      "pattern": "Something is missing - skipping withdraw",
+      "label": "Missing required item",
+      "flags": ["IGNORECASE"]
+    },
+    {
       "pattern": "QuestStep traversal failed",
       "label": "Quest step traversal failed (script could not determine next step)",
       "flags": [

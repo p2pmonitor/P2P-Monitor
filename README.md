@@ -48,10 +48,11 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 
 ### Update awareness
 - Checks the local DreamBot window title against the latest P2P Master AI version reported by the monitor’s cached update endpoint
-- Runs once when the monitor starts and once daily around **2:00 PM local PC time**
+- Runs once when the monitor starts, then every 6 hours at UTC 00:20, 06:20, 12:20, and 18:20 — aligned shortly after the Cloudflare Worker cache refresh
 - Detects when the local P2P Master AI script version is behind the SDN version
 - Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
-- Sends one deduped alert to the main monitor Discord channel and recommends `/relaunch` when useful
+- Sends **one grouped Discord alert** to the main monitor channel listing all accounts that need an update, organised by type (script only, client only, or both)
+- Per-account deduplication — same update state does not re-alert after restart; a new version resets the alert
 
 ### Discord notifications
 - Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, script lifecycle events, launcher events, update alerts, and daily summaries
@@ -208,27 +209,30 @@ If you set the minimum and maximum delay to `0`, the monitor treats that as abou
 ### Update awareness setup
 Update awareness is enabled by default.
 
-The monitor checks:
-
-- The local DreamBot window title, for example:
+The monitor reads local DreamBot window titles, for example:
 
 ```text
-DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - <proxy name>
+DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - <proxy name> (NEW CLIENT AVAILABLE)
 ```
 
-- The cached latest SDN script version from the monitor update endpoint
-- Whether the DreamBot title contains `(NEW CLIENT AVAILABLE)`
+It checks:
+- The account name and local P2P Master AI script version from the title
+- The DreamBot client version from the title
+- Whether `(NEW CLIENT AVAILABLE)` is present
+- The latest SDN script version fetched from the Cloudflare Worker cache
 
-Alerts go to the main monitor Discord channel, the same place daily summaries are posted.
+Checks run once at startup, then every 6 hours at UTC 00:20, 06:20, 12:20, 18:20.
 
-Example outcomes:
+When any account needs an update, **one grouped Discord message** is sent to the main monitor channel listing each account and what it needs:
 
-| Local title state | Latest SDN version | Alert |
+| Account state | Latest SDN version | Alert group |
 |---|---:|---|
-| `P2P Master AI v2.141` | `2.143` | Script update available; recommend `/relaunch` |
-| `P2P Master AI v2.141 (NEW CLIENT AVAILABLE)` | `2.143` | Script update and DreamBot client update available |
-| `P2P Master AI v2.143 (NEW CLIENT AVAILABLE)` | `2.143` | DreamBot client update available only |
+| `P2P Master AI v2.141` | `2.143` | P2P Master AI script update needed |
+| `P2P Master AI v2.141` + `NEW CLIENT AVAILABLE` | `2.143` | Both script + DreamBot update needed |
+| `P2P Master AI v2.143` + `NEW CLIENT AVAILABLE` | `2.143` | DreamBot client update needed |
 | `P2P Master AI v2.143` | `2.143` | No alert |
+
+Multiple accounts needing updates appear in the same message. The embed includes a recommendation to use `/relaunch <account>` after updating.
 
 ### Discord — webhook mode
 Webhook mode is the simplest setup if you do not want to create a Discord bot.

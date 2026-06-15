@@ -206,7 +206,7 @@ class LogWatcher:
         self._cached_dirs     = []
         self._dirs_last_check = 0
         self._last_summary_date = None
-        self._last_update_check_date = None    # dedupe: date string of last update-awareness check
+        self._last_update_check_slot = None    # dedupe: UTC slot string 'YYYY-MM-DD-HH' of last update-awareness check
 
     def _dbg(self, msg):
         """Log msg only when debug mode is enabled in config."""
@@ -260,6 +260,8 @@ class LogWatcher:
             'window_lock':      self._window_lock,
             'bot_ready':        self._bot_ready,
             'handle_post_error': self._router._handle_post_error,
+            'get_account_pid':  self._get_account_pid_cb,
+            'set_account_pid':  self._set_account_pid_cb,
         })
         self._ss_svc.start()
         self._thread  = threading.Thread(target=self._run, daemon=True)
@@ -440,6 +442,43 @@ class LogWatcher:
     def _save_cfg(self):
         save_config(self.cfg)
 
+    def _get_account_pid_cb(self, account: str):
+        """Callback: return cached launcher PID for account, or None."""
+        try:
+            from py.launcher import get_account_pid
+            return get_account_pid(account)
+        except Exception:
+            return None
+
+    def _set_account_pid_cb(self, account: str, pid) -> None:
+        """Callback: save (or clear) launcher PID for account. Never raises."""
+        try:
+            from py.launcher import set_account_pid
+            set_account_pid(account, pid)
+        except Exception:
+            pass
+
+    def _startup_cache_pid(self, account: str) -> None:
+        """
+        Background daemon: discover the DreamBot window for account and cache
+        its PID via the launcher state file. Called once per active account at
+        startup so PID-first screenshot lookup works from the first screenshot.
+        Fails completely silently — never affects startup or monitor behaviour.
+        """
+        try:
+            from py.launcher import discover_account_process, set_account_pid
+            result = discover_account_process(account)
+            if result and result.get('pid'):
+                set_account_pid(account, result['pid'])
+                self._dbg(f'[pid_cache] [{account}] startup PID cached: {result["pid"]}')
+            else:
+                self._dbg(f'[pid_cache] [{account}] startup PID discovery: no result')
+        except ValueError:
+            # Multiple windows matched — ambiguous, do not cache
+            self._dbg(f'[pid_cache] [{account}] startup PID discovery: ambiguous windows')
+        except Exception as e:
+            self._dbg(f'[pid_cache] [{account}] startup PID discovery failed: {e}')
+
     def trigger_screenshot(self, account):
         self._do_screenshot(account, 'on-demand')
 
@@ -508,17 +547,27 @@ class LogWatcher:
         """
         Parse a DreamBot window title.
         Example: 'DreamBot 4.1.67 - AccountName - P2P Master AI v2.141 - proxy (NEW CLIENT AVAILABLE)'
-        Returns: {'script_version': '2.141', 'new_client': bool} or None if not a DreamBot title.
+        Returns dict with keys: account, dreambot_version, script_version, new_client
+        Returns None if not a recognisable DreamBot/P2P Master AI title.
         """
         import re as _re
         if 'dreambot' not in title.lower():
             return None
-        m = _re.search(r'P2P Master AI v(\d+\.\d+)', title, _re.IGNORECASE)
-        if not m:
+        m_script = _re.search(r'P2P Master AI v(\d+\.\d+)', title, _re.IGNORECASE)
+        if not m_script:
             return None
+        # DreamBot version: first token after 'DreamBot '
+        m_db = _re.match(r'DreamBot\s+([\d.]+)', title, _re.IGNORECASE)
+        db_ver = m_db.group(1) if m_db else ''
+        # Account name: second dash-separated segment (strip spaces)
+        parts = [p.strip() for p in title.split(' - ')]
+        # parts[0] = 'DreamBot 4.1.67', parts[1] = account, parts[2] = 'P2P Master AI ...'
+        account = parts[1] if len(parts) >= 3 else ''
         return {
-            'script_version': m.group(1),
-            'new_client':     '(NEW CLIENT AVAILABLE)' in title.upper(),
+            'account':          account,
+            'dreambot_version': db_ver,
+            'script_version':   m_script.group(1),
+            'new_client':       '(NEW CLIENT AVAILABLE)' in title.upper(),
         }
 
     def _fetch_latest_version(self) -> 'str | None':
@@ -556,18 +605,21 @@ class LogWatcher:
         """
         Run the update-awareness check.
         - force=True: run unconditionally (startup call).
-        - force=False: only run once per day at 14:00 PC local time.
+        - force=False: run once per UTC 6-hour slot at minute >= 20
+                       (slots: 00:20, 06:20, 12:20, 18:20) aligned shortly
+                       after the Cloudflare Worker refresh at :17.
         """
         if not self.cfg.get('update_check_enabled', True):
             return
         if not force:
-            now   = datetime.now()
-            today = now.strftime('%Y-%m-%d')
-            if self._last_update_check_date == today:
+            from datetime import timezone
+            utc = datetime.now(timezone.utc)
+            if utc.hour not in (0, 6, 12, 18) or utc.minute < 20:
                 return
-            if now.hour != 14:
+            slot = utc.strftime('%Y-%m-%d-%H')
+            if self._last_update_check_slot == slot:
                 return
-            self._last_update_check_date = today
+            self._last_update_check_slot = slot
 
         # Read all DreamBot window titles using existing platform helpers
         try:
@@ -582,82 +634,126 @@ class LogWatcher:
         parsed = [p for p in parsed if p]
 
         if not parsed:
-            self.log('ℹ Update awareness: no DreamBot windows found with P2P Master AI — no alert.')
-            # Still allow NEW CLIENT AVAILABLE alerts if we somehow got titles
+            self._dbg('[update_check] No DreamBot windows found with P2P Master AI — no alert.')
             return
 
         latest_ver = self._fetch_latest_version()  # None if unreachable
 
-        alerted = self._load_update_state()
-        new_alerts = []
+        alerted     = self._load_update_state()
+        need_both   = []   # (account, db_ver, local_ver) — script outdated AND new client
+        need_script = []   # (account, db_ver, local_ver) — script outdated only
+        need_client = []   # (account, db_ver)            — new client only
+        new_keys    = []   # keys to add to alerted set on success
 
         for info in parsed:
+            account    = info['account']
+            db_ver     = info['dreambot_version']
             local_ver  = info['script_version']
             new_client = info['new_client']
-            key = f"{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
-
-            if key in alerted:
-                continue  # already sent this alert combination
 
             script_outdated = (
                 latest_ver is not None
                 and self._ver_tuple(local_ver) < self._ver_tuple(latest_ver)
             )
 
+            # Per-account dedupe key — rich enough to allow future alerts on changed state
+            key = f"{account}|{db_ver}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
+
             if not script_outdated and not new_client:
-                if latest_ver is None:
-                    self.log(f'⚠ Update awareness: local P2P Master AI v{local_ver}, latest SDN unavailable, DreamBot client update={new_client} — no script alert.')
-                else:
-                    self.log(f'✅ Update awareness: local P2P Master AI v{local_ver}, latest SDN v{latest_ver}, DreamBot client update={new_client} — current, no alert.')
+                self._dbg(
+                    f'[update_check] {account or "?"}: script v{local_ver} current '
+                    f'(latest {latest_ver}), no client banner — no alert.'
+                )
                 continue
 
-            new_alerts.append((key, local_ver, latest_ver, new_client, script_outdated))
+            if key in alerted:
+                self._dbg(f'[update_check] {account or "?"}: already alerted for key {key}')
+                continue
 
-        if not new_alerts:
-            return
+            new_keys.append(key)
+            if script_outdated and new_client:
+                need_both.append((account, db_ver, local_ver))
+            elif script_outdated:
+                need_script.append((account, db_ver, local_ver))
+            else:
+                need_client.append((account, db_ver))
 
-        # Dedupe: only the unique combinations not yet sent
+        if not need_both and not need_script and not need_client:
+            return  # nothing new to alert
+
         url = self._router.resolve_url(None, 'default')
         if not url:
             self._dbg('[update_check] No default webhook — cannot send update alert.')
             return
 
         from py.discord import post_discord
-        for key, local_ver, latest_ver, new_client, script_outdated in new_alerts:
-            payload = self._build_update_alert_payload(local_ver, latest_ver,
-                                                        new_client, script_outdated)
-            ok, err = post_discord(url, payload)
-            if ok:
+        payload = self._build_update_alert_payload(
+            need_both, need_script, need_client, latest_ver)
+        ok, err = post_discord(url, payload)
+        if ok:
+            for key in new_keys:
                 alerted.add(key)
-                self.log(f'🔔 Update alert sent: script={local_ver} latest={latest_ver} '
-                         f'new_client={new_client}')
-            else:
-                self.log(f'⚠ Update alert failed: {err}')
+            self._save_update_state(alerted)
+            self.log(f'🔔 Update alert sent — '
+                     f'both={len(need_both)} script={len(need_script)} client={len(need_client)}')
+        else:
+            self.log(f'⚠ Update alert failed: {err}')
 
-        self._save_update_state(alerted)
-
-    def _build_update_alert_payload(self, local_ver: str, latest_ver: 'str | None',
-                                    new_client: bool, script_outdated: bool) -> dict:
-        """Build the Discord embed for an update alert."""
+    def _build_update_alert_payload(self,
+                                    need_both:   list,
+                                    need_script: list,
+                                    need_client: list,
+                                    latest_ver: 'str | None') -> dict:
+        """
+        Build a single grouped Discord embed listing all accounts by update category.
+        Fields (only included if non-empty):
+          1. Both script + DreamBot update needed
+          2. P2P Master AI script update needed
+          3. DreamBot client update needed
+        """
         from py.discord import _embed
+
         fields = []
-        lines  = []
 
-        if script_outdated and latest_ver:
-            lines.append(f'**P2P Master AI** update available.')
-            fields.append({'name': 'Local script',  'value': f'v{local_ver}',  'inline': True})
-            fields.append({'name': 'Latest script', 'value': f'v{latest_ver}', 'inline': True})
-            lines.append('Use `/relaunch <account>` to restart and load the latest script.')
+        def _bullet_lines(items):
+            return '\n'.join(items)
 
-        if new_client:
-            lines.append('**DreamBot client** update available (`NEW CLIENT AVAILABLE` in title).')
-            lines.append('Relaunch DreamBot to apply the client update.')
+        if need_both:
+            lines = []
+            for account, db_ver, local_ver in need_both:
+                db_tag = f'DreamBot {db_ver} shows NEW CLIENT AVAILABLE' if db_ver else 'NEW CLIENT AVAILABLE'
+                lines.append(f'• {account}: script v{local_ver} → v{latest_ver}, {db_tag}')
+            fields.append({
+                'name':   'Both script + DreamBot update needed',
+                'value':  _bullet_lines(lines),
+                'inline': False,
+            })
 
-        title = '🔔 Update Available'
-        desc  = '\n'.join(lines)
+        if need_script:
+            lines = []
+            for account, db_ver, local_ver in need_script:
+                lines.append(f'• {account}: v{local_ver} → v{latest_ver}')
+            fields.append({
+                'name':   'P2P Master AI script update needed',
+                'value':  _bullet_lines(lines),
+                'inline': False,
+            })
+
+        if need_client:
+            lines = []
+            for account, db_ver in need_client:
+                db_tag = f'DreamBot {db_ver} shows NEW CLIENT AVAILABLE' if db_ver else 'NEW CLIENT AVAILABLE'
+                lines.append(f'• {account}: {db_tag}')
+            fields.append({
+                'name':   'DreamBot client update needed',
+                'value':  _bullet_lines(lines),
+                'inline': False,
+            })
+
+        desc  = 'Recommended: use `/relaunch <account>` after updating/installing as needed.'
         color = 0xffaa00  # amber
 
-        return _embed(title, desc, fields, color)
+        return _embed('🔔 Update Available', desc, fields, color)
 
     # ── Daily summary ──────────────────────────────────────────────────────────
 
@@ -817,6 +913,16 @@ class LogWatcher:
             folder_active = self._is_folder_active(d)
             if active and folder_active:
                 self._startup_catchup(str(active))
+                # Background: discover and cache PID for this account so PID-first
+                # screenshot lookup works immediately, even for clients not launched
+                # by the monitor this session.
+                _acct = os.path.basename(d)
+                threading.Thread(
+                    target=self._startup_cache_pid,
+                    args=(_acct,),
+                    daemon=True,
+                    name=f'pid-cache-{_acct}',
+                ).start()
                 # Pin active file to EOF so poll loop only sees new content from here
                 try:
                     with self._offsets_lock:

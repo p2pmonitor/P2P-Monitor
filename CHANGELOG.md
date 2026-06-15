@@ -1,5 +1,52 @@
 # Changelog
 
+## v1.8.0
+### Stable release — Update Awareness, Screenshot Reliability, PID-First Window Lookup
+
+---
+
+**Update awareness: grouped Discord alert**
+- The update-awareness check now sends **one Discord message per check** instead of one per account/window
+- The grouped embed lists all accounts that need updates, split into up to three fields (only included when non-empty), ordered: `Both script + DreamBot update needed` → `P2P Master AI script update needed` → `DreamBot client update needed`
+- Each account appears as a bullet with specific version detail, e.g. `• Account: v2.141 → v2.143, DreamBot 4.1.67 shows NEW CLIENT AVAILABLE`
+- Embed description: `Recommended: use /relaunch <account> after updating/installing as needed.`
+- Account name, DreamBot client version, and script version are now all parsed from the window title (`DreamBot 4.1.67 - Account - P2P Master AI v2.141 - proxy`)
+- Dedupe key is now per-account and includes account name, DreamBot version, local script version, latest version, and NEW CLIENT AVAILABLE flag — any of these changing allows a new alert
+
+**Update awareness: schedule changed to UTC 6-hour slots**
+- Previously: startup + daily at 2:00 PM PC local time
+- Now: startup + every 6 hours at minute 20 UTC (00:20, 06:20, 12:20, 18:20), aligned shortly after the Cloudflare Worker cache refresh at :17
+- Only one check fires per UTC slot even if the monitor is running across the minute boundary
+- "No update found" and "no DreamBot windows found" log lines are now debug-only — main log only shows alerts and failures
+
+**Screenshot logging: all screenshot-flow noise removed**
+- All successful screenshot log messages are now fully silent in both normal and debug mode: no "Screenshot queued", no "Screenshot captured", no "Screenshot sent"
+- All screenshot failure messages are now debug-only: "Screenshot failed", "Bot screenshot failed", "Gateway not ready — screenshot dropped", "No default webhook configured for screenshot", "Screenshot worker error", "Screenshot queue full"
+- `ScreenshotService` now has an internal `_dbg()` helper that gates all screenshot messages behind the debug flag
+- No change to screenshot capture, paint hide/show, Discord upload, or queue behaviour
+
+**PID-first screenshot window lookup**
+- `take_screenshot` now resolves the DreamBot window by PID first, falling back to title-based lookup only if needed
+- **PID path:** reads cached PID from `launcher_state.json` via callback → `find_windows_for_pid(pid)` → accepts first visible window with `DreamBot` in title (account name not required — the PID is the ownership signal)
+- **Title fallback:** existing `find_window_ids_by_name(account)` logic unchanged, still requires both `DreamBot` and account name in title to prevent wrong-window captures; on success, resolves and caches the window's PID for future screenshots
+- New `find_windows_for_pid(pid)` platform helper in `platform_ops.py`: Linux via `xdotool search --pid`, Windows via `EnumWindows + GetWindowThreadProcessId`; filters visible + DreamBot title; never raises
+- New public `get_account_pid(account)` / `set_account_pid(account, pid)` wrappers in `launcher.py` expose the existing `launcher_state.json` PID cache to the rest of the app
+- `ScreenshotService` wired with `get_account_pid` and `set_account_pid` callbacks from watcher; `take_screenshot` receives them as optional keyword args
+- **Startup PID cache population:** when `_startup_catchup` confirms an account is active, a short daemon thread calls `discover_account_process(account)` and saves the result — so PID-first lookup works on the very first screenshot of the session, even for clients not launched by the monitor
+
+**Files changed:**
+- `p2p_monitor.py` — version bump to 1.8.0; `inferno_rules.start_background_fetch()` wired at startup
+- `py/watcher.py` — UTC slot scheduler; grouped alert; title parser extended with account + DB version; no-update log to debug; `_get_account_pid_cb` / `_set_account_pid_cb` / `_startup_cache_pid` methods; PID callbacks wired into `ScreenshotService`; startup PID daemon thread per active account
+- `py/screenshot.py` — `take_screenshot` PID-first window resolution with title fallback and PID save-back; all screenshot log calls converted to `_dbg()`; new `_dbg()` helper on `ScreenshotService`; `find_windows_for_pid` and `get_pid_for_window` added to imports
+- `py/launcher.py` — public `get_account_pid()` / `set_account_pid()` wrappers
+- `py/platform_ops.py` — `find_windows_for_pid(pid)` with Linux (`xdotool`) and Windows (`EnumWindows`) implementations
+- `ui/settings_tab.py` — update awareness label updated to reflect UTC 6-hour schedule
+- `CHANGELOG.md`, `README.md` — updated for stable release
+- `tests/test_update_awareness.py` — 27 tests: update awareness schedule, grouped alert, dedupe, screenshot silence/debug
+- `tests/test_pid_screenshot.py` — 19 tests: launcher public API, `find_windows_for_pid`, `take_screenshot` PID-first/fallback/save-back, watcher PID callbacks
+
+---
+
 ## v1.8.0-beta.3
 ### Local DreamBot Update Awareness + `/relaunch` command
 

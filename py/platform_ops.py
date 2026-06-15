@@ -1198,6 +1198,106 @@ def is_pid_running(pid: int) -> bool:
             return False
 
 
+def find_windows_for_pid(pid: int) -> list:
+    """
+    Return visible window IDs owned by the given PID whose title contains 'DreamBot'.
+
+    Linux:   xdotool search --pid <pid>, then filter by title via get_window_title()
+    Windows: EnumWindows + GetWindowThreadProcessId, filter visible + title
+
+    Returns list[str] of window IDs. Never raises. Empty list on any failure.
+    """
+    if not pid:
+        return []
+    try:
+        if sys.platform.startswith('linux'):
+            return _find_windows_for_pid_linux(pid)
+        elif sys.platform == 'win32':
+            return _find_windows_for_pid_windows(pid)
+        else:
+            return _find_windows_for_pid_linux(pid)
+    except Exception:
+        return []
+
+
+def _find_windows_for_pid_linux(pid: int) -> list:
+    try:
+        result = subprocess.run(
+            ['xdotool', 'search', '--pid', str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+        wids = [w for w in result.stdout.strip().split() if w]
+        if not wids:
+            return []
+        # Filter: visible + title contains 'dreambot'
+        matches = []
+        for wid in wids:
+            try:
+                title = get_window_title(wid) or ''
+                if 'dreambot' in title.lower():
+                    matches.append(wid)
+            except Exception:
+                pass
+        return matches
+    except Exception:
+        return []
+
+
+def _find_windows_for_pid_windows(pid: int) -> list:
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    try:
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.EnumWindows.argtypes = [
+            ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM),
+            wintypes.LPARAM,
+        ]
+        user32.EnumWindows.restype           = ctypes.c_bool
+        user32.IsWindowVisible.argtypes      = [wintypes.HWND]
+        user32.IsWindowVisible.restype       = ctypes.c_bool
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype  = ctypes.c_int
+        user32.GetWindowTextW.argtypes       = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype        = ctypes.c_int
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+
+        matches = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def _enum_proc(hwnd, _lparam):
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                win_pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                if win_pid.value != pid:
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = (buf.value or '').lower()
+                if 'dreambot' in title:
+                    matches.append(str(int(hwnd)))
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(_enum_proc, 0)
+        return matches
+    except Exception:
+        return []
+
+
 def get_process_cmdline(pid: int) -> 'Optional[list]':
     """
     Return the command-line argument list for the process with the given PID.
