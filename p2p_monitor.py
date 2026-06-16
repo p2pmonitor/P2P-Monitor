@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.8.1
+P2P Monitor v1.8.2
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -52,7 +52,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.8.1"
+VERSION      = "1.8.2"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -104,6 +104,8 @@ DEFAULT_CFG = {
     "auto_restart_game_update_window_only": True,
     "auto_restart_respect_breaks": True,
     "update_check_enabled": True,
+    "update_check_interval_hours": 6,
+    "update_check_interval_minutes": 0,
     "hist_col_widths": {},
     "ui_section_discord_open": True,
     "ui_section_notifications_open": True,

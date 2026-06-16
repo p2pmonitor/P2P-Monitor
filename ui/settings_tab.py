@@ -404,11 +404,29 @@ class SettingsTab:
         boolfield("Check for P2P Master AI / DreamBot client updates",
                   'update_check_enabled', default=True)
         tk.Label(inner,
-            text="  Reads DreamBot window titles on startup and every 6 hours "
-                 "(UTC 00:20, 06:20, 12:20, 18:20). "
+            text="  Checks DreamBot SDN for P2P Master AI updates. "
+                 "Falls back silently to the backup Worker if SDN is unavailable. "
                  "Sends one grouped Discord alert when any account needs a script or client update.",
             font=app.MONO, bg=app.BG2, fg=app.FG2,
             wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 4))
+
+        # Check interval HH:MM
+        intv_row = tk.Frame(inner, bg=app.BG2); intv_row.pack(fill='x', padx=16, pady=2)
+        tk.Label(intv_row, text="Check interval:", font=app.MONO,
+                 bg=app.BG2, fg=app.FG2).pack(side='left')
+        intv_h_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_hours', 6)))
+        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=app.MONO,
+                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(
+                   side='left', padx=(8, 2))
+        tk.Label(intv_row, text="h", font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+        intv_m_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_minutes', 0)))
+        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=app.MONO,
+                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(
+                   side='left', padx=(6, 2))
+        tk.Label(intv_row, text="m  (min: 1m  |  default: 6h 0m)", font=app.MONO,
+                 bg=app.BG2, fg=app.FG2).pack(side='left', padx=(2, 0))
+        self._vars['update_check_interval_hours']   = intv_h_var
+        self._vars['update_check_interval_minutes'] = intv_m_var
 
         ping_upd_row = tk.Frame(inner, bg=app.BG2); ping_upd_row.pack(fill='x', padx=16, pady=2)
         ping_upd_var = tk.BooleanVar(value=bool(app.cfg.get('ping_update', True)))
@@ -521,6 +539,15 @@ class SettingsTab:
                          'bot_channel_id', 'bot_poll_interval',
                          '_slash_commands_deleted'):
             app.cfg.pop(dead_key, None)
+        # Clamp update-check interval: minimum 1 minute, maximum 24 hours
+        h = int(app.cfg.get('update_check_interval_hours', 6))
+        m = int(app.cfg.get('update_check_interval_minutes', 0))
+        total = h * 60 + m
+        total = max(1, min(total, 24 * 60))
+        app.cfg['update_check_interval_hours']   = total // 60
+        app.cfg['update_check_interval_minutes'] = total % 60
+        self._vars['update_check_interval_hours'].set(app.cfg['update_check_interval_hours'])
+        self._vars['update_check_interval_minutes'].set(app.cfg['update_check_interval_minutes'])
         try:
             save_config(app.cfg)
         except Exception:

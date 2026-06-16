@@ -211,7 +211,7 @@ class LogWatcher:
         self._cached_dirs     = []
         self._dirs_last_check = 0
         self._last_summary_date = None
-        self._last_update_check_slot = None    # dedupe: UTC slot string 'YYYY-MM-DD-HH' of last update-awareness check
+        self._last_update_check_slot = 0.0    # epoch float: time of last update-awareness check
 
     def _dbg(self, msg):
         """Log msg only when debug mode is enabled in config."""
@@ -629,17 +629,49 @@ class LogWatcher:
 
     # ── DreamBot / P2P Master AI update awareness ──────────────────────────────
 
-    _UPDATE_CHECK_URL  = 'https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest'
+    _SDN_URL           = 'https://sdn.dreambot.org/scripts/all'
+    _WORKER_URL        = 'https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest'
+    _SDN_SCRIPT_NAME   = 'P2P Master AI'
+    _SDN_SCRIPT_ID     = 1500
+    _SDN_AUTHOR        = 'Aeglen'
     _UPDATE_STATE_FILE         = Path.home() / '.p2p_monitor' / 'update_check_state.json'
     _AUTO_RELAUNCH_STATE_FILE  = Path.home() / '.p2p_monitor' / 'update_relaunch_state.json'
 
     @staticmethod
-    def _ver_tuple(v: str) -> tuple:
-        """Convert '2.143' or 'v2.143' to (2, 143) for numeric comparison."""
+    def _sdn_ver_tuple(v) -> tuple:
+        """
+        Convert an SDN version (number or string) to a comparable tuple using
+        Decimal arithmetic so that trailing-zero versions are handled correctly.
+
+        SDN returns JSON numbers: 2.15 means 2.150 (not 2.15 as a simple float).
+        We convert by treating the fractional part as an integer.
+
+        Examples:
+          2.144  → (2, 144)
+          2.15   → (2, 150)   — newer than (2, 149)
+          2.9    → (2, 900)   — very unlikely, but safe
+        """
         try:
-            return tuple(int(x) for x in v.lstrip('v').strip().split('.'))
+            from decimal import Decimal, ROUND_DOWN
+            d = Decimal(str(v)).normalize()
+            parts = str(d).split('.')
+            major = int(parts[0])
+            if len(parts) == 1:
+                return (major, 0)
+            frac_str = parts[1]
+            # Pad to 3 digits so 2.15 → 150, 2.144 → 144
+            minor = int(frac_str.ljust(3, '0')[:3])
+            return (major, minor)
         except Exception:
-            return (0,)
+            return (0, 0)
+
+    @staticmethod
+    def _ver_tuple(v: str) -> tuple:
+        """
+        Convert a local version string (from DreamBot title) to a comparable tuple.
+        '2.143', 'v2.143' → uses _sdn_ver_tuple for consistent comparison.
+        """
+        return LogWatcher._sdn_ver_tuple(v.lstrip('v').strip())
 
     @staticmethod
     def _parse_dreambot_title(title: str) -> 'dict | None':
@@ -670,19 +702,72 @@ class LogWatcher:
         }
 
     def _fetch_latest_version(self) -> 'str | None':
-        """Fetch latest_version from Cloudflare Worker. Returns version string or None."""
+        """
+        Fetch latest P2P Master AI version.
+        Primary:  DreamBot SDN API (sdn.dreambot.org/scripts/all)
+        Fallback: Cloudflare Worker cache
+        Returns version string (e.g. '2.144') or None on total failure.
+        """
+        ver = self._fetch_from_sdn()
+        if ver is not None:
+            return ver
+        self._dbg('[update_check] SDN unavailable — trying Worker fallback')
+        return self._fetch_from_worker()
+
+    def _fetch_from_sdn(self) -> 'str | None':
+        """Fetch and parse the DreamBot SDN API. Returns version string or None."""
         import urllib.request, json as _json
         try:
             req = urllib.request.Request(
-                self._UPDATE_CHECK_URL,
+                self._SDN_URL,
+                headers={'User-Agent': 'P2PMonitor/update-check'},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode())
+            scripts = data.get('scripts', [])
+            if not isinstance(scripts, list):
+                self._dbg('[update_check] SDN response missing scripts list')
+                return None
+            for script in scripts:
+                if script.get('name') != self._SDN_SCRIPT_NAME:
+                    continue
+                # Optional safety checks
+                if script.get('id') != self._SDN_SCRIPT_ID:
+                    self._dbg(f'[update_check] SDN: unexpected script id {script.get("id")}')
+                    continue
+                if script.get('author') != self._SDN_AUTHOR:
+                    self._dbg(f'[update_check] SDN: unexpected author {script.get("author")}')
+                    continue
+                ver = script.get('version')
+                if ver is None:
+                    self._dbg('[update_check] SDN: script has no version field')
+                    return None
+                ver_str = str(ver).strip()
+                self._dbg(f'[update_check] SDN: found {self._SDN_SCRIPT_NAME} '
+                          f'v{ver_str} (compiled {script.get("last_compile", "?")})')
+                return ver_str
+            self._dbg(f'[update_check] SDN: {self._SDN_SCRIPT_NAME!r} not found in scripts list')
+            return None
+        except Exception as exc:
+            self._dbg(f'[update_check] SDN fetch failed: {exc}')
+            return None
+
+    def _fetch_from_worker(self) -> 'str | None':
+        """Fetch latest_version from Cloudflare Worker cache. Returns version string or None."""
+        import urllib.request, json as _json
+        try:
+            req = urllib.request.Request(
+                self._WORKER_URL,
                 headers={'User-Agent': 'P2PMonitor/update-check'},
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = _json.loads(resp.read().decode())
             ver = data.get('latest_version', '').strip()
+            if ver:
+                self._dbg(f'[update_check] Worker fallback: v{ver}')
             return ver if ver else None
         except Exception as exc:
-            self._dbg(f'[update_check] fetch failed: {exc}')
+            self._dbg(f'[update_check] Worker fallback failed: {exc}')
             return None
 
     def _load_update_state(self) -> set:
@@ -718,22 +803,21 @@ class LogWatcher:
     def _check_update_awareness(self, force: bool = False) -> None:
         """
         Run the update-awareness check.
-        - force=True: run unconditionally (startup call).
-        - force=False: run once per UTC 6-hour slot at minute >= 20
-                       (slots: 00:20, 06:20, 12:20, 18:20) aligned shortly
-                       after the Cloudflare Worker refresh at :17.
+        - force=True:  run unconditionally (startup call).
+        - force=False: run only if the configured interval has elapsed since last check.
+                       Interval is read from cfg: update_check_interval_hours +
+                       update_check_interval_minutes (default 6h 0m, minimum 1m).
         """
         if not self.cfg.get('update_check_enabled', True):
             return
         if not force:
-            from datetime import timezone
-            utc = datetime.now(timezone.utc)
-            if utc.hour not in (0, 6, 12, 18) or utc.minute < 20:
+            hours   = int(self.cfg.get('update_check_interval_hours', 6))
+            minutes = int(self.cfg.get('update_check_interval_minutes', 0))
+            interval_secs = max(60, hours * 3600 + minutes * 60)
+            now = time.time()
+            if now - self._last_update_check_slot < interval_secs:
                 return
-            slot = utc.strftime('%Y-%m-%d-%H')
-            if self._last_update_check_slot == slot:
-                return
-            self._last_update_check_slot = slot
+            self._last_update_check_slot = now
 
         # Read all DreamBot window titles using existing platform helpers
         try:

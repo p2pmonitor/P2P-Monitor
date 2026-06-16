@@ -47,12 +47,13 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Pending auto-restart is cancelled if the script starts again before the timer fires
 
 ### Update awareness
-- Checks the local DreamBot window title against the latest P2P Master AI version reported by the monitor’s cached update endpoint
-- Runs once when the monitor starts, then every 6 hours at UTC 00:20, 06:20, 12:20, and 18:20 — aligned shortly after the Cloudflare Worker cache refresh
-- Detects when the local P2P Master AI script version is behind the SDN version
+- Checks the DreamBot SDN API (`sdn.dreambot.org/scripts/all`) for the latest P2P Master AI version — falls back silently to the Cloudflare Worker cache if SDN is unavailable
+- Runs once when the monitor starts, then on a configurable interval (default 6 hours, minimum 1 minute) — set in Settings → Update Awareness
+- Detects when the local P2P Master AI script version is behind the SDN version; handles trailing-zero versions correctly (SDN `2.15` = 2.150, newer than 2.149)
 - Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
 - Sends **one grouped Discord alert** to the main monitor channel listing all accounts that need an update, organised by type (script only, client only, or both)
 - Per-account deduplication — same update state does not re-alert after restart; a new version resets the alert
+- Thanks to **@Ziggy** for finding the DreamBot SDN API endpoint
 
 ### Discord notifications
 - Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, script lifecycle events, launcher events, update alerts, and daily summaries
@@ -228,7 +229,9 @@ It checks:
 - Whether `(NEW CLIENT AVAILABLE)` is present
 - The latest SDN script version fetched from the Cloudflare Worker cache
 
-Checks run once at startup, then every 6 hours at UTC 00:20, 06:20, 12:20, 18:20.
+Checks run once at startup, then on the configured interval (default 6h, minimum 1m).
+
+Primary source is the DreamBot SDN API; the Cloudflare Worker is a silent fallback.
 
 When any account needs an update, **one grouped Discord message** is sent to the main monitor channel listing each account and what it needs:
 

@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.8.2
+### DreamBot SDN as primary update source + configurable check interval
+
+**Primary update source: DreamBot SDN API**
+- Update awareness now checks `https://sdn.dreambot.org/scripts/all` as primary source
+- Finds P2P Master AI by exact name match (`name == "P2P Master AI"`) with optional safety checks on `id == 1500` and `author == "Aeglen"`
+- Extracts version, last_compile_timestamp, and last_compile date from the SDN response
+- Cloudflare Worker (`p2p-sdn-watch.p2pmonitor.workers.dev`) kept as silent fallback — used automatically if SDN is unreachable, returns bad JSON, or does not contain P2P Master AI
+- Source and fallback details are debug-only — no user-facing alerts for source failures alone
+- Thanks to **@Ziggy** for finding the DreamBot SDN API endpoint
+
+**Version comparison: Decimal-aware**
+- SDN returns versions as JSON numbers (e.g. `2.15` for 2.150, dropping trailing zero)
+- New `_sdn_ver_tuple()` uses `Decimal` arithmetic to pad fractional parts to 3 digits: `2.15 → (2, 150)`, `2.149 → (2, 149)` — so `2.15` correctly compares as newer than `2.149`
+- Local title versions and all comparisons now use the same Decimal-based path
+
+**Configurable update check interval**
+- New HH:MM interval control in Settings → Update Awareness: default 6h 0m, minimum 1m, maximum 24h 0m
+- Replaces the previous fixed UTC slot schedule (00:20, 06:20, 12:20, 18:20)
+- Startup check still fires immediately on monitor launch
+- Periodic checks fire based on wall-clock elapsed time since last check
+- `0h 0m` clamps to `0h 1m`; values over `24h 0m` clamp to `24h 0m`
+- Config keys: `update_check_interval_hours`, `update_check_interval_minutes`
+
+**Files changed:**
+- `p2p_monitor.py` — version 1.8.2; `update_check_interval_hours` / `update_check_interval_minutes` added to DEFAULT_CFG
+- `py/watcher.py` — `_SDN_URL`, `_WORKER_URL`, `_SDN_SCRIPT_NAME/ID/AUTHOR` constants; `_sdn_ver_tuple()` with Decimal comparison; `_ver_tuple()` delegates to `_sdn_ver_tuple`; `_fetch_from_sdn()` + `_fetch_from_worker()` replace `_fetch_latest_version()`; `_check_update_awareness()` uses elapsed-time interval; `_last_update_check_slot` initialised to `0.0`
+- `ui/settings_tab.py` — HH:MM interval spinboxes; updated description text; clamping in `save()`
+- `tests/test_v182.py` — 28 new tests: SDN parsing, fallback, version comparison, interval logic, clamping
+- `tests/test_update_awareness.py` — updated `test_numeric_version_comparison` to match new Decimal semantics
+
+---
+
 ## v1.8.1
 ### Real Discord pings, independent screenshot controls, auto-relaunch on update, runtime stats
 

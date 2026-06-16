@@ -415,34 +415,28 @@ def compute_runtime_stats(account: str,
     """
     Compute runtime stats from history.jsonl for a single account.
 
+    Walks ALL rows chronologically regardless of date range so that carry-in
+    state (script was already running, already in break) is correctly applied
+    to the selected range.  Intervals that straddle range boundaries are
+    clipped rather than dropped.
+
     Returns dict with:
-      total_run_secs    — time between Script Started/Resumed and Script Paused/Stopped
-      break_secs        — actual elapsed break intervals (task/activity == 'break')
-      active_secs       — total_run_secs - break_secs
-      break_pct         — break_secs / total_run_secs * 100 (0 if no run time)
-      account           — account name
-      range_from        — earliest timestamp seen (ISO str) or None
-      range_to          — latest timestamp seen (ISO str) or None
+      total_run_secs  — elapsed time when script was running (in range)
+      break_secs      — elapsed time in break (in range, subset of run time)
+      active_secs     — total_run_secs - break_secs
+      break_pct       — break_secs / total_run_secs * 100 (0 if no run time)
+      account         — account name
+      range_from      — since_ts as ISO string, or earliest event if no since_ts
+      range_to        — until_ts as ISO string, or latest event if no until_ts
     """
     rows = load_history_for(account)
-
-    # Filter by date range
-    if since_ts or until_ts:
-        filtered = []
-        for r in rows:
-            ts = _parse_ts(r.get('time', ''))
-            if ts is None:
-                continue
-            if since_ts and ts < since_ts:
-                continue
-            if until_ts and ts > until_ts:
-                continue
-            filtered.append(r)
-        rows = filtered
-
     if not rows:
         return {'total_run_secs': 0, 'break_secs': 0, 'active_secs': 0,
                 'break_pct': 0.0, 'account': account, 'range_from': None, 'range_to': None}
+
+    # Sort all rows chronologically — history files can have out-of-order rows
+    # from rotated files or backfill.
+    rows.sort(key=lambda r: r.get('time', ''))
 
     # Dedupe: skip exact same (time, type, value, activity)
     seen_keys: set = set()
@@ -455,64 +449,104 @@ def compute_runtime_stats(account: str,
         deduped.append(r)
     rows = deduped
 
+    # Effective range
+    range_start = since_ts
+    range_end   = until_ts or _parse_ts(rows[-1].get('time', ''))
+
     total_run_secs = 0.0
     break_secs     = 0.0
-    run_start      = None   # timestamp of last Script Started/Resumed
-    break_start    = None   # timestamp of current break interval
-    on_break       = False
 
-    range_from = None
-    range_to   = None
+    # Carry-in state — updated as we walk every row before the range
+    run_start   = None   # float: when the current running interval started
+    break_start = None   # float: when the current break started
+    on_break    = False
+
+    def _add_run(interval_start, interval_end):
+        """Accumulate a running interval, clipped to [range_start, range_end]."""
+        nonlocal total_run_secs
+        lo = max(interval_start, range_start) if range_start else interval_start
+        hi = min(interval_end,   range_end)   if range_end   else interval_end
+        if hi > lo:
+            total_run_secs += hi - lo
+
+    def _add_break(interval_start, interval_end):
+        """Accumulate a break interval, clipped to [range_start, range_end]."""
+        nonlocal break_secs
+        lo = max(interval_start, range_start) if range_start else interval_start
+        hi = min(interval_end,   range_end)   if range_end   else interval_end
+        if hi > lo:
+            break_secs += hi - lo
 
     for r in rows:
         rtype = r.get('type', '')
+        rval  = (r.get('value', '') or '').strip()
         ts    = _parse_ts(r.get('time', ''))
         if ts is None:
             continue
 
-        if range_from is None:
-            range_from = r.get('time', '')
-        range_to = r.get('time', '')
+        # Skip rows past range_end — state is fully accumulated
+        if range_end and ts > range_end:
+            break
 
-        # Script lifecycle events
+        # ── Script lifecycle ──────────────────────────────────────────────────
         if rtype == 'script_event':
             verb = _norm_script_val(r)
 
             if verb in ('start', 'resume'):
+                # Close any open break interval
                 if on_break and break_start is not None:
-                    # Break ended by script restart
-                    break_secs += ts - break_start
+                    _add_break(break_start, ts)
                     break_start = None
                     on_break    = False
+                # If already running (e.g. script restarted without a stop),
+                # close the current running interval before starting a new one.
+                if run_start is not None:
+                    _add_run(run_start, ts)
                 run_start = ts
 
             elif verb in ('pause', 'stop'):
+                # Close running interval
                 if run_start is not None:
-                    total_run_secs += ts - run_start
+                    _add_run(run_start, ts)
                     run_start = None
+                # Close break interval
                 if on_break and break_start is not None:
-                    break_secs += ts - break_start
+                    _add_break(break_start, ts)
                     break_start = None
                     on_break    = False
 
-        # Break events
-        elif rtype == 'break':
+        # ── Break task (type="task", value="Break") ────────────────────────
+        # History stores breaks as type="task", value="Break".
+        # Do NOT use the planned "Length:" activity — use actual elapsed time.
+        elif rtype == 'task' and rval.lower() == 'break':
             if run_start is not None and not on_break:
                 on_break    = True
                 break_start = ts
 
-        # Any task that is not a break ends the break interval
-        elif rtype == 'task' and on_break:
-            if break_start is not None:
-                break_secs += ts - break_start
-            break_start = None
-            on_break    = False
+        # ── Any non-Break task ends the break interval ─────────────────────
+        elif rtype == 'task' and rval.lower() != 'break':
+            if on_break and break_start is not None:
+                _add_break(break_start, ts)
+                break_start = None
+                on_break    = False
 
-    # If still running (no stop/pause seen), we do not extrapolate — we only
-    # count confirmed intervals so stats don't drift with live sessions.
+    # ── Close open intervals at range_end ────────────────────────────────────
+    if range_end:
+        if run_start is not None:
+            _add_run(run_start, range_end)
+        if on_break and break_start is not None:
+            _add_break(break_start, range_end)
 
     active_secs = max(0.0, total_run_secs - break_secs)
     break_pct   = (break_secs / total_run_secs * 100) if total_run_secs > 0 else 0.0
+
+    # Human-readable range labels
+    def _iso(ts_f):
+        from datetime import datetime as _dt
+        return _dt.fromtimestamp(ts_f).strftime('%Y-%m-%d %H:%M:%S') if ts_f else None
+
+    rf = _iso(range_start) if range_start else (rows[0].get('time') if rows else None)
+    rt = _iso(range_end)   if range_end   else (rows[-1].get('time') if rows else None)
 
     return {
         'total_run_secs': total_run_secs,
@@ -520,10 +554,9 @@ def compute_runtime_stats(account: str,
         'active_secs':    active_secs,
         'break_pct':      break_pct,
         'account':        account,
-        'range_from':     range_from,
-        'range_to':       range_to,
+        'range_from':     rf,
+        'range_to':       rt,
     }
-
 
 def _fmt_secs(secs: float) -> str:
     """Format seconds as 'Xh Ym' or 'Ym Zs' for display."""
