@@ -1,5 +1,70 @@
 # Changelog
 
+## v1.8.1
+### Real Discord pings, independent screenshot controls, auto-relaunch on update, runtime stats
+
+---
+
+**Real Discord pings**
+- Mentions in embed descriptions (`<@user>`) appeared visually but did not trigger Discord notifications; fixed by moving real pings to top-level message `content` with explicit `allowed_mentions: {"users": ["id"]}`
+- `<@user>` removed from embed descriptions — no function there now that real pings go in message content
+- New `normalize_mention_id()` helper: accepts raw ID (`123`), `<@123>`, or `<@!123>` — all normalise to `123`
+- New `apply_ping(payload, mention_id, enabled)` helper: adds `content` and `allowed_mentions` to any payload dict
+- **New Ping column** in the Event Notifications settings table (alongside Notify and Screenshot): Quests, Tasks, Chat, Errors, Drops, Deaths, Level Ups each have an independent Ping checkbox
+- Script lifecycle events (Started, Stopped, Paused, Resumed) always ping when a mention ID is configured
+- Update awareness alerts have a separate Ping toggle in the Update Awareness section (default on)
+- New config keys: `ping_quest`, `ping_task`, `ping_chat`, `ping_error`, `ping_drops`, `ping_death`, `ping_levelup`, `ping_update`
+
+**Event screenshots no longer depend on scheduled screenshots (bug fix)**
+- Previously `screenshots_enabled` (labelled "Enable scheduled screenshots") acted as a global kill switch — if off, all screenshots stopped including per-event ones, on-demand `/ss`, and startup
+- Fixed: `screenshots_enabled` now gates scheduled screenshots only; each screenshot type is independently controlled
+- `ScreenshotService.enqueue()` now returns `True` if queued, `False` if refused; `LogWatcher._enqueue_screenshot()` propagates that bool
+- `DiscordRouter.post_event()` and `post_drop()`: if screenshot enqueue returns `True`, return immediately; if `False`, debug-log and fall through to embed-only — prevents duplicate messages (embed-only + screenshot-with-embed)
+- `ScreenshotService._worker()`: if `take_screenshot()` fails and the item has a payload+URL (event/drop screenshot), posts the embed without the image as fallback; scheduled screenshots with no payload remain debug-only
+- Startup screenshots gated by `screenshot_on_startup`; event screenshots gated by `ss_event_*` only; on-demand always works
+
+**Update awareness: auto-relaunch on update (default off)**
+- New setting: **Auto-relaunch clients when script/client update is found**
+- When enabled: affected accounts are relaunched automatically with a 5-second stagger; accounts without a launcher preset are listed for manual action in the Discord alert
+- Warning shown in Settings UI and Discord message: can interrupt any current activity including Inferno/Jad
+- When disabled: normal grouped update alert sent, recommends `/relaunch <account>` when ready
+- Separate dedupe stores for alert suppression vs relaunch suppression — a new version triggers both independently; when auto-relaunch fires, alert keys are also saved so the same update does not later produce a normal "Update Available" alert
+- New config key: `auto_relaunch_on_update`
+- New state file: `~/.p2p_monitor/update_relaunch_state.json`
+
+**Update alerts: grouped and pingable**
+- One Discord message per check listing all accounts by update category (both / script / client)
+- Pings once per check if `ping_update` is enabled — not once per account
+
+**Grouped repeated task/lock failures**
+- Rapid burst of related lock/error events (e.g. multiple farming patch failures at once) now groups into one Discord alert and one monitor line
+- 3-second debounce window per account; duplicate details deduped; one ping if ping_error is enabled
+- Standalone errors (non-lock) and errors separated by more than 3 seconds still send individually
+
+**Lock failure wording**
+- Generic lock fallback changed from `Quest abandoned: X` to `Task locked/skipped: X`
+- Covers non-quest locks (Gold BF, Sailing, etc.); specific `error_rules.json` matches unchanged
+
+**Runtime stats in History tab**
+- Each account row in the History tab shows **📈 Runtime Stats** alongside **📊 Summary**
+- Opens a popup showing: Total running time, Active play time, Break time, Break %
+- Range filters: All time, Today, 7 days, 30 days
+- Break time calculated from actual elapsed intervals — not from planned break length in the log
+- `py/history.py`: new `compute_runtime_stats(account, since_ts, until_ts)` and `_fmt_secs()` functions
+
+**Files changed:**
+- `p2p_monitor.py` — version 1.8.1; new `ping_*` and `auto_relaunch_on_update` keys in DEFAULT_CFG
+- `py/reader.py` — lock fallback wording
+- `py/discord.py` — `_desc()` removes mention embed; `normalize_mention_id()` + `apply_ping()`; `post_event()` enqueue fallback; `post_drop()` enqueue fallback; `post_task()` applies `ping_task`; `post_script_event()` always pings when mention set; `combined_daily_summary_payload()` removes inline mention
+- `py/watcher.py` — `handle_event()` wires `apply_ping` per event type; `_enqueue_screenshot()` returns bool; `_check_update_awareness()` ping + auto-relaunch + separate dedupe stores; `_build_relaunch_alert_payload()`; `_load/save_relaunch_state()`; `_maybe_burst_error()` + `_flush_error_burst()` for grouped failures; `trigger_screenshot()` restored; `_do_screenshot()` no longer gates on-demand behind `screenshots_enabled`; `AccountState` gets burst buffer fields
+- `py/screenshot.py` — `enqueue()` returns bool, trigger-specific guards (scheduled/startup/event); capture-failure embed-only fallback in `_worker()`
+- `py/history.py` — `compute_runtime_stats()`, `_fmt_secs()`, supporting helpers
+- `ui/settings_tab.py` — Ping column in event table; `ping_update` and `auto_relaunch_on_update` settings with warning label
+- `ui/history_tab.py` — Runtime Stats pseudo-button in account row; `_show_runtime_stats_popup()`
+- `tests/test_v181.py` — 42 tests covering all items above
+
+---
+
 ## v1.8.0
 ### Stable release — Update Awareness, Screenshot Reliability, PID-First Window Lookup
 

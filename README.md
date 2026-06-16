@@ -60,13 +60,20 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Supports Discord bot mode with per-account monitor threads
 - **Discord webhooks are not required when using Discord bot mode**
 - Mute individual accounts without stopping monitoring
-- Screenshot on event: attach a game screenshot to any Discord post
+- **Notify / Screenshot / Ping** per event type — each controlled independently in Settings
+  - **Notify** — whether the event sends a Discord message
+  - **Screenshot** — whether that event attaches a screenshot
+  - **Ping** — whether that event triggers a real Discord notification (mention in top-level message content)
+- Real pings use `allowed_mentions` so Discord actually notifies — not just a visual `<@user>` in the embed
+- Mention ID field accepts `123456789`, `<@123456789>`, or `<@!123456789>` — all normalise automatically
 - Self-healing: automatically detects and recovers from deleted Discord threads, channels, and webhooks — no restart needed
 - Level 99 detection: special "🎆 Level 99! 🎆" embed title, always notifies regardless of the level-up interval
+- Repeated related failures (e.g. multiple farming lock failures at once) are grouped into one alert instead of spamming separate messages
 
 ### Event history
 - Persists every event to a local JSONL file per account
 - History tab shows a 24-hour rolling view, filterable by date range (up to 7 days)
+- **Runtime Stats** button per account: shows total running time, active play time, break time, and break % — filterable by all-time, today, 7 days, or 30 days
 - Backfill: on startup, re-reads DreamBot log files to populate history without re-pinging Discord
 
 ### Error detection
@@ -234,6 +241,10 @@ When any account needs an update, **one grouped Discord message** is sent to the
 
 Multiple accounts needing updates appear in the same message. The embed recommends `/relaunch <account>` to restart and load the latest version.
 
+**Ping on update:** if the `Ping` setting is enabled in the Update Awareness section, the configured user is pinged once per check.
+
+**Auto-relaunch on update (optional, default off):** when enabled, affected accounts are relaunched automatically as soon as an update is detected. Accounts without a launcher preset are listed for manual action. This can interrupt any current activity — enable only if that is acceptable.
+
 ### Discord — webhook mode
 Webhook mode is the simplest setup if you do not want to create a Discord bot.
 
@@ -285,6 +296,7 @@ Config is automatically sanitized on startup: stale keys from older versions are
 | `~/.p2p_monitor/offsets.json` | Log file read positions |
 | `~/.p2p_monitor/screenshots/` | Screenshot files (auto-deleted after 24h) |
 | `~/.p2p_monitor/update_check_state.json` | Deduping state for script/client update alerts |
+| `~/.p2p_monitor/update_relaunch_state.json` | Deduping state for auto-relaunch on update |
 
 On Windows, `~` resolves to `C:\Users\<you>`.
 
