@@ -332,16 +332,23 @@ class ScreenshotService:
 
     def enqueue(self, priority, account, trigger,
                 url=None, payload=None,
-                bot_channel_id=None, bot_token=None, restore_wid=None):
+                bot_channel_id=None, bot_token=None, restore_wid=None) -> bool:
         """Single enqueue point for all screenshot requests.
-        Guards: screenshots_enabled and is_muted are checked here so no
-        caller can bypass them regardless of which code path they take.
+        Returns True if queued, False if refused.
+
+        Guard logic by trigger type:
+          - 'scheduled': check screenshots_enabled (scheduled-only setting)
+          - 'startup':   check screenshot_on_startup
+          - all others:  only check is_muted; event/on-demand/bot screenshots
+                         are gated by their own per-event settings at call site
         """
         cfg = self._cb['get_cfg']()
-        if not cfg.get('screenshots_enabled'):
-            return
+        if trigger == 'scheduled' and not cfg.get('screenshots_enabled', False):
+            return False
+        if trigger == 'startup' and not cfg.get('screenshot_on_startup', False):
+            return False
         if self._cb['is_muted'](account):
-            return
+            return False
         # Successful screenshot flow is intentionally silent — no log here.
         with self._seq_lock:
             self._seq += 1
@@ -349,8 +356,10 @@ class ScreenshotService:
         try:
             self._queue.put_nowait((priority, seq, account, trigger, True,
                                     url, payload, bot_channel_id, bot_token, restore_wid))
+            return True
         except queue.Full:
             self._dbg(f"  ⚠ [{account}] Screenshot queue full — request dropped ({trigger})")
+            return False
 
     def _dbg(self, msg: str) -> None:
         """Log msg only when debug mode is enabled in config. Screenshot-only noise is always routed here."""
@@ -402,6 +411,16 @@ class ScreenshotService:
                     )
                 if not path:
                     self._dbg(f"  🚫 [{account}] Screenshot failed: {err}")
+                    # Fallback: if this was an event screenshot with a payload and URL,
+                    # post the embed without the image so the notification is not lost.
+                    # Scheduled screenshots have no event payload — skip fallback for those.
+                    if payload_override is not None and url_override:
+                        self._dbg(f"  ↩ [{account}] Posting embed-only fallback for {trigger}")
+                        try:
+                            from py.discord import post_discord as _pd
+                            _pd(url_override, payload_override)
+                        except Exception as _fe:
+                            self._dbg(f"  🚫 [{account}] Embed-only fallback failed: {_fe}")
                 else:
                     try:
                         if bot_channel_id and bot_token:

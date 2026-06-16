@@ -188,7 +188,7 @@ class HistoryTab:
 
             parent = self._tree.insert('', 'end',
                 text=f"  {acc}",
-                values=(count_label, '', '', '📊 Summary'),
+                values=(count_label, '', '', '📊 Summary   📈 Runtime Stats'),
                 tags=('account',), open=(acc in was_open))
 
             parts = []
@@ -268,12 +268,18 @@ class HistoryTab:
         if col != '#4':
             return
         vals = self._tree.item(item, 'values')
-        if not vals or '📊 Summary' not in str(vals[-1]):
+        if not vals:
             return
-        summary = self._summary.get(item, '')
-        if not summary:
-            return
-        self._show_summary_popup(item, summary, event.x, event.y)
+        cell_text = str(vals[-1])
+        # Determine which pseudo-button was clicked by x position within cell
+        cell_x = self._tree.winfo_rootx()  # not used — detect by text position heuristic
+        if '📈 Runtime Stats' in cell_text and event.x > self._tree.column('activity', 'width') // 2 + 80:
+            acc = self._tree.item(item, 'text').strip()
+            self._show_runtime_stats_popup(acc, event.x, event.y)
+        elif '📊 Summary' in cell_text:
+            summary = self._summary.get(item, '')
+            if summary:
+                self._show_summary_popup(item, summary, event.x, event.y)
 
     def _on_col_resize(self, event):
         app = self.app
@@ -384,7 +390,77 @@ class HistoryTab:
                   relief='flat', padx=12, pady=4, cursor='hand2',
                   command=popup.destroy).pack(pady=8)
 
-    # ── Date picker ────────────────────────────────────────────────────────────
+    # ── Runtime stats popup ────────────────────────────────────────────────────
+    def _show_runtime_stats_popup(self, acc, ex, ey):
+        from py.history import compute_runtime_stats, _fmt_secs, load_history_accounts
+        from datetime import date as _date, datetime as _dt, timedelta as _td
+        app = self.app
+
+        popup = tk.Toplevel(app, bg=app.BG2)
+        popup.title(f"Runtime Stats — {acc}")
+        popup.resizable(False, False)
+        popup.transient(app)
+        try:
+            popup.geometry(f"+{self._tree.winfo_rootx()+ex+20}+{self._tree.winfo_rooty()+ey+20}")
+        except Exception:
+            pass
+
+        tk.Label(popup, text=f"  {acc}", font=app.MONOB, bg=app.BG2, fg=app.ACC,
+                 padx=12, pady=8).pack(fill='x')
+        tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(0, 4))
+
+        # Range selector
+        range_var = tk.StringVar(value='all')
+        range_frame = tk.Frame(popup, bg=app.BG2)
+        range_frame.pack(fill='x', padx=16, pady=(4, 2))
+        tk.Label(range_frame, text="Range:", font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+        stats_frame = tk.Frame(popup, bg=app.BG2)
+        stats_frame.pack(fill='x', padx=16, pady=(2, 8))
+
+        def _show_stats(since_ts=None, until_ts=None):
+            for w in stats_frame.winfo_children():
+                w.destroy()
+            stats = compute_runtime_stats(acc, since_ts=since_ts, until_ts=until_ts)
+            rows_data = [
+                ('Total running time', _fmt_secs(stats['total_run_secs'])),
+                ('Active play time',   _fmt_secs(stats['active_secs'])),
+                ('Break time',         _fmt_secs(stats['break_secs'])),
+                ('Break %',            f"{stats['break_pct']:.1f}%"),
+            ]
+            for lbl, val in rows_data:
+                row = tk.Frame(stats_frame, bg=app.BG2)
+                row.pack(fill='x', pady=2)
+                tk.Label(row, text=lbl, font=app.MONO, bg=app.BG2, fg=app.FG2,
+                         width=20, anchor='w').pack(side='left')
+                tk.Label(row, text=val, font=app.MONOB, bg=app.BG2, fg=app.ACC).pack(side='left')
+
+        def _on_range(*_):
+            r     = range_var.get()
+            today = _date.today()
+            if r == 'today':
+                since = _dt.combine(today, _dt.min.time()).timestamp()
+                _show_stats(since_ts=since)
+            elif r == '7d':
+                since = _dt.combine(today - _td(days=7), _dt.min.time()).timestamp()
+                _show_stats(since_ts=since)
+            elif r == '30d':
+                since = _dt.combine(today - _td(days=30), _dt.min.time()).timestamp()
+                _show_stats(since_ts=since)
+            else:
+                _show_stats()
+
+        for text, val in [('All time', 'all'), ('Today', 'today'), ('7 days', '7d'), ('30 days', '30d')]:
+            tk.Radiobutton(range_frame, text=text, value=val, variable=range_var,
+                font=app.MONO, bg=app.BG2, fg=app.FG, activebackground=app.BG2,
+                selectcolor=app.BG2, relief='flat', cursor='hand2',
+                command=_on_range).pack(side='left', padx=(8, 0))
+
+        _show_stats()  # initial load — all time
+
+        tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(4, 0))
+        tk.Button(popup, text="Close", font=app.MONO, bg=app.BG3, fg=app.FG2,
+                  relief='flat', padx=12, pady=4, cursor='hand2',
+                  command=popup.destroy).pack(pady=8)
     def _toggle_date_picker(self):
         # Guard: if popup already open, raise it
         if hasattr(self, '_date_popup') and self._date_popup and self._date_popup.winfo_exists():

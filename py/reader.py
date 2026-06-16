@@ -823,7 +823,7 @@ def parse_lines(lines):
         elif reason:
             reason_detail = reason
         else:
-            reason_detail = f"Quest abandoned: {locked_name}"
+            reason_detail = f"Task locked/skipped: {locked_name}"
 
         dedupe = f'lock_{locked_name.lower().replace(" ", "_")}'
         events.append({

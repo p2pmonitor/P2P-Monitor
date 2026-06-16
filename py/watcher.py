@@ -133,6 +133,11 @@ class AccountState:
         self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
         self._startup_done       = False  # guards _startup_catchup to run only once per state
         self.inferno             = InfernoTracker()  # stateful Inferno gear-check and attempt tracker
+        # ── Error burst debounce ──────────────────────────────────────────────
+        # Groups rapid repeated lock/error events per account into one Discord alert.
+        self._err_burst_events   = []   # list of ev dicts buffered this burst
+        self._err_burst_timer    = None # threading.Timer handle
+        self._err_burst_task_ctx = ''  # task context when burst started
         # Auto-restart state
         self._recent_lines       = deque(maxlen=30)  # rolling buffer; manual-stop signature check
         self._pending_restart_timer: 'threading.Timer | None' = None
@@ -479,12 +484,104 @@ class LogWatcher:
         except Exception as e:
             self._dbg(f'[pid_cache] [{account}] startup PID discovery failed: {e}')
 
+    def _flush_error_burst(self, folder: str, state) -> None:
+        """
+        Flush the error burst buffer for an account.
+        Called after debounce window expires (or immediately for standalone errors).
+        Posts one grouped Discord alert for all buffered events; one monitor line.
+        """
+        evs = list(state._err_burst_events)
+        state._err_burst_events  = []
+        state._err_burst_timer   = None
+        state._err_burst_task_ctx = ''
+        if not evs:
+            return
+
+        # Single event — dispatch normally
+        if len(evs) == 1:
+            ev = evs[0]
+            self.log(f"⚠ [{folder}] {ev.get('value', '')} — {ev.get('activity', '')}")
+            self.handle_event(ev, folder, source='live')
+            return
+
+        # Multiple events — build grouped alert
+        mention   = self._router.mention()
+        task_ctx  = evs[0].get('_task_ctx', '') or state.last_task or ''
+        details   = []
+        seen      = set()
+        for ev in evs:
+            detail = ev.get('activity', '') or ev.get('value', '')
+            if detail and detail not in seen:
+                seen.add(detail)
+                details.append(detail)
+
+        # One monitor log line
+        self.log(f"⚠ [{folder}] {len(evs)} related errors grouped — {task_ctx or 'multiple failures'}")
+
+        # Persist each event to history
+        for ev in evs:
+            try:
+                from py.history import append_history
+                append_history(folder, 'error', ev.get('value', ''), ev.get('activity', ''),
+                               timestamp=ev.get('ts'), log_fn=self.log,
+                               debug=self.cfg.get('debug', False))
+            except Exception:
+                pass
+
+        # One Discord embed
+        from py.discord import apply_ping, _embed, post_discord
+        fields = [
+            {'name': 'Account',       'value': folder,          'inline': True},
+            {'name': 'Task/Activity', 'value': task_ctx or '—', 'inline': True},
+            {'name': 'Failures',      'value': '\n'.join(f'• {d}' for d in details[:20]), 'inline': False},
+        ]
+        title   = f"❌ Task Failure — {task_ctx}" if task_ctx else "❌ Task Failures"
+        payload = _embed(title, f"**Account:** {folder}", fields, 0xff4444)
+        apply_ping(payload, mention, self.cfg.get('ping_error', True))
+
+        url = self._router.resolve_url(folder, 'error')
+        if url and not self._is_muted(folder):
+            ok, err = post_discord(url, payload)
+            if not ok:
+                self.log(f"  🚫 [{folder}] Grouped error Discord failed: {err}")
+
+        # UI callback once
+        try:
+            self.on_event('error', folder, details[0] if details else 'Multiple errors', task_ctx)
+        except Exception:
+            pass
+
+    def _maybe_burst_error(self, ev: dict, folder: str, state) -> bool:
+        """
+        Add an error event to the burst buffer. Returns True if buffered (caller skips normal dispatch).
+        Only bursts 'lock' style errors — standalone errors go through normally.
+        """
+        # Only burst lock/skip events — identified by '_lock_name' key
+        if '_lock_name' not in ev:
+            return False
+
+        # Cancel existing timer, add to buffer
+        if state._err_burst_timer is not None:
+            state._err_burst_timer.cancel()
+
+        state._err_burst_events.append(ev)
+        if not state._err_burst_task_ctx:
+            state._err_burst_task_ctx = ev.get('_task_ctx', '') or state.last_task or ''
+
+        # Schedule flush after 3-second debounce window
+        t = threading.Timer(3.0, self._flush_error_burst, args=(folder, state))
+        t.daemon = True
+        t.start()
+        state._err_burst_timer = t
+        return True
+
     def trigger_screenshot(self, account):
+        """Public API: on-demand screenshot (called by bot /ss command, monitor tab button)."""
         self._do_screenshot(account, 'on-demand')
 
     def _do_screenshot(self, account, trigger='scheduled'):
-        if not self.cfg.get('screenshots_enabled'):
-            self.log("⚠ Screenshots not enabled in Settings")
+        if trigger == 'scheduled' and not self.cfg.get('screenshots_enabled'):
+            self.log("⚠ Scheduled screenshots not enabled in Settings")
             return
         if self._is_muted(account):
             return
@@ -494,11 +591,12 @@ class LogWatcher:
     def _enqueue_screenshot(self, priority, account, trigger,
                              url=None, payload=None,
                              bot_channel_id=None, bot_token=None, restore_wid=None):
-        """Delegate to ScreenshotService — guards (enabled, muted) enforced there."""
-        self._ss_svc.enqueue(priority, account, trigger,
-                             url=url, payload=payload,
-                             bot_channel_id=bot_channel_id, bot_token=bot_token,
-                             restore_wid=restore_wid)
+        """Delegate to ScreenshotService — guards (enabled, muted) enforced there.
+        Returns True if queued, False if refused (queue full, trigger-gated, muted)."""
+        return self._ss_svc.enqueue(priority, account, trigger,
+                                    url=url, payload=payload,
+                                    bot_channel_id=bot_channel_id, bot_token=bot_token,
+                                    restore_wid=restore_wid)
 
     # ── Periodic checks ────────────────────────────────────────────────────────
     def _prune_screenshots(self):
@@ -532,7 +630,8 @@ class LogWatcher:
     # ── DreamBot / P2P Master AI update awareness ──────────────────────────────
 
     _UPDATE_CHECK_URL  = 'https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest'
-    _UPDATE_STATE_FILE = Path.home() / '.p2p_monitor' / 'update_check_state.json'
+    _UPDATE_STATE_FILE         = Path.home() / '.p2p_monitor' / 'update_check_state.json'
+    _AUTO_RELAUNCH_STATE_FILE  = Path.home() / '.p2p_monitor' / 'update_relaunch_state.json'
 
     @staticmethod
     def _ver_tuple(v: str) -> tuple:
@@ -601,6 +700,21 @@ class LogWatcher:
         except Exception:
             pass
 
+    def _load_relaunch_state(self) -> set:
+        try:
+            if self._AUTO_RELAUNCH_STATE_FILE.exists():
+                return set(json.loads(self._AUTO_RELAUNCH_STATE_FILE.read_text()))
+        except Exception:
+            pass
+        return set()
+
+    def _save_relaunch_state(self, relaunched: set) -> None:
+        try:
+            self._AUTO_RELAUNCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._AUTO_RELAUNCH_STATE_FILE.write_text(json.dumps(sorted(relaunched)))
+        except Exception:
+            pass
+
     def _check_update_awareness(self, force: bool = False) -> None:
         """
         Run the update-awareness check.
@@ -639,11 +753,17 @@ class LogWatcher:
 
         latest_ver = self._fetch_latest_version()  # None if unreachable
 
-        alerted     = self._load_update_state()
-        need_both   = []   # (account, db_ver, local_ver) — script outdated AND new client
-        need_script = []   # (account, db_ver, local_ver) — script outdated only
-        need_client = []   # (account, db_ver)            — new client only
-        new_keys    = []   # keys to add to alerted set on success
+        alerted          = self._load_update_state()
+        relaunched_sigs  = self._load_relaunch_state()
+        auto_relaunch_on = self.cfg.get('auto_relaunch_on_update', False)
+
+        need_both   = []   # (account, db_ver, local_ver)
+        need_script = []   # (account, db_ver, local_ver)
+        need_client = []   # (account, db_ver)
+        new_keys    = []   # alert dedupe keys
+        to_relaunch = []   # accounts to auto-relaunch (have presets, new signature)
+        no_preset   = []   # accounts needing update but no preset
+        new_rl_sigs = []   # relaunch dedupe signatures
 
         for info in parsed:
             account    = info['account']
@@ -656,7 +776,7 @@ class LogWatcher:
                 and self._ver_tuple(local_ver) < self._ver_tuple(latest_ver)
             )
 
-            # Per-account dedupe key — rich enough to allow future alerts on changed state
+            # Per-account alert dedupe key
             key = f"{account}|{db_ver}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
 
             if not script_outdated and not new_client:
@@ -666,38 +786,92 @@ class LogWatcher:
                 )
                 continue
 
-            if key in alerted:
-                self._dbg(f'[update_check] {account or "?"}: already alerted for key {key}')
-                continue
-
-            new_keys.append(key)
-            if script_outdated and new_client:
-                need_both.append((account, db_ver, local_ver))
-            elif script_outdated:
-                need_script.append((account, db_ver, local_ver))
+            if key not in alerted:
+                new_keys.append(key)
+                if script_outdated and new_client:
+                    need_both.append((account, db_ver, local_ver))
+                elif script_outdated:
+                    need_script.append((account, db_ver, local_ver))
+                else:
+                    need_client.append((account, db_ver))
             else:
-                need_client.append((account, db_ver))
+                self._dbg(f'[update_check] {account or "?"}: already alerted for key {key}')
 
-        if not need_both and not need_script and not need_client:
-            return  # nothing new to alert
+            # Auto-relaunch: separate signature to avoid mixing alert dedupe with relaunch dedupe
+            if auto_relaunch_on and (script_outdated or new_client):
+                rl_sig = f"{account}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
+                if rl_sig not in relaunched_sigs:
+                    new_rl_sigs.append(rl_sig)
+                    try:
+                        from py.launcher import find_preset
+                        if find_preset(self.cfg, account):
+                            to_relaunch.append(account)
+                        else:
+                            no_preset.append(account)
+                    except Exception:
+                        no_preset.append(account)
+                else:
+                    self._dbg(f'[update_check] {account}: already relaunched for sig {rl_sig}')
+
+        if not need_both and not need_script and not need_client and not to_relaunch:
+            return  # nothing new
 
         url = self._router.resolve_url(None, 'default')
         if not url:
             self._dbg('[update_check] No default webhook — cannot send update alert.')
             return
 
-        from py.discord import post_discord
-        payload = self._build_update_alert_payload(
-            need_both, need_script, need_client, latest_ver)
-        ok, err = post_discord(url, payload)
-        if ok:
-            for key in new_keys:
-                alerted.add(key)
-            self._save_update_state(alerted)
-            self.log(f'🔔 Update alert sent — '
-                     f'both={len(need_both)} script={len(need_script)} client={len(need_client)}')
-        else:
-            self.log(f'⚠ Update alert failed: {err}')
+        from py.discord import post_discord, apply_ping
+        mention   = self._router.mention()
+        ping_on   = self.cfg.get('ping_update', True)
+
+        if auto_relaunch_on and (to_relaunch or no_preset):
+            # Auto-relaunch message replaces normal alert
+            payload = self._build_relaunch_alert_payload(
+                to_relaunch, no_preset, need_both, need_script, need_client, latest_ver)
+            apply_ping(payload, mention, ping_on)
+            ok, err = post_discord(url, payload)
+            if ok:
+                self.log(f'🔄 Update auto-relaunch initiated for: {", ".join(to_relaunch)}')
+                for sig in new_rl_sigs:
+                    relaunched_sigs.add(sig)
+                self._save_relaunch_state(relaunched_sigs)
+                # Also persist alert dedupe keys so the same update doesn't later
+                # send a normal "Update Available" alert after relaunch suppresses re-relaunch
+                for key in new_keys:
+                    alerted.add(key)
+                self._save_update_state(alerted)
+                # Staggered relaunch
+                def _do_relaunches(accounts):
+                    from py.launcher import relaunch_account
+                    for i, acct in enumerate(accounts):
+                        if i > 0:
+                            import time as _time
+                            _time.sleep(5)
+                        try:
+                            result = relaunch_account(self.cfg, acct, log_fn=self.log)
+                            if not result.ok:
+                                self.log(f'❌ [{acct}] Update relaunch failed: {result.message}')
+                        except Exception as exc:
+                            self.log(f'❌ [{acct}] Update relaunch error: {exc}')
+                if to_relaunch:
+                    threading.Thread(target=_do_relaunches, args=(list(to_relaunch),),
+                                     daemon=True, name='update-relaunch').start()
+            else:
+                self.log(f'⚠ Update relaunch alert failed: {err}')
+        elif need_both or need_script or need_client:
+            payload = self._build_update_alert_payload(
+                need_both, need_script, need_client, latest_ver)
+            apply_ping(payload, mention, ping_on)
+            ok, err = post_discord(url, payload)
+            if ok:
+                for key in new_keys:
+                    alerted.add(key)
+                self._save_update_state(alerted)
+                self.log(f'🔔 Update alert sent — '
+                         f'both={len(need_both)} script={len(need_script)} client={len(need_client)}')
+            else:
+                self.log(f'⚠ Update alert failed: {err}')
 
     def _build_update_alert_payload(self,
                                     need_both:   list,
@@ -706,10 +880,6 @@ class LogWatcher:
                                     latest_ver: 'str | None') -> dict:
         """
         Build a single grouped Discord embed listing all accounts by update category.
-        Fields (only included if non-empty):
-          1. Both script + DreamBot update needed
-          2. P2P Master AI script update needed
-          3. DreamBot client update needed
         """
         from py.discord import _embed
 
@@ -754,6 +924,45 @@ class LogWatcher:
         color = 0xffaa00  # amber
 
         return _embed('🔔 Update Available', desc, fields, color)
+
+    def _build_relaunch_alert_payload(self,
+                                      to_relaunch: list,
+                                      no_preset:   list,
+                                      need_both:   list,
+                                      need_script: list,
+                                      need_client: list,
+                                      latest_ver: 'str | None') -> dict:
+        """Build the Discord embed when auto-relaunch fires on update detection."""
+        from py.discord import _embed
+
+        fields = []
+        if to_relaunch:
+            fields.append({
+                'name':   '🔄 Auto-relaunching',
+                'value':  '\n'.join(f'• {a}' for a in to_relaunch),
+                'inline': False,
+            })
+        if no_preset:
+            fields.append({
+                'name':   '⚠ Manual relaunch required (no preset)',
+                'value':  '\n'.join(f'• {a}' for a in no_preset),
+                'inline': False,
+            })
+
+        # Include update detail in description
+        lines = []
+        for account, db_ver, local_ver in need_both:
+            lines.append(f'• {account}: script v{local_ver} → v{latest_ver}, NEW CLIENT AVAILABLE')
+        for account, db_ver, local_ver in need_script:
+            lines.append(f'• {account}: script v{local_ver} → v{latest_ver}')
+        for account, db_ver in need_client:
+            lines.append(f'• {account}: NEW CLIENT AVAILABLE')
+
+        desc = 'Update detected — clients are being relaunched automatically.\n'
+        if lines:
+            desc += '\n'.join(lines)
+
+        return _embed('🔔 Update — Auto-Relaunch Initiated', desc, fields, 0xff6600)
 
     # ── Daily summary ──────────────────────────────────────────────────────────
 
@@ -1577,28 +1786,35 @@ class LogWatcher:
         if emit_discord:
             try:
                 mention = self._router.mention()
+                from py.discord import apply_ping
+
+                def _ping(payload, key):
+                    """Apply ping if cfg key is enabled and mention is set."""
+                    enabled = self.cfg.get(f'ping_{key}', False)
+                    return apply_ping(payload, mention, enabled)
+
                 if etype == 'quest_started':
                     self._router.post_event(account, 'quest',
-                        quest_started_payload(mention, account, value))
+                        _ping(quest_started_payload(mention, account, value), 'quest'))
                 elif etype == 'quest':
                     self._router.post_event(account, 'quest',
-                        quest_payload(mention, account, value))
+                        _ping(quest_payload(mention, account, value), 'quest'))
                 elif etype == 'task':
                     if 'slayer' not in (value or '').lower():
                         self._router.post_task(account, value, activity)
                 elif etype == 'slayer_task':
                     self._router.post_event(account, 'task',
-                        slayer_task_payload(mention, account, value, activity))
+                        _ping(slayer_task_payload(mention, account, value, activity), 'task'))
                 elif etype == 'slayer_complete':
                     td, pe, tp = ev.get('_slayer_complete', (None, None, None))
                     self._router.post_event(account, 'task',
-                        slayer_complete_payload(mention, account, value, td, pe, tp))
+                        _ping(slayer_complete_payload(mention, account, value, td, pe, tp), 'task'))
                 elif etype == 'slayer_skip':
                     self._router.post_event(account, 'task',
-                        slayer_skipped_payload(mention, account, value, activity))
+                        _ping(slayer_skipped_payload(mention, account, value, activity), 'task'))
                 elif etype == 'chat':
                     self._router.post_event(account, 'chat',
-                        chat_payload(mention, account, value, activity))
+                        _ping(chat_payload(mention, account, value, activity), 'chat'))
                 elif etype == 'drop':
                     drop_types = ev.get('_drop_types', [activity])
                     self._router.post_drop(account, drop_types, value)
@@ -1606,12 +1822,12 @@ class LogWatcher:
                     detail   = ev.get('_detail', activity)
                     task_ctx = ev.get('_task_ctx', '')
                     self._router.post_event(account, 'error',
-                        error_payload(mention, account, value, detail, task_ctx))
+                        _ping(error_payload(mention, account, value, detail, task_ctx), 'error'))
                 elif etype == 'death':
                     url = self._router.resolve_url(account, 'death')
                     if url:
                         self._router.post_event(account, 'death',
-                            death_payload(mention, account), url=url)
+                            _ping(death_payload(mention, account), 'death'), url=url)
                 elif etype == 'levelup':
                     level     = int(activity) if activity.isdigit() else 0
                     total_lvl = ev.get('_total_level')
@@ -1619,8 +1835,8 @@ class LogWatcher:
                     url = self._router.resolve_url(account, 'levelup')
                     if url:
                         self._router.post_event(account, 'levelup',
-                            levelup_payload(mention, account, value, level,
-                                            total_level=total_lvl, is_99=is_99), url=url)
+                            _ping(levelup_payload(mention, account, value, level,
+                                            total_level=total_lvl, is_99=is_99), 'levelup'), url=url)
                 elif etype == 'script_event':
                     ar_detail = ''
                     if value == 'stop':
@@ -1994,6 +2210,11 @@ class LogWatcher:
                     enriched_value = value
                 task_ctx = f"{last_t} — {last_a}" if last_a else last_t
                 ev = dict(ev, value=enriched_value, _detail=detail, _task_ctx=task_ctx)
+
+                # Burst-group rapid lock failures; standalone errors dispatch immediately
+                if self._maybe_burst_error(ev, folder, state):
+                    continue  # buffered — will flush after debounce window
+
                 self.log(f"❌ [{folder}] {enriched_value}: {activity or detail}")
 
             elif etype == 'death':

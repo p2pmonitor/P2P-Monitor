@@ -245,28 +245,30 @@ class SettingsTab:
                 selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left', padx=(0, 8))
             self._vars[ev_attr] = v
 
-        # Grid table — col 0: label, col 1: Notify cb, col 2: Screenshot cb
+        # Grid table — col 0: label, col 1: Notify cb, col 2: Screenshot cb, col 3: Ping cb
         tbl = tk.Frame(notif_body, bg=app.BG2)
         tbl.pack(anchor='w', padx=16, pady=(0, 4))
         tbl.columnconfigure(0, minsize=140)
         tbl.columnconfigure(1, minsize=80)
         tbl.columnconfigure(2, minsize=100)
+        tbl.columnconfigure(3, minsize=80)
 
         # Header row
         tk.Label(tbl, text="",           font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=0, sticky='w')
         tk.Label(tbl, text="Notify",     font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=1, sticky='w', padx=(8,0))
         tk.Label(tbl, text="Screenshot", font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=2, sticky='w', padx=(8,0))
+        tk.Label(tbl, text="Ping",       font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=3, sticky='w', padx=(8,0))
 
         EVENT_ROWS = [
-            ("Quests",    'monitor_quests',   'ss_event_quest'),
-            ("Tasks",     'monitor_tasks',    'ss_event_task'),
-            ("Chat",      'monitor_chat',     'ss_event_chat'),
-            ("Errors",    'monitor_errors',   'ss_event_error'),
-            ("Drops",     'monitor_drops',    'ss_event_drops'),
-            ("Deaths",    'monitor_deaths',   'ss_event_death'),
-            ("Level Ups", 'monitor_levelups', 'ss_event_levelup'),
+            ("Quests",    'monitor_quests',   'ss_event_quest',   'ping_quest'),
+            ("Tasks",     'monitor_tasks',    'ss_event_task',    'ping_task'),
+            ("Chat",      'monitor_chat',     'ss_event_chat',    'ping_chat'),
+            ("Errors",    'monitor_errors',   'ss_event_error',   'ping_error'),
+            ("Drops",     'monitor_drops',    'ss_event_drops',   'ping_drops'),
+            ("Deaths",    'monitor_deaths',   'ss_event_death',   'ping_death'),
+            ("Level Ups", 'monitor_levelups', 'ss_event_levelup', 'ping_levelup'),
         ]
-        for r, (label, notify_attr, ss_attr) in enumerate(EVENT_ROWS, start=1):
+        for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
             tk.Label(tbl, text=label, font=app.MONO, bg=app.BG2, fg=app.FG,
                      anchor='w').grid(row=r, column=0, sticky='w', pady=2)
 
@@ -281,6 +283,13 @@ class SettingsTab:
                 bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.FG,
                 selectcolor=app.BG2, relief='flat', cursor='hand2').grid(row=r, column=2, padx=(16, 0), pady=2)
             self._vars[ss_attr] = ss_var
+
+            ping_default = app.cfg.get(ping_attr, ping_attr in ('ping_error', 'ping_death'))
+            ping_var = tk.BooleanVar(value=bool(ping_default))
+            tk.Checkbutton(tbl, variable=ping_var, font=app.MONO,
+                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.FG,
+                selectcolor=app.BG2, relief='flat', cursor='hand2').grid(row=r, column=3, padx=(16, 0), pady=2)
+            self._vars[ping_attr] = ping_var
 
         # Level every-N row
         lvl_row = tk.Frame(notif_body, bg=app.BG2); lvl_row.pack(fill='x', padx=8, pady=(2, 8))
@@ -400,6 +409,28 @@ class SettingsTab:
                  "Sends one grouped Discord alert when any account needs a script or client update.",
             font=app.MONO, bg=app.BG2, fg=app.FG2,
             wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 4))
+
+        ping_upd_row = tk.Frame(inner, bg=app.BG2); ping_upd_row.pack(fill='x', padx=16, pady=2)
+        ping_upd_var = tk.BooleanVar(value=bool(app.cfg.get('ping_update', True)))
+        tk.Checkbutton(ping_upd_row, text="Ping configured user on update alerts",
+            variable=ping_upd_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['ping_update'] = ping_upd_var
+
+        ar_upd_row = tk.Frame(inner, bg=app.BG2); ar_upd_row.pack(fill='x', padx=16, pady=2)
+        ar_upd_var = tk.BooleanVar(value=bool(app.cfg.get('auto_relaunch_on_update', False)))
+        tk.Checkbutton(ar_upd_row, text="Auto-relaunch clients when script/client update is found",
+            variable=ar_upd_var, font=app.MONO,
+            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
+            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
+        self._vars['auto_relaunch_on_update'] = ar_upd_var
+        tk.Label(inner,
+            text="  ⚠ Auto-relaunch on update will immediately restart affected clients when a "
+                 "script/client update is detected. This can interrupt any current activity, "
+                 "including Inferno/Jad.",
+            font=app.MONO, bg=app.BG2, fg=app.RED,
+            wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 8))
 
         # ── Auto-update ───────────────────────────────────────────────────────
         section("AUTO-UPDATE")

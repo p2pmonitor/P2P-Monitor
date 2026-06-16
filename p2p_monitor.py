@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.8.0
+P2P Monitor v1.8.1
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -52,7 +52,7 @@ from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.8.0"
+VERSION      = "1.8.1"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -74,6 +74,10 @@ DEFAULT_CFG = {
     "ss_event_task": False, "ss_event_quest": False, "ss_event_chat": False,
     "ss_event_error": False, "ss_event_drops": False,
     "ss_event_death": False, "ss_event_levelup": False,
+    "ping_quest": False, "ping_task": False, "ping_chat": False,
+    "ping_error": True, "ping_drops": False, "ping_death": True,
+    "ping_levelup": False, "ping_update": True,
+    "auto_relaunch_on_update": False,
     "ss_hide_paint_scheduled": False,
     "ss_hide_paint_task": False, "ss_hide_paint_quest": False,
     "ss_hide_paint_chat": False, "ss_hide_paint_error": False,

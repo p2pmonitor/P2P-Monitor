@@ -37,8 +37,40 @@ def _embed(title, desc, fields, color, image_filename=None):
 
 # ── Embed payload builders ─────────────────────────────────────────────────────
 def _desc(mention, folder):
-    """Standard embed description: optional mention + account line."""
-    return (f"<@{mention}>\n" if mention else "") + f"**Account:** {folder}"
+    """Standard embed description: account line only.
+    Mention is intentionally removed — real pings go via top-level content + allowed_mentions.
+    The mention param is kept for call-site compat but is no longer embedded.
+    """
+    return f"**Account:** {folder}"
+
+
+def normalize_mention_id(raw: str) -> str:
+    """Normalize <@123>, <@!123>, or 123 → '123'. Returns '' if not a valid snowflake."""
+    import re as _re
+    if not raw:
+        return ''
+    m = _re.search(r'(\d{15,21})', raw)
+    return m.group(1) if m else ''
+
+
+def apply_ping(payload: dict, mention_id: str, enabled: bool) -> dict:
+    """
+    Attach top-level content + allowed_mentions to payload when ping is enabled.
+    Returns the (mutated) payload dict.
+    If enabled is False or mention_id is empty, payload is returned unchanged.
+    """
+    uid = normalize_mention_id(mention_id)
+    if not enabled or not uid:
+        return payload
+    mention_str = f"<@{uid}>"
+    existing = payload.get('content', '')
+    if existing:
+        if mention_str not in existing:
+            payload['content'] = f"{mention_str} {existing}"
+    else:
+        payload['content'] = mention_str
+    payload['allowed_mentions'] = {'users': [uid]}
+    return payload
 
 def quest_started_payload(mention, folder, quest):
     return _embed("📜 Quest Started", _desc(mention, folder),
@@ -129,7 +161,7 @@ def screenshot_payload(account, trigger):
     return _embed("📸 Screenshot", f"**Account:** {account}\n**Trigger:** {trigger}", [], 0x7a8099)
 
 def combined_daily_summary_payload(mention, rows, window_str=''):
-    desc = (f"<@{mention}>\n" if mention else "") + "**Daily Summary**"
+    desc = "**Daily Summary**"
     if window_str:
         desc += f"\n{window_str}"
     lines = []
@@ -677,7 +709,8 @@ class DiscordRouter:
 
     # ── Public post surface ────────────────────────────────────────────────────
     def post_event(self, account, event_type, payload, url=None):
-        """Post an event embed. Mute-guarded. Enqueues screenshot if configured."""
+        """Post an event embed. Mute-guarded. Enqueues screenshot if configured.
+        If screenshot enqueue fails, falls back to posting the embed without screenshot."""
         if self._cb['is_muted'](account):
             return
         if url is None:
@@ -685,19 +718,25 @@ class DiscordRouter:
         if not url:
             return
         if self._cfg().get(f'ss_event_{event_type}', False):
-            self._cb['enqueue_screenshot'](SS_PRIORITY_EVENT, account, event_type,
-                                           url=url, payload=payload)
-        else:
-            ok, err = post_discord(url, payload)
-            if not ok:
-                def _retry(new_url, _p=payload):
-                    return post_discord(new_url, _add_recovery_footer(_p,
-                        "⚠ Thread/channel was recreated — screenshot may be delayed"))
-                if not self._handle_post_error(err, url, account, _retry):
-                    self._cb['log'](f"  🚫 Discord failed: {err}")
+            queued = self._cb['enqueue_screenshot'](SS_PRIORITY_EVENT, account, event_type,
+                                                    url=url, payload=payload)
+            if queued:
+                return  # screenshot worker will post the embed with image
+            # Fallback: enqueue refused (queue full, muted, etc.) — post embed-only
+            if self._cfg().get('debug', False):
+                self._cb['log'](f'[DEBUG] [{account}] Event screenshot enqueue failed — '
+                                f'falling back to embed-only for {event_type}')
+        ok, err = post_discord(url, payload)
+        if not ok:
+            def _retry(new_url, _p=payload):
+                return post_discord(new_url, _add_recovery_footer(_p,
+                    "⚠ Thread/channel was recreated — screenshot may be delayed"))
+            if not self._handle_post_error(err, url, account, _retry):
+                self._cb['log'](f"  🚫 Discord failed: {err}")
 
     def post_drop(self, account, drop_types, value):
-        """Build and post a drop embed. Uses drop-priority screenshot if enabled."""
+        """Build and post a drop embed. Uses drop-priority screenshot if enabled.
+        If screenshot enqueue fails, falls back to posting the embed without screenshot."""
         if self._cb['is_muted'](account):
             return
         url, _ = self.wh_with_thread('drops', account)
@@ -706,17 +745,24 @@ class DiscordRouter:
         if not url:
             return
         payload = drop_payload(self.mention(), account, drop_types, value)
+        if self._cfg().get('ping_drops', False):
+            apply_ping(payload, self.mention(), True)
         if self._cfg().get('ss_event_drops', False):
-            self._cb['enqueue_screenshot'](SS_PRIORITY_DROPS, account, 'drop',
-                                           url=url, payload=payload)
-        else:
-            ok, err = post_discord(url, payload)
-            if not ok:
-                def _retry(new_url, _p=payload):
-                    return post_discord(new_url, _add_recovery_footer(_p,
-                        "⚠ Thread/channel was recreated — screenshot may be delayed"))
-                if not self._handle_post_error(err, url, account, _retry):
-                    self._cb['log'](f"  🚫 Discord failed: {err}")
+            queued = self._cb['enqueue_screenshot'](SS_PRIORITY_DROPS, account, 'drop',
+                                                    url=url, payload=payload)
+            if queued:
+                return  # screenshot worker will post embed with image
+            # Fallback: enqueue refused — post embed-only
+            if self._cfg().get('debug', False):
+                self._cb['log'](f'[DEBUG] [{account}] Drop screenshot enqueue failed — '
+                                f'falling back to embed-only')
+        ok, err = post_discord(url, payload)
+        if not ok:
+            def _retry(new_url, _p=payload):
+                return post_discord(new_url, _add_recovery_footer(_p,
+                    "⚠ Thread/channel was recreated — screenshot may be delayed"))
+            if not self._handle_post_error(err, url, account, _retry):
+                self._cb['log'](f"  🚫 Discord failed: {err}")
 
     def post_task(self, account, task_name, activity,
                   title_override=None, footer_override=None):
@@ -733,10 +779,11 @@ class DiscordRouter:
             payload['embeds'][0]['title'] = title_override
         if footer_override:
             payload['embeds'][0]['footer'] = {'text': footer_override}
+        apply_ping(payload, self.mention(), self._cfg().get('ping_task', False))
         self.post_event(account, 'task', payload, url=url)
 
     def post_script_event(self, account, ev_key, detail=''):
-        """Post a script lifecycle event (no screenshot)."""
+        """Post a script lifecycle event. Script events always ping if mention is set."""
         if self._cb['is_muted'](account):
             return
         url, _ = self.wh_with_thread('monitor', account)
@@ -745,6 +792,8 @@ class DiscordRouter:
         if not url:
             return
         payload = script_event_payload(self.mention(), account, ev_key, detail=detail)
+        # Script events always ping (hardcoded on per spec)
+        apply_ping(payload, self.mention(), bool(self.mention()))
         ok, err = post_discord(url, payload)
         if not ok:
             def _retry(new_url, _p=payload):

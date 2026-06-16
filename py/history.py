@@ -371,3 +371,168 @@ def load_history_accounts():
         if d.is_dir() and (d / 'history.jsonl').exists():
             accounts.append(d.name)
     return accounts
+
+
+# ── Runtime / break stats ──────────────────────────────────────────────────────
+
+_SCRIPT_START_VALS  = {'start', 'script started', '▶️ script started'}
+_SCRIPT_STOP_VALS   = {'stop', 'script stopped', '⏹️ script stopped'}
+_SCRIPT_PAUSE_VALS  = {'pause', 'script paused', '⏸️ script paused'}
+_SCRIPT_RESUME_VALS = {'resume', 'script resumed', '▶️ script resumed'}
+_BREAK_VALS         = {'break'}
+
+
+def _norm_script_val(rec) -> str:
+    """Normalise a script_event or similar record value to a canonical verb."""
+    v = (rec.get('value', '') or rec.get('activity', '') or '').strip().lower()
+    if any(k in v for k in ('start',)):
+        return 'start'
+    if any(k in v for k in ('stop',)):
+        return 'stop'
+    if any(k in v for k in ('pause',)):
+        return 'pause'
+    if any(k in v for k in ('resume',)):
+        return 'resume'
+    return v
+
+
+def _parse_ts(ts_str: str) -> 'float | None':
+    """Parse a history timestamp string to epoch float. Returns None on failure."""
+    if not ts_str:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(ts_str[:19], fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def compute_runtime_stats(account: str,
+                           since_ts: 'float | None' = None,
+                           until_ts: 'float | None' = None) -> dict:
+    """
+    Compute runtime stats from history.jsonl for a single account.
+
+    Returns dict with:
+      total_run_secs    — time between Script Started/Resumed and Script Paused/Stopped
+      break_secs        — actual elapsed break intervals (task/activity == 'break')
+      active_secs       — total_run_secs - break_secs
+      break_pct         — break_secs / total_run_secs * 100 (0 if no run time)
+      account           — account name
+      range_from        — earliest timestamp seen (ISO str) or None
+      range_to          — latest timestamp seen (ISO str) or None
+    """
+    rows = load_history_for(account)
+
+    # Filter by date range
+    if since_ts or until_ts:
+        filtered = []
+        for r in rows:
+            ts = _parse_ts(r.get('time', ''))
+            if ts is None:
+                continue
+            if since_ts and ts < since_ts:
+                continue
+            if until_ts and ts > until_ts:
+                continue
+            filtered.append(r)
+        rows = filtered
+
+    if not rows:
+        return {'total_run_secs': 0, 'break_secs': 0, 'active_secs': 0,
+                'break_pct': 0.0, 'account': account, 'range_from': None, 'range_to': None}
+
+    # Dedupe: skip exact same (time, type, value, activity)
+    seen_keys: set = set()
+    deduped = []
+    for r in rows:
+        key = (r.get('time', ''), r.get('type', ''), r.get('value', ''), r.get('activity', ''))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(r)
+    rows = deduped
+
+    total_run_secs = 0.0
+    break_secs     = 0.0
+    run_start      = None   # timestamp of last Script Started/Resumed
+    break_start    = None   # timestamp of current break interval
+    on_break       = False
+
+    range_from = None
+    range_to   = None
+
+    for r in rows:
+        rtype = r.get('type', '')
+        ts    = _parse_ts(r.get('time', ''))
+        if ts is None:
+            continue
+
+        if range_from is None:
+            range_from = r.get('time', '')
+        range_to = r.get('time', '')
+
+        # Script lifecycle events
+        if rtype == 'script_event':
+            verb = _norm_script_val(r)
+
+            if verb in ('start', 'resume'):
+                if on_break and break_start is not None:
+                    # Break ended by script restart
+                    break_secs += ts - break_start
+                    break_start = None
+                    on_break    = False
+                run_start = ts
+
+            elif verb in ('pause', 'stop'):
+                if run_start is not None:
+                    total_run_secs += ts - run_start
+                    run_start = None
+                if on_break and break_start is not None:
+                    break_secs += ts - break_start
+                    break_start = None
+                    on_break    = False
+
+        # Break events
+        elif rtype == 'break':
+            if run_start is not None and not on_break:
+                on_break    = True
+                break_start = ts
+
+        # Any task that is not a break ends the break interval
+        elif rtype == 'task' and on_break:
+            if break_start is not None:
+                break_secs += ts - break_start
+            break_start = None
+            on_break    = False
+
+    # If still running (no stop/pause seen), we do not extrapolate — we only
+    # count confirmed intervals so stats don't drift with live sessions.
+
+    active_secs = max(0.0, total_run_secs - break_secs)
+    break_pct   = (break_secs / total_run_secs * 100) if total_run_secs > 0 else 0.0
+
+    return {
+        'total_run_secs': total_run_secs,
+        'break_secs':     break_secs,
+        'active_secs':    active_secs,
+        'break_pct':      break_pct,
+        'account':        account,
+        'range_from':     range_from,
+        'range_to':       range_to,
+    }
+
+
+def _fmt_secs(secs: float) -> str:
+    """Format seconds as 'Xh Ym' or 'Ym Zs' for display."""
+    secs = int(secs)
+    h, rem = divmod(secs, 3600)
+    m = rem // 60
+    s = rem % 60
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
