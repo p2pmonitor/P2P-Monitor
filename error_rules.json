@@ -164,6 +164,11 @@
       "flags": ["IGNORECASE"]
     },
     {
+      "pattern": "You need goldsmith gauntlets to smith gold",
+      "label": "Missing goldsmith gauntlets",
+      "flags": ["IGNORECASE"]
+    },
+    {
       "pattern": "QuestStep traversal failed",
       "label": "Quest step traversal failed (script could not determine next step)",
       "flags": [
