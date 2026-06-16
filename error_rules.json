@@ -59,7 +59,7 @@
     },
     {
       "key": "ge_fail",
-      "pattern": "GE failed to add item|I couldn't buy any of the items",
+      "pattern": "I couldn't buy any of the items",
       "threshold": 1,
       "window_sec": 0,
       "dedupe_sec": 600,
