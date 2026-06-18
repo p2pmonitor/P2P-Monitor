@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.0.0-beta.2
+### Checkpoint 1 correction — warm theme tokens
+
+**Internal beta — not the public 2.0.0 release.** Still on top of Checkpoint 1 (navigation/theme foundation); Stats tab work hasn't started yet. Stable public release remains v1.8.3.
+
+**Theme correction**
+- Beta.1's background tokens (`BG`/`BG2`/`BG3`/`BG4`) and `FG2` were still blue-dominant in every channel comparison (e.g. `BG2 #161a22` = R22/G26/**B34**) — a navy/slate canvas, not the warm charcoal/espresso/graphite that was intended. That's what kept the app reading as "terminal/cyan-ish" even though the accent color itself had already changed away from cyan.
+- Corrected all five tokens to genuinely warm neutrals (R ≥ G > B in every shade):
+  - `BG`: `#0f1115` → `#13110f`
+  - `BG2`: `#161a22` → `#1a1714`
+  - `BG3`: `#1d2130` → `#221e19`
+  - `BG4`: `#252840` → `#2c2620`
+  - `FG2`: `#78788a` → `#8c8478`
+- Lightness progression across the four background tiers is preserved (same relative layering/contrast as beta.1), only the hue shifted from cool to warm.
+- `ACC`, `ACC2`, `GREEN`, `RED`, `YEL`, `PUR`, `FG` were already correct (sage green, amber, coral, warm cream) and are unchanged.
+- Confirmed nav bar and window chrome were already using the sans-serif font tokens (`SANS`/`SANSB`/`BIG`) from beta.1 — no font change was needed, this was purely a color-token fix.
+- No layout, behavior, or tab content changed. Monitor tab redesign is still scheduled for Checkpoint 4.
+
+**Files changed:**
+- `p2p_monitor.py` — version 2.0.0-beta.2; corrected `BG`/`BG2`/`BG3`/`BG4`/`FG2` color tokens
+- `CHANGELOG.md` — this entry
+
+---
+
 ## v2.0.0-beta.1
 ### Checkpoint 1 — UI foundation: custom navigation, warm theme palette, Stats tab slot
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.1
+P2P Monitor v2.0.0-beta.2
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.1"
+VERSION      = "2.0.0-beta.2"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -159,17 +159,18 @@ class App(tk.Tk):
     VERSION = VERSION
 
     # ── Warm dark palette ──────────────────────────────────────────────────────
-    # Backgrounds: warm charcoal/espresso/graphite
-    BG   = '#0f1115'   # main window background
-    BG2  = '#161a22'   # panels, cards, tab content
-    BG3  = '#1d2130'   # treeviews, elevated sections
-    BG4  = '#252840'   # borders, separators, table headers
+    # Backgrounds: warm charcoal/espresso/graphite — every shade below is R >= G > B,
+    # i.e. genuinely warm-neutral, not a blue/navy-tinted "dark mode" grey.
+    BG   = '#13110f'   # main window background — warm near-black
+    BG2  = '#1a1714'   # panels, cards, tab content
+    BG3  = '#221e19'   # treeviews, elevated sections
+    BG4  = '#2c2620'   # borders, separators, table headers
 
-    # Primary accent: muted sage/olive green
-    ACC  = '#4a8f5c'   # active tab, primary buttons, links (replaces cyan)
-    ACC2 = '#c87830'   # warm amber-orange (warnings, secondary emphasis)
+    # Primary accent: muted sage/olive green — reserved for active/running/accent states
+    ACC  = '#4a8f5c'   # active tab, primary buttons, links
+    ACC2 = '#c87830'   # warm amber-orange (secondary highlights)
 
-    # Status / event colours (muted from previous neon palette)
+    # Status / event colours
     GREEN = '#5cbf72'  # running/ok/success/drops
     RED   = '#d04848'  # error/stopped
     YEL   = '#c8a840'  # level-ups, gold/quests, amber highlights
@@ -177,7 +178,7 @@ class App(tk.Tk):
 
     # Text
     FG   = '#e4ddd4'   # primary text — warm off-white/cream
-    FG2  = '#78788a'   # secondary/muted text
+    FG2  = '#8c8478'   # secondary/muted text — warm muted grey, not blue-grey
 
     # ── Fonts ──────────────────────────────────────────────────────────────────
     # Sans-serif — used for nav bar, window chrome, and new UI elements in v2+
