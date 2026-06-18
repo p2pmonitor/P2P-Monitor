@@ -227,7 +227,7 @@ It checks:
 - The account name and local P2P Master AI script version from the title
 - The DreamBot client version from the title
 - Whether `(NEW CLIENT AVAILABLE)` is present
-- The latest SDN script version fetched from the Cloudflare Worker cache
+- The latest P2P Master AI script version from the DreamBot SDN API, with Cloudflare Worker as a silent fallback if SDN is unavailable
 
 Checks run once at startup, then on the configured interval (default 6h, minimum 1m).
 

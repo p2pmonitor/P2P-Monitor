@@ -783,7 +783,7 @@ class DiscordRouter:
         self.post_event(account, 'task', payload, url=url)
 
     def post_script_event(self, account, ev_key, detail=''):
-        """Post a script lifecycle event. Script events always ping if mention is set."""
+        """Post a script lifecycle event. Pings if mention is set and ping_script_event is on."""
         if self._cb['is_muted'](account):
             return
         url, _ = self.wh_with_thread('monitor', account)
@@ -792,8 +792,9 @@ class DiscordRouter:
         if not url:
             return
         payload = script_event_payload(self.mention(), account, ev_key, detail=detail)
-        # Script events always ping (hardcoded on per spec)
-        apply_ping(payload, self.mention(), bool(self.mention()))
+        # Script events ping if a mention is set AND the script-event ping toggle is on.
+        apply_ping(payload, self.mention(),
+                   bool(self.mention()) and self._cfg().get('ping_script_event', True))
         ok, err = post_discord(url, payload)
         if not ok:
             def _retry(new_url, _p=payload):

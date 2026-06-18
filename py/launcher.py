@@ -28,6 +28,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+
+from py.util import write_debug_entry
 from pathlib import Path
 from typing import Optional
 
@@ -319,7 +321,7 @@ def _validate_jar(cfg: dict) -> Optional[str]:
 
 # ── Background PID discovery and cache ────────────────────────────────────────
 
-def _discover_and_cache(account: str, immediate_pid: int, log_fn=None) -> None:
+def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict = None) -> None:
     """
     Run in a daemon thread after Popen. Polls for the real DreamBot client PID
     via window title, caches it in launcher_state.json.
@@ -335,7 +337,10 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None) -> None:
     if result:
         real_pid = result['pid']
         _set_pid(account, real_pid)
-        _log(f'✅ [{account}] Client PID confirmed: {real_pid}')
+        write_debug_entry('launcher', {'account': account,
+                           'msg': f'Client PID confirmed: {real_pid}'})
+        if cfg and cfg.get('debug', False):
+            _log(f'✅ [{account}] Client PID confirmed: {real_pid}')
     else:
         _set_pid(account, immediate_pid)
         _log(f'⚠️ [{account}] Client window not found within 30s — caching launcher PID {immediate_pid}.')
@@ -395,7 +400,7 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
 
     threading.Thread(
         target=_discover_and_cache,
-        args=(account, immediate_pid, log_fn),
+        args=(account, immediate_pid, log_fn, cfg),
         daemon=True,
     ).start()
 
@@ -419,6 +424,15 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     def _log(msg):
         if log_fn:
             log_fn(msg)
+
+    def _dbg_log(msg, category='launcher', extra=None):
+        """Always write to debug.jsonl; mirror to Monitor only if debug checkbox on."""
+        payload = {'account': account, 'msg': msg}
+        if extra:
+            payload.update(extra)
+        write_debug_entry(category, payload)
+        if cfg and cfg.get('debug', False):
+            _log(msg)
 
     preset = find_preset(cfg, account)
     if not preset:
@@ -482,7 +496,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
                                 message=f'Launch failed: {exc}')
         threading.Thread(
             target=_discover_and_cache,
-            args=(account, immediate_pid, log_fn),
+            args=(account, immediate_pid, log_fn, cfg),
             daemon=True,
         ).start()
         return LaunchResult(ok=True, account=account, action='launched',
@@ -490,7 +504,8 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
                             pid=immediate_pid)
 
     # ── Step 3: safe close ─────────────────────────────────────────────────────
-    _log(f'🔴 [{account}] Closing client (PID {target_pid}, via {discovery_method})...')
+    _dbg_log(f'🔴 [{account}] Closing client (PID {target_pid}, via {discovery_method})...',
+             extra={'target_pid': target_pid, 'discovery_method': discovery_method})
     _set_pid(account, None)  # clear stale state before close
     # Mark suppress window BEFORE terminating — watcher detects "Stopped P2P" shortly
     # after this and must not trigger an auto-restart loop.
@@ -501,12 +516,13 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     except Exception as exc:
         _log(f'⚠️ [{account}] terminate raised: {exc} — continuing with relaunch.')
 
-    _log(f'⏳ [{account}] Waiting {safe_delay_seconds}s before relaunch...')
+    _dbg_log(f'⏳ [{account}] Waiting {safe_delay_seconds}s before relaunch...',
+             extra={'safe_delay_seconds': safe_delay_seconds})
     time.sleep(safe_delay_seconds)
 
     # ── Step 4: relaunch ──────────────────────────────────────────────────────
     cmd = build_command(jar, preset)
-    _log(f'🚀 [{account}] Relaunching: {" ".join(shlex.quote(c) for c in cmd)}')
+    _dbg_log(f'🚀 [{account}] Relaunching: {" ".join(shlex.quote(c) for c in cmd)}')
     try:
         immediate_pid = _popen(cmd)
     except Exception as exc:
@@ -515,7 +531,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
 
     threading.Thread(
         target=_discover_and_cache,
-        args=(account, immediate_pid, log_fn),
+        args=(account, immediate_pid, log_fn, cfg),
         daemon=True,
     ).start()
 

@@ -8,10 +8,49 @@ by py/platform_ops.py Linux backends only — callers outside platform_ops
 should not import them directly.
 """
 
+import json
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime
+from pathlib import Path
+
+
+# ── Structured session debug log (~/.p2p_monitor/debug.jsonl) ─────────────────
+# Always-on structured diagnostics, independent of the debug checkbox. The
+# checkbox only controls whether a short human-readable line also mirrors
+# live to the Monitor tab (handled by callers, e.g. LogWatcher._dbg).
+DEBUG_LOG_FILE = Path.home() / ".p2p_monitor" / "debug.jsonl"
+_debug_log_lock = threading.Lock()
+
+
+def reset_debug_log():
+    """Truncate/reset debug.jsonl. Called once on monitor startup. Best-effort —
+    never raises, since a failed reset must not prevent the monitor from starting."""
+    try:
+        DEBUG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _debug_log_lock:
+            DEBUG_LOG_FILE.write_text('')
+    except Exception:
+        pass
+
+
+def write_debug_entry(category, payload=None):
+    """Append one structured JSON line to debug.jsonl. Best-effort — never raises,
+    so a diagnostics failure can never crash the monitor or interrupt a caller's
+    own logic (e.g. dedupe, launcher)."""
+    try:
+        entry = {'ts': now_str(), 'category': category}
+        if payload:
+            entry.update(payload)
+        DEBUG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(entry, default=str)
+        with _debug_log_lock:
+            with open(DEBUG_LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(line + '\n')
+    except Exception:
+        pass
 
 
 def is_frozen():

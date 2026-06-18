@@ -242,16 +242,22 @@ def get_scanned_logs(account, log_fn=None, debug=False):
                 log_fn(f'[DEBUG] get_scanned_logs read failed for {hf}: {e}')
     return scanned
 
-def _dedup_history_file(hf, log_fn=None, debug=False):
+def _dedup_history_file(hf, log_fn=None, debug=False, account=None):
     """
     Read a history JSONL file, remove duplicate entries (same time+type+value+activity),
     keeping the first occurrence. Rewrites the file in-place if duplicates are found.
     Returns (rows, dupes_removed) where rows is the deduplicated list.
+
+    When duplicates are removed, a structured diagnostic entry is always written to
+    debug.jsonl (category 'history_dedupe'), regardless of the debug checkbox — this
+    does not change dedupe behavior, it only records what was removed. If debug=True
+    and log_fn is given, a short summary line is also mirrored to the Monitor tab.
     """
     if not hf.exists():
         return [], 0
-    rows = []
-    seen = set()
+    rows    = []
+    removed = []
+    seen  = set()
     dupes = 0
     try:
         with open(hf, 'r', encoding='utf-8', errors='replace') as f:
@@ -271,6 +277,7 @@ def _dedup_history_file(hf, log_fn=None, debug=False):
                        rec.get('value', ''), rec.get('activity', ''))
                 if key in seen:
                     dupes += 1
+                    removed.append(rec)
                 else:
                     seen.add(key)
                     rows.append(rec)
@@ -290,6 +297,39 @@ def _dedup_history_file(hf, log_fn=None, debug=False):
         except Exception as e:
             if debug and log_fn:
                 log_fn(f'[DEBUG] _dedup_history_file rewrite failed for {hf}: {e}')
+
+        # ── Diagnostics: always written, independent of the debug checkbox ──────
+        try:
+            from py.util import write_debug_entry, now_str
+            acct = account or hf.parent.name
+            type_counts = {}
+            for r in removed:
+                t = r.get('type', '')
+                type_counts[t] = type_counts.get(t, 0) + 1
+            MAX_LOGGED = 200
+            truncated  = len(removed) > MAX_LOGGED
+            dup_entries = [
+                {'time': r.get('time', ''), 'type': r.get('type', ''),
+                 'value': r.get('value', ''), 'activity': r.get('activity', '')}
+                for r in removed[:MAX_LOGGED]
+            ]
+            payload = {
+                'cleanup_ts':     now_str(),
+                'account':        acct,
+                'history_file':   str(hf),
+                'dupes_removed':  dupes,
+                'type_counts':    type_counts,
+                'duplicates':     dup_entries,
+            }
+            if truncated:
+                payload['truncated'] = True
+            write_debug_entry('history_dedupe', payload)
+
+            if debug and log_fn:
+                log_fn(f"[DEBUG] history_dedupe: {acct} removed {dupes} duplicates; "
+                       f"type_counts={type_counts}")
+        except Exception:
+            pass  # diagnostics must never affect dedupe behavior
 
     return [r for r in rows if isinstance(r, dict) and r.get('type') != 'scan'], dupes
 
@@ -358,7 +398,7 @@ def load_history_for(account, log_fn=None, debug=False):
     files = sorted(acc_dir.glob('history*.jsonl'), key=lambda f: f.stat().st_mtime)
     rows = []
     for hf in files:
-        clean_rows, dupes = _dedup_history_file(hf, log_fn=log_fn, debug=debug)
+        clean_rows, dupes = _dedup_history_file(hf, log_fn=log_fn, debug=debug, account=account)
         rows.extend(clean_rows)
     return rows
 

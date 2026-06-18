@@ -230,7 +230,7 @@ class SettingsTab:
             font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(anchor='w', padx=8, pady=(4, 6))
 
         # Script Events — inline checkboxes at top
-        script_row = tk.Frame(notif_body, bg=app.BG2); script_row.pack(fill='x', padx=8, pady=(0, 8))
+        script_row = tk.Frame(notif_body, bg=app.BG2); script_row.pack(fill='x', padx=8, pady=(0, 2))
         tk.Label(script_row, text="Script Events - Notify when Script:", font=app.MONO,
                  bg=app.BG2, fg=app.FG2).pack(side='left', padx=(0, 6))
         for ev_lbl, ev_attr in [
@@ -244,6 +244,14 @@ class SettingsTab:
                 bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
                 selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left', padx=(0, 8))
             self._vars[ev_attr] = v
+
+        ping_se_row = tk.Frame(notif_body, bg=app.BG2); ping_se_row.pack(fill='x', padx=8, pady=(0, 8))
+        ping_se_var = tk.BooleanVar(value=bool(app.cfg.get('ping_script_event', True)))
+        tk.Checkbutton(ping_se_row, text="Ping for script events", variable=ping_se_var,
+            font=app.MONO, bg=app.BG2, fg=app.FG, activebackground=app.BG2,
+            activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
+            cursor='hand2').pack(side='left', padx=(140, 0))
+        self._vars['ping_script_event'] = ping_se_var
 
         # Grid table — col 0: label, col 1: Notify cb, col 2: Screenshot cb, col 3: Ping cb
         tbl = tk.Frame(notif_body, bg=app.BG2)

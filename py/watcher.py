@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from py.config  import save_config
-from py.util    import now_str
+from py.util    import now_str, write_debug_entry, reset_debug_log
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
 from py.history import (append_history, record_log_scanned, get_scanned_logs,
@@ -218,6 +218,14 @@ class LogWatcher:
         if self.cfg and self.cfg.get('debug', False):
             self.log(f'[DEBUG] {msg}')
 
+    def _debug_entry(self, category, payload=None, mirror_msg=None):
+        """Always write a structured entry to debug.jsonl, regardless of the debug
+        checkbox. If mirror_msg is given, also mirror a short readable line to the
+        Monitor tab — but only when the debug checkbox is enabled (via _dbg)."""
+        write_debug_entry(category, payload)
+        if mirror_msg is not None:
+            self._dbg(mirror_msg)
+
     # ── Dir discovery ──────────────────────────────────────────────────────────
     def _get_log_dirs(self):
         now = time.time()
@@ -244,6 +252,9 @@ class LogWatcher:
     def start(self, cfg):
         if self._running:
             return
+        # Reset the structured session debug log for this run. Best-effort —
+        # never blocks startup if it fails.
+        reset_debug_log()
         self.cfg      = cfg
         self._running = True
         self._router  = DiscordRouter({
@@ -810,14 +821,16 @@ class LogWatcher:
         """
         if not self.cfg.get('update_check_enabled', True):
             return
+        now = time.time()
         if not force:
             hours   = int(self.cfg.get('update_check_interval_hours', 6))
             minutes = int(self.cfg.get('update_check_interval_minutes', 0))
             interval_secs = max(60, hours * 3600 + minutes * 60)
-            now = time.time()
             if now - self._last_update_check_slot < interval_secs:
                 return
-            self._last_update_check_slot = now
+        # Record this as the most recent check — including forced (startup)
+        # checks — so the periodic loop doesn't immediately re-check.
+        self._last_update_check_slot = now
 
         # Read all DreamBot window titles using existing platform helpers
         try:
@@ -1101,10 +1114,14 @@ class LogWatcher:
                          'deaths': counts.get('death',0), 'levels': counts.get('levelup',0),
                          'uptime': uptime_str, 'break_str': break_str})
         acct_names = ', '.join(r['account'] for r in rows)
-        self.log(f"📊 Sending daily summary — {len(rows)} account(s): {acct_names} [{window_str}]")
+        self._debug_entry('daily_summary',
+            {'accounts': [r['account'] for r in rows], 'window': window_str},
+            mirror_msg=f"📊 Sending daily summary — {len(rows)} account(s): {acct_names} [{window_str}]")
         ok, err = post_discord(url, combined_daily_summary_payload(self._router.mention(), rows, window_str))
         if not ok:
-            self.log(f"  🚫 Daily summary failed: {err}")
+            self._debug_entry('daily_summary',
+                {'accounts': [r['account'] for r in rows], 'window': window_str, 'error': str(err)},
+                mirror_msg=f"  🚫 Daily summary failed: {err}")
 
     def _prune_dedupe(self):
         with self._offsets_lock:
@@ -1712,7 +1729,9 @@ class LogWatcher:
                 try:
                     from py.history import _dedup_history_file, history_file
                     hf = history_file(account)
-                    _, dupes = _dedup_history_file(hf, log_fn=self.log)
+                    _, dupes = _dedup_history_file(hf, log_fn=self.log,
+                                                    debug=self.cfg.get('debug', False),
+                                                    account=account)
                     if dupes:
                         self.log(f'🧹 [{account}] Cleaned {dupes} duplicate history entries')
                 except Exception as e:
@@ -1981,13 +2000,18 @@ class LogWatcher:
             return False  # fail safe
 
     def _maybe_schedule_auto_restart(self, folder: str, lines: list,
-                                     state: 'AccountState') -> str:
+                                     state: 'AccountState') -> tuple:
         """
         Called from _process_lines after a 'script_event / stop' fires for 'folder'.
-        Returns a status string used to annotate the Script Stopped Discord embed:
-          'disabled'                                       — feature off (silent in monitor)
-          'skipped — <reason>'                             — gate blocked it
-          'scheduled in Nm' / 'scheduled at H:MM AM/PM'   — timer armed
+        Returns (status, message):
+          status  — short status string used to annotate the Script Stopped Discord embed:
+                      'disabled'                                       — feature off (silent in monitor)
+                      'skipped — <reason>'                             — gate blocked it
+                      'scheduled in Nm' / 'scheduled at H:MM AM/PM'   — timer armed
+          message — Monitor tab line to log for this status, or None for 'disabled'
+                      (silent). The caller logs this *after* the Script Stopped line
+                      so visible ordering is correct; scheduling itself still happens
+                      here, synchronously, regardless of when the caller logs it.
 
         Gate checks (in order):
           1. auto_restart_enabled in cfg
@@ -2000,15 +2024,14 @@ class LogWatcher:
 
         # ── Gate 1: feature enabled ────────────────────────────────────────────
         if not self.cfg.get('auto_restart_enabled', False):
-            return 'disabled'  # silent in monitor tab; shown in Discord embed only
+            return 'disabled', None  # silent in monitor tab; shown in Discord embed only
 
         # ── Gate 2: suppress window (monitor-initiated relaunch) ──────────────
         try:
             from py.launcher import is_relaunch_suppressed
             if is_relaunch_suppressed(account):
                 status = 'skipped — monitor-initiated relaunch in progress'
-                self.log(f'🔄 [{account}] Auto restart {status}.')
-                return status
+                return status, f'🔄 [{account}] Auto restart {status}.'
         except Exception:
             pass
 
@@ -2018,22 +2041,19 @@ class LogWatcher:
         all_recent = list(lines) + recent_snapshot
         if any(sig in ln.lower() for ln in all_recent):
             status = 'skipped — manual stop detected'
-            self.log(f'🔄 [{account}] Auto restart {status}.')
-            return status
+            return status, f'🔄 [{account}] Auto restart {status}.'
 
         # ── Gate 4: game update window ─────────────────────────────────────────
         if self.cfg.get('auto_restart_game_update_window_only', True):
             if not self._in_game_update_window():
                 status = 'skipped — outside game update window (Tue/Wed 1–4 AM PT)'
-                self.log(f'🔄 [{account}] Auto restart {status}.')
-                return status
+                return status, f'🔄 [{account}] Auto restart {status}.'
 
         # ── Gate 5: preset exists ──────────────────────────────────────────────
         from py.launcher import find_preset
         if not find_preset(self.cfg, account):
             status = 'skipped — no launcher preset found'
-            self.log(f'🔄 [{account}] Auto restart {status}.')
-            return status
+            return status, f'🔄 [{account}] Auto restart {status}.'
 
         # ── Compute delay ──────────────────────────────────────────────────────
         delay_secs, delay_desc = self._compute_restart_delay(account, state)
@@ -2045,8 +2065,8 @@ class LogWatcher:
             state._pending_restart_timer = None
 
         # ── Schedule ───────────────────────────────────────────────────────────
-        status = f'scheduled {delay_desc}'
-        self.log(f'⏰ [{account}] Auto restart {status} after Script Stopped.')
+        status  = f'scheduled {delay_desc}'
+        message = f'⏰ [{account}] Auto restart {status} after Script Stopped.'
 
         def _do_auto_restart():
             # Gate: watcher stopped during delay
@@ -2079,7 +2099,7 @@ class LogWatcher:
         t.daemon = True
         t.start()
         state._pending_restart_timer = t
-        return status
+        return status, message
 
     def _compute_restart_delay(self, account: str,
                                state: 'AccountState') -> 'tuple[float, str]':
@@ -2216,6 +2236,12 @@ class LogWatcher:
         # Parse all events through the unified reader pipeline.
         parsed = parse_lines(lines)
 
+        # Snapshot the task/activity context as it stood *before* this batch —
+        # used by reset attribution below so a reset line is matched against the
+        # task active at that point in the log, not whatever this batch ends on.
+        _pre_batch_task     = state.last_task
+        _pre_batch_activity = state.last_activity
+
         for ev in parsed:
             etype    = ev['type']
             value    = ev.get('value', '')
@@ -2309,7 +2335,10 @@ class LogWatcher:
                 skill = value
                 level = int(activity) if activity.isdigit() else 0
                 is_99 = ev.get('_is_99', False)
-                notify_every = int(self.cfg.get('levelup_every', 5))
+                try:
+                    notify_every = max(1, int(self.cfg.get('levelup_every', 5)))
+                except (ValueError, TypeError):
+                    notify_every = 5
                 last_notified = state.notified_levels.get(skill, 0)
                 if is_99:
                     should_notify = True  # Level 99 ALWAYS notifies
@@ -2324,10 +2353,11 @@ class LogWatcher:
 
             elif etype == 'script_event':
                 # ── Auto-restart logic: runs regardless of notification/mute settings ──
-                ar_status = None
+                ar_status  = None
+                ar_message = None
                 if value == 'stop':
                     try:
-                        ar_status = self._maybe_schedule_auto_restart(folder, lines, state)
+                        ar_status, ar_message = self._maybe_schedule_auto_restart(folder, lines, state)
                     except Exception as _ar_exc:
                         self._dbg(f'[auto_restart] scheduling error for {folder}: {_ar_exc}')
                 elif value == 'start':
@@ -2348,8 +2378,16 @@ class LogWatcher:
                     'pause':  'monitor_script_pause',   'resume': 'monitor_script_resume',
                 }
                 if not self.cfg.get(cfg_key_map.get(value, ''), True):
+                    # Script Stopped line itself is suppressed by config, but the
+                    # auto-restart message (if any) still logs — same as before.
+                    if ar_message:
+                        self.log(ar_message)
                     continue
                 self.log(f"🖥️ [{folder}] {activity}")
+                # Log Script Stopped before the auto-restart message — visible
+                # ordering should match the order these things actually happened.
+                if ar_message:
+                    self.log(ar_message)
                 if self._is_muted(folder):
                     continue
 
@@ -2357,8 +2395,63 @@ class LogWatcher:
             self.handle_event(ev, folder, source='live')
             events.append(ev)
 
+        # Resolve the task/activity context "as of" a given line position in this
+        # batch, using the last task/slayer_task parsed event at or before that
+        # line — falls back to the pre-batch context if none exists in-batch.
+        # Used by reset attribution below so a reset line is matched against the
+        # task active when it occurred, not whatever task this batch ends on.
+        def _task_ctx_as_of(line_pos):
+            best = None
+            for pe in parsed:
+                idx = pe.get('_line_idx')
+                if idx is None or idx > line_pos:
+                    continue
+                if pe['type'] == 'task':
+                    best = (pe.get('value', ''), pe.get('activity', ''))
+                elif pe['type'] == 'slayer_task':
+                    best = ('Slayer', f"{pe.get('activity', '')} {pe.get('value', '')}".strip())
+            if best is not None:
+                return best
+            return (_pre_batch_task, _pre_batch_activity)
+
+        # Last-resort fallback for reset attribution ONLY: scan the raw lines
+        # of this same batch, before the reset line, for the nearest
+        # "Task is X" (and an optional following "Activity is Y" before the
+        # reset line). This covers the case where _task_ctx_as_of() above
+        # finds nothing — e.g. the very first batch ever processed for an
+        # account (no pre-batch state) where slice_tasks() has already
+        # suppressed the "Task is X" announcement itself because a
+        # "> Locking" line follows it within the same batch. Purely a label
+        # lookup for the reset error message — it does not parse or emit any
+        # task event, and does not touch state.last_task / state.last_activity
+        # or any other current/global task state. Lines at or after the reset
+        # line (later "NEW TASK" / "Task is Slayer" / "Slayer -> ...") are
+        # never considered.
+        def _task_ctx_from_raw_lines(line_pos):
+            task_name = ''
+            task_idx  = None
+            for i in range(line_pos - 1, -1, -1):
+                b = strip_prefix(lines[i]).strip()
+                if re.match(r'^Task is(?:\s+NOT)?\s+doable', b, re.IGNORECASE):
+                    continue
+                m = re.match(r'^Task is\s+(.+)$', b, re.IGNORECASE)
+                if m:
+                    task_name = m.group(1).strip()
+                    task_idx  = i
+                    break
+            if task_idx is None:
+                return '', ''
+            activity = ''
+            for j in range(task_idx + 1, line_pos):
+                b = strip_prefix(lines[j]).strip()
+                m = re.match(r'^Activity is\s+(.+)$', b, re.IGNORECASE)
+                if m:
+                    activity = m.group(1).strip()
+                    break
+            return task_name, activity
+
         # Standalone activity updates (no Discord, status only)
-        for line in lines:
+        for _line_pos, line in enumerate(lines):
             b = strip_prefix(line).strip()
             if 'need a new slayer task' in b.lower() or 'getting new task' in b.lower():
                 # Only set Fetching task... if no slayer_task event already fired
@@ -2381,11 +2474,16 @@ class LogWatcher:
             elif 'Escaped ship -> Startup' in line:
                 _reset_trigger = ('Escaped ship → Startup', 'Script escaped ship and teleported home to reset')
             if _reset_trigger and self.cfg.get('monitor_errors', True):
-                last_t = state.last_task     or ''
-                last_a = state.last_activity or ''
+                last_t, last_a = _task_ctx_as_of(_line_pos)
+                last_t = last_t or ''
+                last_a = last_a or ''
                 if last_t.lower() in ('break', ''):
                     last_t = ''
                     last_a = ''
+                if not last_t:
+                    # Nothing usable from parsed events or pre-batch state —
+                    # fall back to scanning this batch's raw lines directly.
+                    last_t, last_a = _task_ctx_from_raw_lines(_line_pos)
                 task_display = f"{last_t} — {last_a}" if last_a else last_t
                 task_ctx     = task_display
                 label        = task_display or f"Script reset ({_reset_trigger[0]})"
@@ -2626,7 +2724,8 @@ class LogWatcher:
             return 'ok'  # already a member
 
         if _is_429(err):
-            self.log(f"🤖 Rate limited checking membership for thread {thread_id} — skipping this pass")
+            self._debug_entry('discord_thread', {'thread_id': thread_id, 'reason': 'rate_limited'},
+                mirror_msg=f"🤖 Rate limited checking membership for thread {thread_id} — skipping this pass")
             return 'rate_limited'
 
         if _is_deleted_thread(err):

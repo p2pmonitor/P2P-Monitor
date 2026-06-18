@@ -1,12 +1,51 @@
 # Changelog
 
+## v1.8.3
+### Bugfix/cleanup release: update-check timing, reset attribution, Monitor tab cleanup, debug.jsonl
+
+**Fixes**
+- Startup update-awareness check (`force=True`) now updates `_last_update_check_slot`, so the periodic check no longer re-runs immediately after startup
+- `levelup_every` is now clamped to a minimum of 1 (`max(1, int(...))`, falls back to 5 on bad config values) — previously `levelup_every = 0` could divide by zero
+- Script reset attribution (`Escaped ship -> Startup`, `Stuck walking -> Startup`) now uses the task/activity active at the reset line's position in the batch (via each parsed event's `_line_idx`), instead of whatever task the batch ends on — fixes occasional mislabeling when a reset and a new task land in the same read batch
+- `Script Stopped` now logs to the Monitor tab before the corresponding `Auto restart scheduled/skipped ...` line — previously the auto-restart message could appear first
+
+**New: structured session debug log**
+- New `~/.p2p_monitor/debug.jsonl`, truncated on monitor startup
+- Important diagnostics (history dedupe, launcher/relaunch internals, Discord thread rate-limiting, daily summary internals) are now always written here, independent of the debug checkbox
+- The debug checkbox now only controls whether a short human-readable line also mirrors live to the Monitor tab — Monitor tab behavior stays append-only, with no replay of old debug entries and no auto-sorting
+
+**History dedupe diagnostics**
+- When `_dedup_history_file()` removes duplicate rows, it now writes a `history_dedupe` entry to `debug.jsonl` with the cleanup timestamp, account, history file path, duplicate count, type counts, and the removed entries themselves (capped at 200, with `truncated: true` if more were removed)
+- Dedupe behavior itself is unchanged — this is diagnostics only
+- Covers both backfill-triggered dedupe and History tab loads
+
+**Monitor tab cleanup**
+- Moved internal/plumbing lines to debug-only: Discord thread membership rate-limiting, daily summary send/failure internals, and launcher internals (closing client, waiting before relaunch, relaunching, client PID confirmed)
+- Monitor tab keeps real account/script/task/error/drop/death/level/update events
+
+**New: script event ping toggle**
+- New setting "Ping for script events" (`ping_script_event`, default `True`) under Event Notifications — when off, script start/stop/pause/resume Discord messages still post but without a mention ping. Task/error/drop/death/level ping settings are unaffected.
+
+**Files changed:**
+- `py/watcher.py` — update-check timing fix; `levelup_every` clamp; reset attribution via `_line_idx`; `_maybe_schedule_auto_restart()` returns `(status, message)` instead of logging directly; `_debug_entry()` helper; `debug.jsonl` reset on `start()`; daily summary and thread rate-limit lines moved to debug
+- `py/history.py` — `_dedup_history_file()` writes `history_dedupe` diagnostics to `debug.jsonl`; accepts optional `account` param
+- `py/launcher.py` — `_discover_and_cache()` and `relaunch_account()` move internal lines to `debug.jsonl`, mirroring to Monitor only when the debug checkbox is enabled
+- `py/discord.py` — `post_script_event()` respects new `ping_script_event` config key
+- `py/util.py` — new `write_debug_entry()` / `reset_debug_log()` helpers for `~/.p2p_monitor/debug.jsonl`
+- `ui/settings_tab.py` — new "Ping for script events" checkbox
+- `p2p_monitor.py` — version 1.8.3; `ping_script_event` added to `DEFAULT_CFG`
+- `README.md` — corrected SDN/Worker wording
+- `CHANGELOG.md` — softened v1.8.2 compile-metadata claim; removed references to test files not present in the repo
+
+---
+
 ## v1.8.2
 ### DreamBot SDN as primary update source + configurable check interval
 
 **Primary update source: DreamBot SDN API**
 - Update awareness now checks `https://sdn.dreambot.org/scripts/all` as primary source
 - Finds P2P Master AI by exact name match (`name == "P2P Master AI"`) with optional safety checks on `id == 1500` and `author == "Aeglen"`
-- Extracts version, last_compile_timestamp, and last_compile date from the SDN response
+- Extracts the latest script version from the SDN response; compile metadata may be logged for debug if present but is not used for update decisions
 - Cloudflare Worker (`p2p-sdn-watch.p2pmonitor.workers.dev`) kept as silent fallback — used automatically if SDN is unreachable, returns bad JSON, or does not contain P2P Master AI
 - Source and fallback details are debug-only — no user-facing alerts for source failures alone
 - Thanks to **@Ziggy** for finding the DreamBot SDN API endpoint
@@ -28,8 +67,7 @@
 - `p2p_monitor.py` — version 1.8.2; `update_check_interval_hours` / `update_check_interval_minutes` added to DEFAULT_CFG
 - `py/watcher.py` — `_SDN_URL`, `_WORKER_URL`, `_SDN_SCRIPT_NAME/ID/AUTHOR` constants; `_sdn_ver_tuple()` with Decimal comparison; `_ver_tuple()` delegates to `_sdn_ver_tuple`; `_fetch_from_sdn()` + `_fetch_from_worker()` replace `_fetch_latest_version()`; `_check_update_awareness()` uses elapsed-time interval; `_last_update_check_slot` initialised to `0.0`
 - `ui/settings_tab.py` — HH:MM interval spinboxes; updated description text; clamping in `save()`
-- `tests/test_v182.py` — 28 new tests: SDN parsing, fallback, version comparison, interval logic, clamping
-- `tests/test_update_awareness.py` — updated `test_numeric_version_comparison` to match new Decimal semantics
+- Validation covered SDN parsing, fallback behavior, Decimal version comparison, interval logic, and clamping.
 
 ---
 
