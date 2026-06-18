@@ -185,7 +185,7 @@ class StatusTab:
         if not result:
             return
         account, _ = result
-        app._nb.select(2)
+        app.show_tab('History')
         app.after(50, lambda: app._history.focus_account(account))
 
     def _flash_row(self, item):

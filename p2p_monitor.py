@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v1.8.3
+P2P Monitor v2.0.0-beta.1
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -20,12 +20,14 @@ File structure:
   py/watcher.py           — LogWatcher, AccountState, poll loop, backfill
   ui/monitor_tab.py       — Monitor tab
   ui/status_tab.py        — Status tab
+  ui/stats_tab.py         — Stats tab (Checkpoint 2: levelup aggregation, KPI cards, chart)
   ui/history_tab.py       — History tab, date picker, tree
   ui/settings_tab.py      — Settings tab, event notifications table
   ui/launcher_tab.py      — DreamBot CLI Launcher tab
 """
 
 import os
+import platform as _plat
 import sys
 import threading
 import tkinter as tk
@@ -48,11 +50,17 @@ from py.watcher      import LogWatcher
 from py              import launcher as _launcher
 from ui.monitor_tab   import MonitorTab
 from ui.status_tab    import StatusTab
+from ui.stats_tab     import StatsTab
 from ui.history_tab   import HistoryTab
 from ui.launcher_tab  import LauncherTab
 from ui.settings_tab  import SettingsTab
 
-VERSION      = "1.8.3"
+# Sans-serif font family — Segoe UI on Windows, DejaVu Sans on Linux/Mac.
+# Resolved once at import time; used for nav bar and window chrome in v2+.
+# MONO is kept for the raw event log text area and other monospace contexts.
+_SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
+
+VERSION      = "2.0.0-beta.1"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -149,22 +157,39 @@ def _ver_tuple(v):
 
 class App(tk.Tk):
     VERSION = VERSION
-    BG    = '#0f1117'
-    BG2   = '#181c27'
-    BG3   = '#1e2233'
-    BG4   = '#242840'
-    ACC   = '#00d4ff'
-    ACC2  = '#ff6b35'
-    GREEN = '#00ff88'
-    RED   = '#ff4444'
-    YEL   = '#ffd700'
-    PUR   = '#bb86fc'
-    FG    = '#e8eaf0'
-    FG2   = '#7a8099'
-    MONO  = ('Courier New', 9)
-    MONOB = ('Courier New', 9, 'bold')
-    MONOL = ('Courier New', 10, 'bold')
-    BIG   = ('Courier New', 15, 'bold')
+
+    # ── Warm dark palette ──────────────────────────────────────────────────────
+    # Backgrounds: warm charcoal/espresso/graphite
+    BG   = '#0f1115'   # main window background
+    BG2  = '#161a22'   # panels, cards, tab content
+    BG3  = '#1d2130'   # treeviews, elevated sections
+    BG4  = '#252840'   # borders, separators, table headers
+
+    # Primary accent: muted sage/olive green
+    ACC  = '#4a8f5c'   # active tab, primary buttons, links (replaces cyan)
+    ACC2 = '#c87830'   # warm amber-orange (warnings, secondary emphasis)
+
+    # Status / event colours (muted from previous neon palette)
+    GREEN = '#5cbf72'  # running/ok/success/drops
+    RED   = '#d04848'  # error/stopped
+    YEL   = '#c8a840'  # level-ups, gold/quests, amber highlights
+    PUR   = '#8870b8'  # sparingly (quest badges, lavender)
+
+    # Text
+    FG   = '#e4ddd4'   # primary text — warm off-white/cream
+    FG2  = '#78788a'   # secondary/muted text
+
+    # ── Fonts ──────────────────────────────────────────────────────────────────
+    # Sans-serif — used for nav bar, window chrome, and new UI elements in v2+
+    SANS   = (_SANS_FAMILY, 10)
+    SANSB  = (_SANS_FAMILY, 10, 'bold')
+    SANSL  = (_SANS_FAMILY, 12, 'bold')
+    SANSS  = (_SANS_FAMILY, 9)
+    BIG    = (_SANS_FAMILY, 15, 'bold')    # window title / large headers
+    # Monospace — retained for the raw event log text area and debug output
+    MONO   = ('Courier New', 9)
+    MONOB  = ('Courier New', 9, 'bold')
+    MONOL  = ('Courier New', 10, 'bold')
 
     def __init__(self):
         super().__init__()
@@ -202,11 +227,7 @@ class App(tk.Tk):
     def _style(self):
         s = ttk.Style(self)
         s.theme_use('clam')
-        s.configure('TNotebook',     background=self.BG2, borderwidth=0)
-        s.configure('TNotebook.Tab', background=self.BG3, foreground=self.FG2,
-                    padding=[14, 6], font=self.MONO)
-        s.map('TNotebook.Tab', background=[('selected', self.BG2)],
-              foreground=[('selected', self.ACC)])
+        # TNotebook no longer used — navigation is a custom frame-based bar.
         s.configure('TFrame',    background=self.BG2)
         s.configure('TCheckbutton', background=self.BG2, foreground=self.FG, font=self.MONO)
         s.map('TCheckbutton', background=[('active', self.BG2)], foreground=[('active', self.ACC)])
@@ -220,34 +241,71 @@ class App(tk.Tk):
                     foreground=self.FG, selectbackground=self.BG4)
 
     def _build(self):
-        hdr = tk.Frame(self, bg=self.BG); hdr.pack(fill='x')
-        tk.Frame(hdr, bg=self.ACC, height=2).pack(fill='x')
-        inn = tk.Frame(hdr, bg=self.BG, padx=16, pady=10); inn.pack(fill='x')
-        tk.Label(inn, text="P2P MONITOR", font=self.BIG, bg=self.BG, fg=self.ACC).pack(side='left')
-        tk.Label(inn, text=f"v{VERSION}  |  DreamBot P2P Master AI", font=self.MONO,
-                 bg=self.BG, fg=self.FG2).pack(side='left', padx=(12, 0), pady=(4, 0))
+        # ── Window chrome ──────────────────────────────────────────────────────
+        chrome = tk.Frame(self, bg=self.BG, padx=16, pady=11)
+        chrome.pack(fill='x')
+        tk.Label(chrome, text="P2P MONITOR", font=self.BIG,
+                 bg=self.BG, fg=self.ACC).pack(side='left')
+        tk.Label(chrome, text="  DreamBot P2P Master AI", font=self.SANS,
+                 bg=self.BG, fg=self.FG2).pack(side='left', pady=(2, 0))
         self._status_var = tk.StringVar(value="● STOPPED")
-        self._status_lbl = tk.Label(inn, textvariable=self._status_var, font=self.MONOB,
-                                    bg=self.BG, fg=self.RED)
-        self._status_lbl.pack(side='right')
+        self._status_lbl = tk.Label(chrome, textvariable=self._status_var,
+                                    font=self.SANSB, bg=self.BG, fg=self.RED)
+        self._status_lbl.pack(side='right', pady=(2, 0))
 
-        self._nb = ttk.Notebook(self)
-        self._nb.pack(fill='both', expand=True)
-        frames = {}
-        for name in ('Monitor', 'Status', 'History', 'Launcher', 'Settings'):
-            f = ttk.Frame(self._nb)
-            self._nb.add(f, text=f'  {name.upper()}  ')
-            frames[name] = f
+        # ── Navigation bar ─────────────────────────────────────────────────────
+        tk.Frame(self, bg=self.BG4, height=1).pack(fill='x')   # top border
+        nav = tk.Frame(self, bg=self.BG, padx=4)
+        nav.pack(fill='x')
+        tk.Frame(self, bg=self.BG4, height=1).pack(fill='x')   # bottom border
 
-        MonitorTab(self,        frames['Monitor'])
-        self._status_tab  = StatusTab(self,    frames['Status'])
-        self._history     = HistoryTab(self,   frames['History'])
-        self._launcher    = LauncherTab(self,  frames['Launcher'])
-        self._settings    = SettingsTab(self,  frames['Settings'])
-        self._history_tab_frame = frames['History']
-        self._status_tab_frame  = frames['Status']
+        # Each tab button: label + 2px underline indicator that lights up on active
+        self._tab_btns   = {}   # name → (wrap_frame, label, indicator_frame)
+        self._active_tab = None
 
-        self._nb.bind('<<NotebookTabChanged>>', self._on_tab_changed)
+        for name, icon, text in [
+            ('Monitor',  '∿',  'MONITOR'),
+            ('Status',   '◉',  'STATUS'),
+            ('Stats',    '▦',  'STATS'),
+            ('History',  '⊙',  'HISTORY'),
+            ('Launcher', '▶',  'LAUNCHER'),
+            ('Settings', '⚙',  'SETTINGS'),
+        ]:
+            wrap = tk.Frame(nav, bg=self.BG)
+            wrap.pack(side='left')
+            lbl = tk.Label(wrap, text=f"{icon}  {text}", font=self.SANSB,
+                           bg=self.BG, fg=self.FG2, padx=16, pady=10, cursor='hand2')
+            lbl.pack()
+            ind = tk.Frame(wrap, height=2, bg=self.BG)   # active underline indicator
+            ind.pack(fill='x')
+            for widget in (wrap, lbl):
+                widget.bind('<Button-1>', lambda e, n=name: self.show_tab(n))
+            self._tab_btns[name] = (wrap, lbl, ind)
+
+        # ── Tab content container ──────────────────────────────────────────────
+        # All tab frames live in the same grid cell. tkraise() brings one forward
+        # without destroying or rebuilding the others — fast tab switching.
+        container = tk.Frame(self, bg=self.BG2)
+        container.pack(fill='both', expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        self._tab_frames = {}
+        for name in ('Monitor', 'Status', 'Stats', 'History', 'Launcher', 'Settings'):
+            f = tk.Frame(container, bg=self.BG2)
+            f.grid(row=0, column=0, sticky='nsew')
+            self._tab_frames[name] = f
+
+        # ── Build tab content ──────────────────────────────────────────────────
+        MonitorTab(self,        self._tab_frames['Monitor'])
+        self._status_tab = StatusTab(self,   self._tab_frames['Status'])
+        self._stats_tab  = StatsTab(self,    self._tab_frames['Stats'])
+        self._history    = HistoryTab(self,  self._tab_frames['History'])
+        self._launcher   = LauncherTab(self, self._tab_frames['Launcher'])
+        self._settings   = SettingsTab(self, self._tab_frames['Settings'])
+
+        # Raise Monitor tab first
+        self.show_tab('Monitor')
 
         migrate_history()
         self._status_debounce_id = None
@@ -297,15 +355,28 @@ class App(tk.Tk):
     def _on_status_refresh(self):
         self.after(0, self._status_tab.push_refresh)
 
-    def _on_tab_changed(self, event):
-        try:
-            sel = self._nb.select()
-            if sel == str(self._history_tab_frame):
-                self._history.on_tab_shown()
-            elif sel == str(self._status_tab_frame):
-                self._status_tab.on_tab_shown()
-        except Exception:
-            pass
+    def show_tab(self, name: str) -> None:
+        """Switch the visible tab by name. Updates the nav underline indicator and
+        raises the tab frame via tkraise() — no rebuild, no destroy.
+        Triggers on_tab_shown() for tabs that need a data refresh when opened.
+        Safe to call from any context: app.show_tab('History')."""
+        for tab_name, (wrap, lbl, ind) in self._tab_btns.items():
+            if tab_name == name:
+                lbl.configure(fg=self.ACC)
+                ind.configure(bg=self.ACC)
+            else:
+                lbl.configure(fg=self.FG2)
+                ind.configure(bg=self.BG)
+        if name in self._tab_frames:
+            self._tab_frames[name].tkraise()
+        self._active_tab = name
+        # Per-tab refresh hooks
+        if name == 'History' and getattr(self, '_history', None):
+            self._history.on_tab_shown()
+        elif name == 'Status' and getattr(self, '_status_tab', None):
+            self._status_tab.on_tab_shown()
+        elif name == 'Stats' and getattr(self, '_stats_tab', None):
+            self._stats_tab.on_tab_shown()
 
     # ── Start / Stop ───────────────────────────────────────────────────────────
     def _start(self):
@@ -773,8 +844,8 @@ class App(tk.Tk):
 
     # ── Tray ───────────────────────────────────────────────────────────────────
     def _make_tray_icon(self):
-        img = Image.new('RGB', (64, 64), color=(0, 212, 255))
-        ImageDraw.Draw(img).rectangle([16, 16, 48, 48], fill=(0, 30, 60))
+        img = Image.new('RGB', (64, 64), color=(74, 143, 92))   # ACC sage green
+        ImageDraw.Draw(img).rectangle([16, 16, 48, 48], fill=(15, 17, 21))  # BG
         return img
 
     def _show_window(self, icon=None, item=None):

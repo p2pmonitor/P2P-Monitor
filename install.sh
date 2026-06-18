@@ -2,7 +2,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION=$(grep -m1 'P2P Monitor v' "$SCRIPT_DIR/p2p_monitor.py" | grep -oP 'v[\d.]+')
+VERSION=$(grep -m1 'P2P Monitor v' "$SCRIPT_DIR/p2p_monitor.py" | grep -oP 'v[\d.]+(-beta\.\d+)?')
 
 echo "========================================"
 echo " P2P Monitor ${VERSION} — Installer"
@@ -49,6 +49,7 @@ cp "$SCRIPT_DIR/py/platform_ops.py"   "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/ui/__init__.py"       "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/monitor_tab.py"    "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/status_tab.py"     "$INSTALL_DIR/ui/"
+cp "$SCRIPT_DIR/ui/stats_tab.py"      "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/history_tab.py"    "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/launcher_tab.py"   "$INSTALL_DIR/ui/"
 cp "$SCRIPT_DIR/ui/settings_tab.py"   "$INSTALL_DIR/ui/"

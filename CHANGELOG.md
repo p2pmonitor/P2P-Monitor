@@ -1,12 +1,50 @@
 # Changelog
 
+## v2.0.0-beta.1
+### Checkpoint 1 — UI foundation: custom navigation, warm theme palette, Stats tab slot
+
+**Internal beta — not the public 2.0.0 release.**
+Use "Include pre-release versions when checking for updates manually" to receive this update.
+The stable public release remains v1.8.3 until the full v2.0.0 is ready.
+
+**Navigation architecture**
+- Replaced `ttk.Notebook` with a custom frame-based navigation bar using `tkraise()` — tab frames are built once, never destroyed on switch, and re-raised instantly. This eliminates the per-switch rebuild overhead that made Linux feel slightly less responsive than Windows.
+- Added `app.show_tab(name)` method (string-based, index-independent) replacing all `_nb.select(N)` calls — forward-compatible with future tab additions.
+- Tab order is now locked for v2: Monitor | Status | Stats | History | Launcher | Settings.
+- Stats tab added as a placeholder frame (real content in Checkpoint 2).
+
+**Theme: warm dark palette**
+- Replaced the cyan-heavy palette with a warm dark scheme: sage/olive green primary accent, warm amber/gold for level highlights, muted coral/red for errors and stopped states, warm cream/off-white text.
+- Primary accent `ACC`: `#00d4ff` (cyan) → `#4a8f5c` (sage green)
+- `GREEN`: `#00ff88` (neon) → `#5cbf72` (muted)
+- `RED`: `#ff4444` (bright) → `#d04848` (coral)
+- `YEL`: `#ffd700` (gold) → `#c8a840` (amber)
+- `FG`: `#e8eaf0` (cool white) → `#e4ddd4` (warm cream)
+- All color tokens are centralized as class attributes on `App` — later checkpoints inherit them without hardcoding.
+- Added sans-serif font constants (`SANS`, `SANSB`, `SANSL`, `SANSS`, `BIG`): Segoe UI on Windows, DejaVu Sans on Linux. Applied to window chrome and navigation bar. Monospace (`MONO`) is retained for the raw event log text area.
+- Existing tab content (Monitor, Status, History, Launcher, Settings) automatically picks up the new color tokens; font swap inside those tabs happens in Checkpoint 4.
+
+**Install / update plumbing**
+- Added `ui/stats_tab.py` to `update_manifest.txt` and `install.sh` — without this, a fresh install or an in-app update would copy/apply `p2p_monitor.py` (which now imports `ui.stats_tab`) without the file it depends on, causing a crash on launch. `p2p_monitor.spec` (PyInstaller) needed no change — it statically discovers local `.py` imports automatically; only non-`.py` assets like `error_rules.json` need explicit `datas` entries.
+- Fixed `install.sh`'s version-banner regex to also capture pre-release suffixes (e.g. `-beta.1`) instead of truncating at the first hyphen.
+
+**Files changed:**
+- `p2p_monitor.py` — version 2.0.0-beta.1; warm dark color tokens; SANS font constants; custom nav bar; `show_tab()` method; removed `_nb`, `_on_tab_changed`, `_history_tab_frame`, `_status_tab_frame`; tray icon color updated
+- `ui/stats_tab.py` — new (Checkpoint 1 placeholder)
+- `ui/status_tab.py` — `app._nb.select(2)` → `app.show_tab('History')`
+- `update_manifest.txt` — added `ui/stats_tab.py`
+- `install.sh` — added `ui/stats_tab.py` copy line; fixed version-banner regex for pre-release suffixes
+- `CHANGELOG.md` — this entry
+
+---
+
 ## v1.8.3
 ### Bugfix/cleanup release: update-check timing, reset attribution, Monitor tab cleanup, debug.jsonl
 
 **Fixes**
 - Startup update-awareness check (`force=True`) now updates `_last_update_check_slot`, so the periodic check no longer re-runs immediately after startup
 - `levelup_every` is now clamped to a minimum of 1 (`max(1, int(...))`, falls back to 5 on bad config values) — previously `levelup_every = 0` could divide by zero
-- Script reset attribution (`Escaped ship -> Startup`, `Stuck walking -> Startup`) now uses the task/activity active at the reset line's position in the batch (via each parsed event's `_line_idx`), instead of whatever task the batch ends on — fixes occasional mislabeling when a reset and a new task land in the same read batch
+- Script reset attribution (`Escaped ship -> Startup`, `Stuck walking -> Startup`) now uses the task/activity active at the reset line's position in the batch (via each parsed event's `_line_idx`), instead of whatever task the batch ends on — fixes occasional mislabeling when a reset and a new task land in the same read batch. A contained fallback also covers the case where no task context is known at all (e.g. the very first batch ever processed for an account, where `slice_tasks()` had already suppressed the `Task is X` announcement because of a nearby `> Locking` line) — in that case the nearest `Task is X` / `Activity is Y` is read directly from this batch's raw lines, before the reset line only. This fallback never parses or emits task events, never updates `state.last_task` / `state.last_activity`, and never touches `py/reader.py`, `slice_tasks()`, Slayer parsing, or Discord routing.
 - `Script Stopped` now logs to the Monitor tab before the corresponding `Auto restart scheduled/skipped ...` line — previously the auto-restart message could appear first
 
 **New: structured session debug log**
@@ -27,7 +65,7 @@
 - New setting "Ping for script events" (`ping_script_event`, default `True`) under Event Notifications — when off, script start/stop/pause/resume Discord messages still post but without a mention ping. Task/error/drop/death/level ping settings are unaffected.
 
 **Files changed:**
-- `py/watcher.py` — update-check timing fix; `levelup_every` clamp; reset attribution via `_line_idx`; `_maybe_schedule_auto_restart()` returns `(status, message)` instead of logging directly; `_debug_entry()` helper; `debug.jsonl` reset on `start()`; daily summary and thread rate-limit lines moved to debug
+- `py/watcher.py` — update-check timing fix; `levelup_every` clamp; reset attribution via `_line_idx` plus a raw-line fallback (`_task_ctx_from_raw_lines()`) for batches with no prior task context; `_maybe_schedule_auto_restart()` returns `(status, message)` instead of logging directly; `_debug_entry()` helper; `debug.jsonl` reset on `start()`; daily summary and thread rate-limit lines moved to debug
 - `py/history.py` — `_dedup_history_file()` writes `history_dedupe` diagnostics to `debug.jsonl`; accepts optional `account` param
 - `py/launcher.py` — `_discover_and_cache()` and `relaunch_account()` move internal lines to `debug.jsonl`, mirroring to Monitor only when the debug checkbox is enabled
 - `py/discord.py` — `post_script_event()` respects new `ping_script_event` config key
