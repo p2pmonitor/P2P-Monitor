@@ -57,6 +57,7 @@ class StatsTab:
         # disk read instead of re-loading from scratch.
         self._prewarm_rows    = None
         self._prewarm_loading = False
+        self._building        = False  # build-lock guard against races
 
         # Lightweight placeholder — replaced by _build_real_content() on first show
         self._placeholder = tk.Frame(parent_frame, bg=app.BG2)
@@ -118,16 +119,27 @@ class StatsTab:
     def _ensure_built(self) -> bool:
         """Build the real Stats content + load its data, exactly once.
         Returns True the one time it actually builds, False on every call
-        after that. The only place _build_real_content() is ever called —
-        only reached from on_tab_shown(), i.e. only when the tab's frame is
-        already being tkraise()'d and therefore has real screen dimensions.
-        If prewarm() already cached rows, they're consumed here instead of
-        re-reading disk — the whole point of prewarming."""
-        if self._built:
+        after that. Guarded by self._building so two near-simultaneous calls
+        (e.g. a fast double-click) can't both start building. If the build
+        throws partway through, whatever got created is destroyed so no
+        broken/partial widgets linger — a later call can retry cleanly."""
+        if self._built or self._building:
             return False
-        self._placeholder.destroy()
-        self._build_real_content()
+        self._building = True
+        try:
+            self._placeholder.destroy()
+            self._build_real_content()
+        except Exception:
+            for w in self._frame.winfo_children():
+                w.destroy()
+            self._placeholder = tk.Frame(self._frame, bg=self.app.BG2)
+            self._placeholder.pack(fill='both', expand=True)
+            tk.Label(self._placeholder, text="Loading Stats…", font=self.app.SANS,
+                     bg=self.app.BG2, fg=self.app.FG2).pack(expand=True)
+            self._building = False
+            raise
         self._built = True
+        self._building = False
         if self._prewarm_rows is not None:
             cached = self._prewarm_rows
             self._prewarm_rows = None   # consumed — don't hold a stale copy

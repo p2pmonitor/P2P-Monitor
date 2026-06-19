@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.0-beta.8
+### Stats prewarm disabled on Linux; race guard + failure cleanup added
+
+**Linux**: prewarm disabled entirely for now. Despite beta.7's prewarm being verified data-only (no widgets/matplotlib touched — confirmed via live test), Linux still showed duplicate Stats sections, pointing at a race not yet pinned down. Per explicit instruction: stability over first-click speed. `_prewarm_stats()` now returns immediately on Linux.
+
+**Windows**: prewarm unchanged, still active.
+
+**New defense-in-depth in `StatsTab` (both platforms):**
+- `_building` lock in `_ensure_built()` — a second call while a build is in progress is now a no-op instead of racing.
+- If `_build_real_content()` throws partway through, all partial widgets are destroyed and a placeholder is restored before the lock releases — no broken UI left behind, and a later call can retry cleanly.
+- Verified live: rapid double `on_tab_shown()` calls produce exactly one filter row; a forced build failure leaves no widgets behind and a subsequent retry recovers correctly.
+
+**Files changed:** `p2p_monitor.py` (version; Linux guard in `_prewarm_stats`), `ui/stats_tab.py` (`_building` lock + cleanup in `_ensure_built`).
+
+---
+
 ## v2.0.0-beta.7
 ### Fix: Stats prewarm caused duplicate Stats sections on Linux; chart polish
 

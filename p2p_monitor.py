@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.7
+P2P Monitor v2.0.0-beta.8
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.7"
+VERSION      = "2.0.0-beta.8"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -508,7 +508,17 @@ class App(tk.Tk):
         creates or touches a single widget. StatsTab.prewarm() is itself a
         no-op if the tab was already built (e.g. the user got there first),
         if a prewarm load is already in flight, or if data is already cached.
+
+        Disabled on Linux for this beta: despite prewarm being verified
+        data-only (no widget/matplotlib construction at all), Linux still
+        showed the duplicate-Stats-section symptom, pointing at a race this
+        fix hasn't fully pinned down yet. Stable behavior matters more than
+        first-click speed, so prewarm is Windows-only until that's resolved.
+        StatsTab itself still has its own build-lock + failure-cleanup guard
+        (_building) as defense in depth regardless of platform.
         """
+        if sys.platform.startswith('linux'):
+            return
         try:
             if getattr(self, '_stats_tab', None):
                 self._stats_tab.prewarm()
