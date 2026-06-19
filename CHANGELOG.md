@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.0.0-beta.7
+### Fix: Stats prewarm caused duplicate Stats sections on Linux; chart polish
+
+**Internal beta — not the public 2.0.0 release.** Stable public release remains v1.8.3. Scoped to `ui/stats_tab.py` and `p2p_monitor.py`'s prewarm wiring only.
+
+**Fix: Linux showed two stacked Stats sections after prewarm**
+- Root cause: beta.6's prewarm built the *real* Stats widgets — including constructing and immediately `draw()`-ing matplotlib canvases — inside the Stats tab's frame while a different tab was the one actually raised via `tkraise()`. On Windows this happened to work; on Linux, drawing into a frame that isn't yet mapped/realized (and therefore may not have real allocated screen dimensions yet) could fail partway through matplotlib's Agg/FreeType text rendering — consistent with the "FT_Render_Glyph raster overflow" warning. Because the failure happened *inside* `_build_real_content()`, `self._built` was never set to `True`, so the next real visit to the tab ran the entire build again on top of the broken partial one — two stacked copies of the whole tab, exactly as described.
+- Fixed by making `StatsTab.prewarm()` **data-only**: it now does nothing but load and cache levelup rows on a background thread. It never creates a single Tkinter widget, never constructs a matplotlib `Figure`/`Canvas`, and never calls `_build_real_content()`. Building the actual UI is now reserved entirely for `on_tab_shown()` — the one moment the Stats frame is guaranteed to have real screen dimensions, because it's in the process of being `tkraise()`'d.
+- `_ensure_built()` now consumes the prewarm cache when it exists (`self._prewarm_rows`), so a prewarmed manual open skips a redundant disk read instead of reloading from scratch — prewarm still pays off, it just never touches anything visual.
+- A failed prewarm (verified directly by forcing `load_levelup_rows()` to raise) now leaves **zero** widgets behind and caches an empty list rather than leaving the tab in a broken state; a subsequent real open still works normally.
+- This removes the entire class of risk by construction rather than chasing the exact FreeType trigger condition — there is nothing in the prewarm path anymore that can build or draw into an unrealized widget.
+
+**Chart polish**
+- Daily Levels Gained y-axis now uses `matplotlib.ticker.MaxNLocator(integer=True)` — whole-number ticks only (0, 1, 2, 3...), never fractional ticks like 0.5/1.5, since you can't gain half a level in a day. The Average Per Day KPI card is unaffected and still shows one decimal place.
+- Default date range on first Stats load is now **ALL** (previously 30D) — the ALL pill is highlighted by default; 7D/30D/90D/1Y are still one click away.
+
+**Re-verified, not just assumed:**
+- Combobox visibility fix (beta.6) — still correct in every state.
+- Chart and donut dark theming (beta.6) — still correct; figure, axes, and the underlying Tk canvas widget's own background all confirmed non-white for both charts.
+- Skill donut + grouping (beta.6), including the exact boundary: 5 skills produces no "Other" row, 6 skills produces "Other (1 skills)".
+- Dependency restart prompt (beta.5) — untouched, its own live test still passes unchanged.
+- Repeated Stats → Monitor → Stats switching, Account/Skill filters, date-range buttons, and Refresh all still produce exactly one filter row with zero widget duplication.
+
+**Validation:**
+- `python -m compileall .` — clean.
+- `pyflakes` on `ui/stats_tab.py` (zero) and `p2p_monitor.py` (still the 14 pre-existing baseline warnings, zero new).
+- Tuple-padding constructor scan re-run across `p2p_monitor.py` and every `ui/*.py` — zero instances.
+- Live Tk test (real Xvfb display): 22 new checks specifically targeting the data-only prewarm contract (zero widgets created, cache consumed correctly, failure leaves nothing behind) plus the y-axis/default-range/grouping-boundary fixes, plus the existing 40-check beta.6 suite re-run (updated to reflect the corrected two-phase prewarm flow) and the empty-state/beta.4-full-flow/beta.5-restart-dialog suites — all passing, 92 live checks total across 5 test files.
+
+**Files changed:**
+- `ui/stats_tab.py` — `prewarm()` rewritten to be data-only; `_ensure_built()` consumes the prewarm cache; integer y-axis ticks; default date preset changed to `ALL`
+- `p2p_monitor.py` — version 2.0.0-beta.7; `_prewarm_stats()` docstring corrected to describe the data-only design
+- `CHANGELOG.md` — this entry
+
+---
+
 ## v2.0.0-beta.6
 ### Stats tab polish: combobox visibility, chart theming, skill donut, prewarm
 

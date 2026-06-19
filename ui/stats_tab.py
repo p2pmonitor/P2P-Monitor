@@ -32,6 +32,7 @@ from py.stats import (
 try:
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.ticker import MaxNLocator
     MATPLOTLIB_AVAILABLE = True
 except Exception:
     MATPLOTLIB_AVAILABLE = False
@@ -48,7 +49,14 @@ class StatsTab:
         self._dirty = True     # first show always loads
         self._loading = False
         self._all_rows = []    # full unfiltered levelup dataset, in memory
-        self._date_preset = '30D'
+        self._date_preset = 'ALL'
+
+        # Prewarm cache — populated by prewarm() (data-only, no widgets, no
+        # matplotlib) and consumed once by _ensure_built() the first time the
+        # real UI actually gets built, so a prewarmed open skips a redundant
+        # disk read instead of re-loading from scratch.
+        self._prewarm_rows    = None
+        self._prewarm_loading = False
 
         # Lightweight placeholder — replaced by _build_real_content() on first show
         self._placeholder = tk.Frame(parent_frame, bg=app.BG2)
@@ -63,28 +71,69 @@ class StatsTab:
                 self._reload_from_disk()
 
     def prewarm(self):
-        """Quietly build the real Stats content + kick off the initial data
-        load without switching tabs or stealing focus. Called once by the
-        App a few seconds after startup (see App._prewarm_stats). Safe to
-        call any number of times — a no-op once the tab has actually been
-        built, whether that happened via prewarm or via the user opening the
-        tab themselves first. Building while this frame isn't the raised one
-        in the shared tkraise() stack is invisible — nothing paints on
-        screen until the user actually switches to Stats."""
-        self._ensure_built()
+        """
+        Data-only warm-up: load + cache levelup rows from disk in a
+        background thread. Deliberately does NOT touch Tkinter widgets in
+        any way — no filter row, no KPI cards, no chart/donut canvases, no
+        matplotlib Figure/Canvas construction, and never calls
+        _build_real_content(). The widget-construction path is reserved for
+        the moment the user actually opens the tab, when its frame is about
+        to be tkraise()'d and is therefore guaranteed to have real, realized
+        screen dimensions — building (and especially drawing matplotlib
+        canvases) into a frame that isn't yet mapped/sized is exactly what
+        caused the Linux duplicate-Stats-section bug: a partial build could
+        fail partway through (observed as "FT_Render_Glyph raster overflow"
+        from matplotlib's Agg/FreeType text renderer hitting a degenerate
+        canvas size) before `self._built` was ever set, so the next real
+        visit rebuilt the whole tab from scratch on top of the broken one.
+        Making prewarm purely data-only removes that entire class of risk by
+        construction — there is nothing here that can leave partial widgets
+        behind, because nothing widget-related is created at all.
+
+        Safe to call any number of times: a no-op if the tab is already
+        built (the user got there first), if data is already cached, or if
+        a prewarm load is already in flight.
+        """
+        if self._built or self._prewarm_loading or self._prewarm_rows is not None:
+            return
+
+        self._prewarm_loading = True
+
+        def _worker():
+            try:
+                rows = load_levelup_rows()
+            except Exception:
+                rows = []
+            self.app.after(0, lambda: self._on_prewarm_loaded(rows))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_prewarm_loaded(self, rows):
+        """Main-thread callback for prewarm()'s background load. Only ever
+        touches plain data — no widgets exist to update yet (and may never
+        exist, if the user never opens Stats this session)."""
+        self._prewarm_loading = False
+        self._prewarm_rows = rows
 
     def _ensure_built(self) -> bool:
-        """Build the real Stats content + kick off the initial disk load,
-        exactly once. Returns True the one time it actually builds, False on
-        every call after that. Shared by on_tab_shown() (first real visit)
-        and prewarm() (quiet startup warm-up) so there is exactly one build
-        code path — not two copies that could drift out of sync or double-build."""
+        """Build the real Stats content + load its data, exactly once.
+        Returns True the one time it actually builds, False on every call
+        after that. The only place _build_real_content() is ever called —
+        only reached from on_tab_shown(), i.e. only when the tab's frame is
+        already being tkraise()'d and therefore has real screen dimensions.
+        If prewarm() already cached rows, they're consumed here instead of
+        re-reading disk — the whole point of prewarming."""
         if self._built:
             return False
         self._placeholder.destroy()
         self._build_real_content()
         self._built = True
-        self._reload_from_disk()
+        if self._prewarm_rows is not None:
+            cached = self._prewarm_rows
+            self._prewarm_rows = None   # consumed — don't hold a stale copy
+            self._on_data_loaded(cached)
+        else:
+            self._reload_from_disk()
         return True
 
     def mark_dirty(self):
@@ -400,6 +449,11 @@ class StatsTab:
             ax.set_xticks(tick_idx)
             ax.set_xticklabels([dates[i] for i in tick_idx], rotation=30, ha='right', fontsize=8)
             ax.set_ylim(bottom=0)
+            # Levels gained per day is a whole-number count — never show
+            # fractional ticks like 0.5/1.5 (MaxNLocator with integer=True
+            # also de-duplicates if matplotlib's autoscaling would otherwise
+            # produce repeated/identical integer ticks on a very small range).
+            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         else:
             ax.text(0.5, 0.5, 'No data for this filter', ha='center', va='center',
                     color=app.FG2, transform=ax.transAxes)

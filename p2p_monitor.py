@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.6
+P2P Monitor v2.0.0-beta.7
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.6"
+VERSION      = "2.0.0-beta.7"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -480,11 +480,21 @@ class App(tk.Tk):
 
     def _prewarm_stats(self):
         """
-        Quietly build the Stats tab's real content (filters, KPI cards,
-        chart, donut, panels) and kick off its initial history-aggregation
-        load a few seconds after startup, so the first manual click into
-        Stats is fast — especially on Linux, where building the matplotlib
-        figures cold can be noticeably slower than Windows.
+        Quietly load + cache the Stats tab's history data a few seconds
+        after startup, so a manual click into Stats later doesn't have to
+        wait on the disk read — without ever touching a single Tkinter
+        widget or matplotlib object. StatsTab.prewarm() is data-only by
+        design: it loads levelup rows on a background thread and caches
+        them, nothing more. Building the actual filter row / KPI cards /
+        chart / donut / panels is reserved entirely for the moment the user
+        opens the tab for real (on_tab_shown(), via tkraise()), because that
+        is the only point where the Stats frame is guaranteed to have real,
+        realized screen dimensions. Building or drawing matplotlib canvases
+        into a frame that isn't yet mapped (because some other tab is the
+        one currently raised) turned out to be exactly what caused a Linux-
+        specific bug: a partial build could silently fail mid-construction,
+        leaving `self._built` never set and the tab rebuilding itself on top
+        of its own broken remains the next time it was opened.
 
         Runs once (this method itself is only ever scheduled a single time,
         via the one self.after(4000, ...) call in _build() — no recurring
@@ -492,18 +502,12 @@ class App(tk.Tk):
         work settle first" approximation already used for
         _silent_update_check/_startup_dependency_check, not a real idle/CPU
         check — there's no existing load-monitoring infrastructure in this
-        app to hook into, and a fixed delay is enough to avoid competing with
-        history migration and the initial History tab load that both happen
-        within the first second or two.
+        app to hook into.
 
-        Never switches tabs or steals focus: StatsTab.prewarm() builds the
-        tab's widgets into its existing frame in the shared tkraise() stack,
-        which isn't the topmost (visible) frame unless the user is already
-        on Stats — so nothing paints on screen, no flicker, no visible tab
-        change. StatsTab.prewarm() (via _ensure_built()) is itself a no-op
-        if the tab was already built, including if the user clicked into
-        Stats before this timer fired — so this can never double-build or
-        create duplicate widgets.
+        Never switches tabs, steals focus, or causes flicker — it never
+        creates or touches a single widget. StatsTab.prewarm() is itself a
+        no-op if the tab was already built (e.g. the user got there first),
+        if a prewarm load is already in flight, or if data is already cached.
         """
         try:
             if getattr(self, '_stats_tab', None):
