@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.0.0-beta.6
+### Stats tab polish: combobox visibility, chart theming, skill donut, prewarm
+
+**Internal beta — not the public 2.0.0 release.** Stable public release remains v1.8.3. Scoped entirely to the Stats tab and the shared `ttk.Style` Combobox configuration (the only current consumer of `ttk.Combobox` in the app) — no other tab, parser, Discord, or updater behavior changed.
+
+**Fix: Account/Skill combobox text was unreadable when not focused**
+- Root cause: the `clam` ttk theme has its own built-in state-based color maps for `Combobox` that silently override a plain `configure()` call for certain states (notably `readonly` and `!focus`) — exactly the states the dropdowns sit in most of the time. `configure()` only sets the *default* style; per-state `.map()` entries are required to actually force a color to stick in a specific state.
+- Added explicit `.map('TCombobox', ...)` entries covering `readonly`, `disabled`, `focus`, and `!focus` for `fieldbackground`, `foreground`, `selectbackground`, `selectforeground`, `background`, and `arrowcolor`.
+- The dropdown's open popdown list is a plain Tk `Listbox`, not a ttk widget — it doesn't inherit `ttk.Style` at all. Added `self.option_add('*TCombobox*Listbox...')` entries so the opened-dropdown list is themed too, not just the closed field.
+- Verified directly: looked up `ttk.Style().lookup('TCombobox', 'foreground', state)` against the real, unmodified `App._style()` method for every relevant state combination (default, readonly, focus, `!focus`, and specifically `readonly + !focus` — the exact combination that was broken) and confirmed foreground never resolves to the same color as the field background in any of them.
+
+**Fix: Linux chart area rendered as a plain white rectangle**
+- Root cause: the figure's facecolor was only set once at initial build, the underlying Tk `Canvas` widget's *own* background (separate from matplotlib's figure/axes facecolor — a distinct layer) was never touched at all, and `ax.clear()` (called on every redraw) resets most per-Axes styling back to matplotlib's light-theme defaults. Any gap between the widget's first paint and a fully-themed redraw could show through as Tk's default white canvas background — apparently more visible/reproducible on Linux than Windows.
+- Added a shared `_theme_chart_axes(fig, ax, canvas_widget)` that forces figure patch, axes facecolor, tick colors, label colors, title color, spines, *and* the Tk canvas widget's own `bg` — called at initial build and again at the top of every redraw (after `ax.clear()`), not just once.
+- Switched `canvas.draw_idle()` → `canvas.draw()` (forced, synchronous) so the chart never sits unpainted waiting for an idle slot, and added an explicit `canvas.draw()` immediately after initial construction so the canvas is never left showing an unrendered default background before the first real data load completes.
+- Same fix applied to the new skill donut chart below, since it shares the identical underlying mechanism.
+
+**Levels by Skill panel: donut chart + grouped "Other" bucket**
+- Added a donut chart on the left side of the "Levels by Skill" card; horizontal skill bars stay on the right, now with a small color swatch per row matching the donut's wedge colors.
+- New `group_top_n_with_other()` in `py/stats.py` (pure, unit-tested): keeps the top 5 skills individually and collapses the rest into one `Other (N skills)` entry. Applied identically to both the donut and the bars so they always agree with each other. Percentages are computed off the full filtered total, so the grouped view never loses or double-counts levels.
+- No "View All Skills" button (intentionally not added, per spec).
+- Colors: sage/olive (`ACC`) for the largest slice, then amber (`YEL`) → coral (`RED`) → lavender (`PUR`) → amber-orange (`ACC2`), cycling if ever needed; "Other" always gets a fixed, deliberately neutral muted tan (`#a89a78`) rather than a theme accent, so it reads as "everything else" rather than competing for attention.
+
+**New: Stats prewarm for faster first open**
+- The App now schedules a single `self.after(4000, self._prewarm_stats)` call at startup (no recurring timer) that quietly builds the Stats tab's real widgets and kicks off its initial history-aggregation load *before* the user ever clicks the tab — particularly aimed at Linux, where cold-building the matplotlib figures was noticeably slower than on Windows.
+- `StatsTab` gained `_ensure_built()`, a single shared guarded-build path now used by both `on_tab_shown()` and the new `prewarm()` — exactly one build code path, not two copies that could drift apart or double-build.
+- Building happens inside the Stats tab's existing frame in the shared `tkraise()` stack from Checkpoint 1, which isn't the topmost (visible) frame unless the user is already on Stats — so prewarm never switches tabs, steals focus, or causes visible flicker. If the user clicks into Stats before the 4s timer fires, normal loading proceeds exactly as before (the timer's later call becomes a no-op).
+- If prewarm throws for any reason, it's caught and logged (`⚠ Stats prewarm failed (non-fatal)`) without affecting app startup.
+
+**Preserved (re-verified with the live Tk test, not assumed):**
+- Stats still builds exactly once; switching Stats → Monitor → Stats repeatedly still produces exactly one filter row and a stable widget count.
+- Refresh, Account filter, Skill filter, and date-range buttons all still update KPIs/chart/panels correctly with zero widget duplication.
+- The empty state still works correctly with zero levelup history.
+- The beta.5 dependency-restart prompt (Restart Now/Later + persistent chrome notice) is untouched and still passes its own live test.
+
+**Validation:**
+- `python -m compileall .` — clean.
+- `pyflakes` on `p2p_monitor.py` (still exactly the 14 pre-existing baseline warnings, zero new) and `ui/stats_tab.py` (zero).
+- Tuple-padding constructor scan (the class of bug found in beta.5) re-run across `p2p_monitor.py` and every `ui/*.py` file — zero instances.
+- Live Tk test (real Xvfb display, real `App._style()`, real `StatsTab`): 36 checks covering combobox states, chart/donut theming, skill grouping, prewarm-without-tab-switch, post-prewarm idempotency, and the full filter/refresh/revisit matrix — all passing. Plus the existing empty-state, beta.4 full-flow, and beta.5 restart-dialog live tests re-run unchanged and still passing.
+
+**Files changed:**
+- `ui/stats_tab.py` — chart theming overhaul (`_theme_chart_axes`), skill donut chart, `group_top_n_with_other` wiring, `_ensure_built()`/`prewarm()` refactor
+- `py/stats.py` — new `group_top_n_with_other()`
+- `p2p_monitor.py` — version 2.0.0-beta.6; fixed `TCombobox` style maps + popdown listbox option_add entries in `_style()`; new `_prewarm_stats()` wired via a single startup `self.after()` call
+- `CHANGELOG.md` — this entry
+
+---
+
 ## v2.0.0-beta.4
 ### Linux dependency-update support in the source updater
 

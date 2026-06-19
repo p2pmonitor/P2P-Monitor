@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.5
+P2P Monitor v2.0.0-beta.6
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.5"
+VERSION      = "2.0.0-beta.6"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -239,8 +239,35 @@ class App(tk.Tk):
                     font=self.MONOB, relief='flat')
         s.map('Treeview', background=[('selected', self.ACC)], foreground=[('selected', self.BG)])
         s.configure('TScrollbar', background=self.BG3, troughcolor=self.BG, arrowcolor=self.FG2)
-        s.configure('TCombobox',  fieldbackground=self.BG3, background=self.BG3,
-                    foreground=self.FG, selectbackground=self.BG4)
+
+        # ── TCombobox ────────────────────────────────────────────────────────────
+        # The 'clam' theme has its own built-in state-based color maps for
+        # Combobox that silently override a plain configure() call for
+        # certain states (notably 'readonly' and '!focus') — this is why the
+        # selected text was unreadable whenever the field wasn't focused: the
+        # theme's own default foreground/fieldbackground for those states was
+        # winning over our configure() call. Explicit .map() entries for every
+        # relevant state combination are required to force our colors to
+        # actually stick in all states, not just the default one.
+        s.configure('TCombobox', fieldbackground=self.BG3, background=self.BG3,
+                    foreground=self.FG, selectbackground=self.BG4,
+                    selectforeground=self.FG, arrowcolor=self.FG2, relief='flat')
+        s.map('TCombobox',
+              fieldbackground=[('readonly', self.BG3), ('disabled', self.BG3),
+                                ('focus', self.BG3), ('!focus', self.BG3)],
+              foreground=[('readonly', self.FG), ('disabled', self.FG2),
+                          ('focus', self.FG), ('!focus', self.FG)],
+              selectbackground=[('readonly', self.BG4), ('focus', self.BG4), ('!focus', self.BG4)],
+              selectforeground=[('readonly', self.FG), ('focus', self.FG), ('!focus', self.FG)],
+              background=[('readonly', self.BG3), ('active', self.BG4), ('!active', self.BG3)],
+              arrowcolor=[('readonly', self.FG2), ('active', self.FG), ('!active', self.FG2)])
+        # The dropdown popdown list is a plain Tk Listbox, not a ttk widget —
+        # it doesn't inherit ttk.Style at all and needs the Tk option database.
+        self.option_add('*TCombobox*Listbox.background',         self.BG3)
+        self.option_add('*TCombobox*Listbox.foreground',         self.FG)
+        self.option_add('*TCombobox*Listbox.selectBackground',   self.ACC)
+        self.option_add('*TCombobox*Listbox.selectForeground',   self.BG)
+        self.option_add('*TCombobox*Listbox.font',                self.SANS)
 
     def _build(self):
         # ── Window chrome ──────────────────────────────────────────────────────
@@ -320,6 +347,7 @@ class App(tk.Tk):
         self.after(100, self._history.load)
         self.after(3000, self._silent_update_check)
         self.after(3500, self._startup_dependency_check)
+        self.after(4000, self._prewarm_stats)
 
     # ── Watcher callbacks ──────────────────────────────────────────────────────
     def _log(self, msg):
@@ -449,6 +477,39 @@ class App(tk.Tk):
         install_dir = Path(SCRIPT_PATH).parent
         threading.Thread(target=lambda: self._check_and_install_linux_deps(install_dir),
                          daemon=True).start()
+
+    def _prewarm_stats(self):
+        """
+        Quietly build the Stats tab's real content (filters, KPI cards,
+        chart, donut, panels) and kick off its initial history-aggregation
+        load a few seconds after startup, so the first manual click into
+        Stats is fast — especially on Linux, where building the matplotlib
+        figures cold can be noticeably slower than Windows.
+
+        Runs once (this method itself is only ever scheduled a single time,
+        via the one self.after(4000, ...) call in _build() — no recurring
+        timer). The 4s delay is the same kind of "let the heavier startup
+        work settle first" approximation already used for
+        _silent_update_check/_startup_dependency_check, not a real idle/CPU
+        check — there's no existing load-monitoring infrastructure in this
+        app to hook into, and a fixed delay is enough to avoid competing with
+        history migration and the initial History tab load that both happen
+        within the first second or two.
+
+        Never switches tabs or steals focus: StatsTab.prewarm() builds the
+        tab's widgets into its existing frame in the shared tkraise() stack,
+        which isn't the topmost (visible) frame unless the user is already
+        on Stats — so nothing paints on screen, no flicker, no visible tab
+        change. StatsTab.prewarm() (via _ensure_built()) is itself a no-op
+        if the tab was already built, including if the user clicked into
+        Stats before this timer fired — so this can never double-build or
+        create duplicate widgets.
+        """
+        try:
+            if getattr(self, '_stats_tab', None):
+                self._stats_tab.prewarm()
+        except Exception as e:
+            self._log(f'⚠ Stats prewarm failed (non-fatal): {e}')
 
     def _silent_update_check(self):
         threading.Thread(target=self._do_silent_update_check, daemon=True).start()

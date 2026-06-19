@@ -190,3 +190,25 @@ def daily_series_for_range(rows, date_from=None, date_to=None):
 def distinct_skills(rows):
     """Sorted list of distinct skill names present in rows — for the skill filter dropdown."""
     return sorted({r['skill'] for r in rows})
+
+
+def group_top_n_with_other(totals, n=5, other_label_fmt="Other ({count} skills)"):
+    """Given (name, count) pairs already sorted descending by count, keep the
+    top N individually and collapse everything else into one trailing
+    ('Other (N skills)', summed_count) entry. Returns the input unchanged
+    (as a new list) if there are N or fewer entries — no 'Other' bucket is
+    added when there's nothing to collapse.
+
+    Used by the Stats tab's Levels-by-Skill donut/bar panel so a long tail of
+    rarely-trained skills doesn't clutter the chart. Generic over what the
+    grouped items represent — the 'skills' wording in the default label is
+    just this feature's only current caller; pass other_label_fmt to reuse
+    it elsewhere.
+    """
+    if len(totals) <= n:
+        return list(totals)
+    top = list(totals[:n])
+    rest = totals[n:]
+    other_count = sum(c for _, c in rest)
+    top.append((other_label_fmt.format(count=len(rest)), other_count))
+    return top

@@ -26,7 +26,7 @@ from tkinter import ttk
 from py.stats import (
     load_levelup_rows, filter_rows, compute_kpis, distinct_skills,
     daily_series_for_range, aggregate_skill_totals, aggregate_account_totals,
-    date_bounds_for_preset, DATE_PRESETS,
+    date_bounds_for_preset, DATE_PRESETS, group_top_n_with_other,
 )
 
 try:
@@ -58,13 +58,34 @@ class StatsTab:
 
     # ── Public API (called by App) ───────────────────────────────────────────
     def on_tab_shown(self):
-        if not self._built:
-            self._placeholder.destroy()
-            self._build_real_content()
-            self._built = True
-            self._reload_from_disk()
-        elif self._dirty:
-            self._reload_from_disk()
+        if not self._ensure_built():
+            if self._dirty:
+                self._reload_from_disk()
+
+    def prewarm(self):
+        """Quietly build the real Stats content + kick off the initial data
+        load without switching tabs or stealing focus. Called once by the
+        App a few seconds after startup (see App._prewarm_stats). Safe to
+        call any number of times — a no-op once the tab has actually been
+        built, whether that happened via prewarm or via the user opening the
+        tab themselves first. Building while this frame isn't the raised one
+        in the shared tkraise() stack is invisible — nothing paints on
+        screen until the user actually switches to Stats."""
+        self._ensure_built()
+
+    def _ensure_built(self) -> bool:
+        """Build the real Stats content + kick off the initial disk load,
+        exactly once. Returns True the one time it actually builds, False on
+        every call after that. Shared by on_tab_shown() (first real visit)
+        and prewarm() (quiet startup warm-up) so there is exactly one build
+        code path — not two copies that could drift out of sync or double-build."""
+        if self._built:
+            return False
+        self._placeholder.destroy()
+        self._build_real_content()
+        self._built = True
+        self._reload_from_disk()
+        return True
 
     def mark_dirty(self):
         """Called by the App when a live 'levelup' event arrives. Cheap —
@@ -160,6 +181,27 @@ class StatsTab:
             tk.Label(card, textvariable=sub_var, font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w')
             self._kpi_vars[key] = (val_var, sub_var)
 
+    # ── Chart theming (shared by the main chart and the skill donut) ────────
+    # ax.clear() resets most per-Axes styling back to matplotlib's light-theme
+    # defaults, so this must be called both at initial build AND after every
+    # clear() — not just once. This is also what fixes the white-chart-on-
+    # Linux bug: the figure patch was previously only set once at build time,
+    # and the underlying Tk canvas widget's OWN background (separate from
+    # matplotlib's figure/axes facecolor) was never touched at all, so any
+    # gap between the widget's first paint and the first real plot could show
+    # through as Tk's default (white) canvas background.
+    def _theme_chart_axes(self, fig, ax, canvas_widget):
+        app = self.app
+        fig.patch.set_facecolor(app.BG3)
+        ax.set_facecolor(app.BG3)
+        ax.tick_params(colors=app.FG2, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color(app.BG4)
+        ax.xaxis.label.set_color(app.FG2)
+        ax.yaxis.label.set_color(app.FG2)
+        ax.title.set_color(app.FG)
+        canvas_widget.configure(bg=app.BG3, highlightthickness=0, bd=0)
+
     def _build_chart(self, parent):
         app = self.app
         frame = tk.Frame(parent, bg=app.BG3, padx=8, pady=8)
@@ -169,17 +211,33 @@ class StatsTab:
 
         if MATPLOTLIB_AVAILABLE:
             fig = Figure(figsize=(8, 3), dpi=100)
-            fig.patch.set_facecolor(app.BG3)
             ax = fig.add_subplot(111)
-            ax.set_facecolor(app.BG3)
             canvas = FigureCanvasTkAgg(fig, master=frame)
-            canvas.get_tk_widget().pack(fill='both', expand=True)
+            tk_widget = canvas.get_tk_widget()
+            tk_widget.pack(fill='both', expand=True)
             self._fig, self._ax, self._canvas = fig, ax, canvas
+            self._theme_chart_axes(fig, ax, tk_widget)
+            canvas.draw()   # force an immediate real paint now, before any
+                             # data exists — never leave the widget showing
+                             # Tk's default (white) canvas background
         else:
             tk.Label(frame, text="matplotlib is not installed — chart unavailable.\n"
                                   "Run: pip install matplotlib",
                      font=app.SANS, bg=app.BG3, fg=app.FG2, justify='center').pack(expand=True, pady=30)
             self._fig = self._ax = self._canvas = None
+
+    # Palette for the skill donut/bars — sage/olive first (the biggest slice),
+    # then amber/coral/lavender/amber-orange for the rest, cycling if needed.
+    # 'Other' always gets a deliberately neutral muted tan, never a theme accent.
+    _DONUT_PALETTE_KEYS = ['ACC', 'YEL', 'RED', 'PUR', 'ACC2']
+    _DONUT_OTHER_COLOR  = '#a89a78'   # muted warm tan
+
+    def _color_for_skill_slot(self, index, name):
+        app = self.app
+        if name.startswith('Other'):
+            return self._DONUT_OTHER_COLOR
+        key = self._DONUT_PALETTE_KEYS[index % len(self._DONUT_PALETTE_KEYS)]
+        return getattr(app, key)
 
     def _build_panels(self, parent):
         app = self.app
@@ -189,8 +247,27 @@ class StatsTab:
         left = tk.Frame(row, bg=app.BG3, padx=12, pady=10)
         left.pack(side='left', fill='both', expand=True, padx=(0, 6))
         tk.Label(left, text="Levels by Skill", font=app.SANSB, bg=app.BG3, fg=app.FG).pack(anchor='w')
-        self._skill_panel_inner = tk.Frame(left, bg=app.BG3)
-        self._skill_panel_inner.pack(fill='both', expand=True, pady=(8, 0))
+
+        skill_body = tk.Frame(left, bg=app.BG3)
+        skill_body.pack(fill='both', expand=True, pady=(8, 0))
+
+        donut_frame = tk.Frame(skill_body, bg=app.BG3, width=130, height=130)
+        donut_frame.pack(side='left', fill='y')
+        if MATPLOTLIB_AVAILABLE:
+            donut_fig = Figure(figsize=(1.9, 1.9), dpi=100)
+            donut_ax = donut_fig.add_subplot(111)
+            donut_canvas = FigureCanvasTkAgg(donut_fig, master=donut_frame)
+            donut_widget = donut_canvas.get_tk_widget()
+            donut_widget.pack(fill='both', expand=True)
+            self._donut_fig, self._donut_ax, self._donut_canvas = donut_fig, donut_ax, donut_canvas
+            self._theme_chart_axes(donut_fig, donut_ax, donut_widget)
+            donut_ax.axis('off')
+            donut_canvas.draw()
+        else:
+            self._donut_fig = self._donut_ax = self._donut_canvas = None
+
+        self._skill_panel_inner = tk.Frame(skill_body, bg=app.BG3)
+        self._skill_panel_inner.pack(side='left', fill='both', expand=True, padx=(12, 0))
 
         right = tk.Frame(row, bg=app.BG3, padx=12, pady=10)
         right.pack(side='left', fill='both', expand=True, padx=(6, 0))
@@ -274,7 +351,10 @@ class StatsTab:
         series = daily_series_for_range(rows, date_from=date_from, date_to=date_to)
         self._redraw_chart(series)
 
-        self._update_skill_panel(aggregate_skill_totals(rows))
+        grouped_skills = group_top_n_with_other(aggregate_skill_totals(rows), n=5)
+        self._redraw_skill_donut(grouped_skills)
+        self._update_skill_bars(grouped_skills)
+
         self._update_account_panel(aggregate_account_totals(rows))
 
     # ── KPI cards ─────────────────────────────────────────────────────────────
@@ -306,7 +386,7 @@ class StatsTab:
         app = self.app
         ax = self._ax
         ax.clear()
-        ax.set_facecolor(app.BG3)
+        self._theme_chart_axes(self._fig, ax, self._canvas.get_tk_widget())
 
         if series:
             dates  = [d for d, _ in series]
@@ -325,34 +405,59 @@ class StatsTab:
                     color=app.FG2, transform=ax.transAxes)
             ax.set_xticks([])
 
-        ax.tick_params(colors=app.FG2, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color(app.BG4)
         ax.grid(True, color=app.BG4, linewidth=0.6, alpha=0.6)
         self._fig.tight_layout()
-        self._canvas.draw_idle()
+        self._canvas.draw()   # force, not draw_idle() -- see _theme_chart_axes docstring
 
     # ── Lower panels — rebuild only their own rows, not the whole tab ───────
-    def _update_skill_panel(self, skill_totals):
+    def _redraw_skill_donut(self, grouped):
+        if not MATPLOTLIB_AVAILABLE or self._donut_ax is None:
+            return
+        app = self.app
+        ax = self._donut_ax
+        ax.clear()
+        self._theme_chart_axes(self._donut_fig, ax, self._donut_canvas.get_tk_widget())
+        ax.axis('off')
+
+        if not grouped:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                    color=app.FG2, transform=ax.transAxes, fontsize=9)
+            self._donut_canvas.draw()
+            return
+
+        values = [count for _, count in grouped]
+        colors = [self._color_for_skill_slot(i, name) for i, (name, _) in enumerate(grouped)]
+        ax.pie(values, colors=colors, startangle=90,
+               wedgeprops=dict(width=0.42, edgecolor=app.BG3, linewidth=1.5))
+        total = sum(values)
+        ax.text(0, 0.10, str(total), ha='center', va='center',
+                color=app.FG, fontsize=15, fontweight='bold')
+        ax.text(0, -0.14, 'TOTAL', ha='center', va='center', color=app.FG2, fontsize=7)
+        self._donut_fig.tight_layout()
+        self._donut_canvas.draw()
+
+    def _update_skill_bars(self, grouped):
         app = self.app
         for w in self._skill_panel_inner.winfo_children():
             w.destroy()
-        if not skill_totals:
+        if not grouped:
             tk.Label(self._skill_panel_inner, text="No data", font=app.SANS,
                      bg=app.BG3, fg=app.FG2).pack(anchor='w')
             return
-        max_count = max(c for _, c in skill_totals)
-        total = sum(c for _, c in skill_totals)
-        for skill, count in skill_totals[:10]:
+        max_count = max(c for _, c in grouped)
+        total = sum(c for _, c in grouped)
+        for i, (name, count) in enumerate(grouped):
+            color = self._color_for_skill_slot(i, name)
             row = tk.Frame(self._skill_panel_inner, bg=app.BG3)
             row.pack(fill='x', pady=2)
             pct = (count / total * 100) if total else 0
-            tk.Label(row, text=skill, font=app.SANS, bg=app.BG3, fg=app.FG,
+            tk.Frame(row, bg=color, width=10, height=10).pack(side='left', padx=(0, 6))
+            tk.Label(row, text=name, font=app.SANS, bg=app.BG3, fg=app.FG,
                      width=14, anchor='w').pack(side='left')
             bar_bg = tk.Frame(row, bg=app.BG4, height=10)
             bar_bg.pack(side='left', fill='x', expand=True, padx=6)
             bar_w_ratio = count / max_count if max_count else 0
-            bar_fg = tk.Frame(bar_bg, bg=app.ACC, height=10)
+            bar_fg = tk.Frame(bar_bg, bg=color, height=10)
             bar_fg.place(relx=0, rely=0, relwidth=bar_w_ratio, relheight=1)
             tk.Label(row, text=f"{count} ({pct:.0f}%)", font=app.SANSS,
                      bg=app.BG3, fg=app.FG2, width=12, anchor='e').pack(side='left')
