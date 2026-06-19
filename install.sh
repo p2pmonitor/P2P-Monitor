@@ -21,7 +21,7 @@ sudo apt-get install -y \
 
 echo ""
 echo "[2/4] Installing Python dependencies..."
-pip3 install pystray pillow psutil tkcalendar --break-system-packages
+pip3 install -r "$SCRIPT_DIR/requirements-linux.txt" --break-system-packages
 
 echo ""
 echo "[3/4] Installing files to ~/.p2p_monitor/..."
@@ -30,6 +30,7 @@ mkdir -p "$INSTALL_DIR/py"
 mkdir -p "$INSTALL_DIR/ui"
 
 cp "$SCRIPT_DIR/p2p_monitor.py"       "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/requirements-linux.txt" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/error_rules.json"     "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/inferno_patterns.json" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/py/__init__.py"       "$INSTALL_DIR/py/"
@@ -38,6 +39,7 @@ cp "$SCRIPT_DIR/py/error_rules.py"    "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/inferno_rules.py"  "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/inferno.py"        "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/history.py"        "$INSTALL_DIR/py/"
+cp "$SCRIPT_DIR/py/stats.py"          "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/config.py"         "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/util.py"           "$INSTALL_DIR/py/"
 cp "$SCRIPT_DIR/py/discord.py"        "$INSTALL_DIR/py/"

@@ -1,5 +1,73 @@
 # Changelog
 
+## v2.0.0-beta.4
+### Linux dependency-update support in the source updater
+
+**Internal beta — not the public 2.0.0 release.** Stable public release remains v1.8.3.
+
+**New: Linux dependency detection in the in-app updater**
+- New `requirements-linux.txt` — the single source of truth for Linux pip dependencies (`pystray`, `Pillow`, `psutil`, `tkcalendar`, `matplotlib`). `install.sh` now installs from this file (`pip3 install -r requirements-linux.txt`) instead of a separately-maintained hardcoded package list, so the two can no longer drift out of sync.
+- After a successful Linux source update, `_do_apply_update()` now calls a new `_check_and_install_linux_deps()`: it reads the just-updated `requirements-linux.txt`, checks each entry against installed packages via `importlib.metadata`, and — only if something is actually missing — prompts with a Yes/No dialog listing exactly which package(s) before running `pip install` for those specific entries.
+- If the user declines, the update still completes and offers to restart as normal; a log line with the manual `pip3 install ...` command is left for later.
+- This **never** touches system/apt packages, never runs the full `install.sh`, and never installs anything without an explicit prompt. If nothing is missing (the common steady-state case), this is a silent no-op — no dialog, no extra noise.
+- `discord.py` is intentionally **not** in `requirements-linux.txt` — it already has its own on-demand installer (existing code in `ui/settings_tab.py`, triggered only when "Run Bot Setup" is used), since most setups only need webhook notifications and don't need the extra dependency at all.
+- This addresses a real gap confirmed by reading the updater code directly: the file-copy-based updater has no dependency-installation step of any kind, so updating via "Check for Update" without also installing matplotlib would previously leave the Stats chart unavailable (gracefully, thanks to beta.3's fallback message — not a crash) until the user manually ran `pip install matplotlib`. This checkpoint closes that gap going forward for any future new dependency, not just matplotlib.
+- **Important nuance for the beta.3 → beta.4 transition specifically:** an update is *applied* by whichever updater code is currently running — so upgrading from beta.3 (which predates this feature) to beta.4 is carried out by beta.3's old updater, which has no idea this dependency check exists and will not run it. That one transition still needs `matplotlib` installed manually (`./install.sh` or `pip3 install matplotlib --break-system-packages`) after updating. To close that gap too, `_check_and_install_linux_deps()` now also runs once at startup (`_startup_dependency_check()`, Linux source installs only) — so after restarting into beta.4 (or any future version), the *next* startup catches anything an older updater couldn't, in addition to the existing post-update check. Both call the same detection/prompt logic; the startup path is silent on every run after the first one that actually needed to install something.
+- Dependency detection is presence-only (is the package importable at all?), not minimum-version enforcement — it would catch "matplotlib not installed" but not "matplotlib installed but older than required". Acceptable for beta; worth tightening with real version-comparison before the stable v2.0.0 release.
+
+**Files changed:**
+- `p2p_monitor.py` — version 2.0.0-beta.4; new `_check_and_install_linux_deps()` method, called from `_do_apply_update()`'s success path on Linux only, and also from a new `_startup_dependency_check()` run once at app startup (Linux source installs only) to cover updates applied by an older updater that predates this check
+- `requirements-linux.txt` — new
+- `install.sh` — installs from `requirements-linux.txt` instead of a hardcoded inline list; copies `requirements-linux.txt` into the install dir
+- `update_manifest.txt` — added `requirements-linux.txt` (critical — without this the updater would never refresh the file it depends on)
+- `CHANGELOG.md` — this entry
+
+---
+
+## v2.0.0-beta.3
+### Checkpoint 2 — real Stats tab + theme refinement
+
+**Internal beta — not the public 2.0.0 release.** Stable public release remains v1.8.3.
+
+**Stats tab (real implementation, replaces the Checkpoint 1 placeholder)**
+- New `py/stats.py`: pure, stdlib-only levelup aggregation (no Tkinter) — `load_levelup_rows`, `filter_rows`, `aggregate_daily_totals`, `aggregate_skill_totals`, `aggregate_account_totals`, `compute_kpis`, `daily_series_for_range`, `date_bounds_for_preset`. Kept separate from the UI so it's unit-testable without a display.
+- Data source is existing levelup history records only — no history file format changes. `'Total Level'` milestone-broadcast rows are deliberately excluded from aggregation (they're not a real skill and would double-count alongside the per-skill levelup that normally accompanies them).
+- Filters: Account (All Accounts + individual), Skill (All Skills + individual), date range pills (7D / 30D / 90D / 1Y / ALL).
+- KPI cards: Total Levels, Average Per Day (divided by calendar days in the selected range, not just days with data), Best Day, Top Account.
+- Main chart: Daily Levels Gained, zero-filled across the full date range so quiet days show as real zeros instead of gaps. Uses `matplotlib`/`FigureCanvasTkAgg` when available; falls back to a "matplotlib not installed" message instead of crashing if the backend can't load.
+- Lower panels: Levels by Skill and Top Accounts, both ranked bar-lists.
+- Empty state ("No level-up data found yet.") shown when there is no levelup history at all; a filtered-to-zero result (e.g. an empty date range) shows zeros/"no data for this filter" instead of the full empty state.
+- Performance: disk reads (`load_levelup_rows`, which may touch many history files across accounts) always run on a background thread. Filter and date-range changes only re-filter/re-aggregate the already-loaded in-memory rows and redraw — no disk I/O on every filter click. The two lower panels rebuild only their own row widgets, not the rest of the tab.
+- Lazy-built: the Stats tab's real widgets (and first data load) are built on the first time the tab is opened, not at app startup — consistent with the Checkpoint 1 cached-tab architecture.
+- A live `levelup` event now marks the Stats tab dirty (`mark_dirty()`); the next time the tab is opened it reloads from disk instead of showing stale data.
+
+**Theme refinement**
+- `ACC` and `GREEN` desaturated further toward muted sage/olive/moss — beta.2's values (48%/52% saturation) still read as a fairly vivid "terminal green" against the warm dark background. New values are 30%/36% saturation.
+  - `ACC`: `#4a8f5c` → `#7c9468`
+  - `GREEN`: `#5cbf72` → `#8aac6e`
+- All other tokens (`ACC2`, `RED`, `YEL`, `PUR`, `FG`, `FG2`, backgrounds) already matched the target direction as of beta.2 and are unchanged.
+- Confirmed nav bar/window chrome are already sans-serif (`SANS`/`SANSB`/`BIG`) from Checkpoint 1 — no font change needed.
+- Hardcoded cyan/neon literals remain in `ui/launcher_tab.py` and `ui/history_tab.py` (e.g. `#2e86c1`, `#00ff88`) — intentionally left untouched. Those tabs get their own redesign in Checkpoint 4, and patching scattered literals now would just be redone there; fixing them piecemeal ahead of that pass isn't worth the churn.
+- Monitor tab layout is still unchanged — full visual redesign is Checkpoint 4.
+
+**Install / update plumbing**
+- Added `py/stats.py` to `update_manifest.txt` and `install.sh`.
+- Added `matplotlib` to `requirements-windows.txt` and `install.sh`'s pip install line.
+- Added `matplotlib.backends.backend_tkagg` to `p2p_monitor.spec` hiddenimports (PyInstaller's built-in matplotlib hook handles `mpl-data`/fonts automatically; the TkAgg backend specifically is loaded dynamically and is sometimes missed by static analysis, so it's listed explicitly to match this spec's existing defensive style for third-party packages).
+- Verified via simulation: copying *only* the manifest-listed files into a clean directory (what the in-app updater does) produces a working install, including the new Stats module.
+
+**Files changed:**
+- `py/stats.py` — new
+- `ui/stats_tab.py` — full rewrite (was a Checkpoint 1 placeholder)
+- `p2p_monitor.py` — version 2.0.0-beta.3; `ACC`/`GREEN` color tokens; `_on_event` marks Stats tab dirty on live `levelup` events
+- `update_manifest.txt` — added `py/stats.py`
+- `install.sh` — added `py/stats.py` copy line; added `matplotlib` to pip install line
+- `requirements-windows.txt` — added `matplotlib`
+- `p2p_monitor.spec` — added `matplotlib.backends.backend_tkagg` to hiddenimports; added verification step to header comment
+- `CHANGELOG.md` — this entry
+
+---
+
 ## v2.0.0-beta.2
 ### Checkpoint 1 correction — warm theme tokens
 

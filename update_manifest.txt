@@ -6,6 +6,7 @@ p2p_monitor.py
 CHANGELOG.md
 README.md
 install.sh
+requirements-linux.txt
 update_manifest.txt
 error_rules.json
 inferno_patterns.json
@@ -15,6 +16,7 @@ py/reader.py
 py/error_rules.py
 py/inferno_rules.py
 py/history.py
+py/stats.py
 py/config.py
 py/util.py
 py/discord.py

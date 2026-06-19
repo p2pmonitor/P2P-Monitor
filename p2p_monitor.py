@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.2
+P2P Monitor v2.0.0-beta.4
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.2"
+VERSION      = "2.0.0-beta.4"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -166,12 +166,13 @@ class App(tk.Tk):
     BG3  = '#221e19'   # treeviews, elevated sections
     BG4  = '#2c2620'   # borders, separators, table headers
 
-    # Primary accent: muted sage/olive green — reserved for active/running/accent states
-    ACC  = '#4a8f5c'   # active tab, primary buttons, links
+    # Primary accent: muted sage/olive/moss — reserved for active/running/accent states.
+    # Desaturated further in beta.3 — beta.2's values still read as vivid "terminal green".
+    ACC  = '#7c9468'   # active tab, primary buttons, links
     ACC2 = '#c87830'   # warm amber-orange (secondary highlights)
 
     # Status / event colours
-    GREEN = '#5cbf72'  # running/ok/success/drops
+    GREEN = '#8aac6e'  # running/ok/success/drops — muted moss, slightly brighter than ACC
     RED   = '#d04848'  # error/stopped
     YEL   = '#c8a840'  # level-ups, gold/quests, amber highlights
     PUR   = '#8870b8'  # sparingly (quest badges, lavender)
@@ -312,6 +313,7 @@ class App(tk.Tk):
         self._status_debounce_id = None
         self.after(100, self._history.load)
         self.after(3000, self._silent_update_check)
+        self.after(3500, self._startup_dependency_check)
 
     # ── Watcher callbacks ──────────────────────────────────────────────────────
     def _log(self, msg):
@@ -351,6 +353,8 @@ class App(tk.Tk):
             if self._status_debounce_id:
                 self.after_cancel(self._status_debounce_id)
             self._status_debounce_id = self.after(2000, self._status_tab.refresh)
+            if etype == 'levelup' and getattr(self, '_stats_tab', None):
+                self._stats_tab.mark_dirty()
         self.after(0, _do)
 
     def _on_status_refresh(self):
@@ -420,6 +424,25 @@ class App(tk.Tk):
     # ── Auto-updater ───────────────────────────────────────────────────────────
     def _check_for_update(self):
         threading.Thread(target=self._do_update_check, daemon=True).start()
+
+    def _startup_dependency_check(self):
+        """
+        Run once at startup, Linux source installs only. Covers the gap where
+        an update was applied by an OLDER updater that didn't yet know about
+        _check_and_install_linux_deps — e.g. the beta.3 -> beta.4 transition
+        itself, where beta.3's updater copies beta.4's files (including the
+        new requirements-linux.txt and the new dependency-check code) but has
+        no idea to run it. Once the user restarts into the new version, this
+        startup check catches what the old updater couldn't.
+        Cheap and silent if nothing is missing (the common case on every
+        startup after the first one) — same detection logic and the same
+        opt-in prompt as the post-update check, just triggered differently.
+        """
+        if _is_frozen() or not sys.platform.startswith('linux'):
+            return
+        install_dir = Path(SCRIPT_PATH).parent
+        threading.Thread(target=lambda: self._check_and_install_linux_deps(install_dir),
+                         daemon=True).start()
 
     def _silent_update_check(self):
         threading.Thread(target=self._do_silent_update_check, daemon=True).start()
@@ -692,6 +715,10 @@ class App(tk.Tk):
             self.after(0, lambda: messagebox.showwarning('Update Incomplete', msg))
         else:
             self._log(f'✅ Updated to {new_ver}')
+            if sys.platform.startswith('linux'):
+                # Still running on this background update thread — safe to block
+                # here on the dependency-confirmation dialog (see method docstring).
+                self._check_and_install_linux_deps(install_dir)
             def _restart():
                 if messagebox.askyesno('Update Complete',
                         f'Updated to {new_ver}!\n\nRestart now?'):
@@ -707,6 +734,97 @@ class App(tk.Tk):
                         # Source install — restart via execv
                         os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
             self.after(0, _restart)
+
+    def _check_and_install_linux_deps(self, install_dir):
+        """
+        Check requirements-linux.txt in install_dir against what's actually
+        installed, and prompt before installing anything new via pip.
+
+        Called from two places:
+          1. _do_apply_update() — right after a successful Linux source
+             update, checking the just-updated requirements-linux.txt.
+          2. _startup_dependency_check() — once at app startup, covering the
+             case where the update that brought in this dependency was
+             applied by an OLDER updater that didn't have this check yet
+             (e.g. the beta.3 -> beta.4 transition itself).
+
+        Never touches system/apt packages — only `pip install` for entries
+        from requirements-linux.txt that importlib.metadata can't find. If
+        nothing is missing, this is a silent no-op (the common case on every
+        call after the first one that actually needed to install something).
+
+        Must always be called from a background thread, not the main thread
+        — both call sites above run it via threading.Thread. It blocks that
+        worker thread on a threading.Event while the confirmation dialog runs
+        on the main thread via self.after(), which is safe: only the worker
+        thread waits, the Tk mainloop keeps running normally.
+        """
+        import re
+        import subprocess
+        import importlib.metadata as _ilmd
+
+        req_path = Path(install_dir) / 'requirements-linux.txt'
+        if not req_path.exists():
+            return
+        try:
+            specs = [l.strip() for l in req_path.read_text(encoding='utf-8').splitlines()]
+            specs = [l for l in specs if l and not l.startswith('#')]
+        except Exception as e:
+            self._log(f'⚠ Could not read requirements-linux.txt: {e}')
+            return
+        if not specs:
+            return
+
+        missing = []
+        for spec in specs:
+            name = re.split(r'[<>=!~]', spec, 1)[0].strip()
+            if not name:
+                continue
+            try:
+                _ilmd.version(name)
+            except _ilmd.PackageNotFoundError:
+                missing.append(spec)
+            except Exception:
+                continue  # don't let a weird metadata lookup block the update
+        if not missing:
+            return
+
+        self._log(f'📦 {len(missing)} new Python dependency(ies) needed: ' + ', '.join(missing))
+
+        answer = {}
+        event = threading.Event()
+        def _ask():
+            answer['ok'] = messagebox.askyesno(
+                'Install Python Dependencies?',
+                f'This update needs {len(missing)} additional Python package(s):\n\n'
+                + '\n'.join(f'  • {m}' for m in missing) +
+                '\n\nInstall them now via pip?\n\n'
+                'This only runs "pip install" for the package(s) above — system\n'
+                '(apt) packages and any other setup steps are not touched.')
+            event.set()
+        self.after(0, _ask)
+        event.wait()
+
+        if not answer.get('ok'):
+            self._log('⚠ Skipped installing new Python dependencies — install '
+                       'manually if Stats or other features look broken: pip3 install '
+                       + ' '.join(missing) + ' --break-system-packages')
+            return
+
+        self.after(0, lambda: self._log('⏳ Installing Python dependencies...'))
+        try:
+            subprocess.check_call(
+                [sys.executable, '-m', 'pip', 'install', *missing,
+                 '--break-system-packages', '--quiet'], timeout=180)
+            self._log('✅ Python dependencies installed')
+        except Exception as e:
+            err_msg = str(e)
+            self._log(f'❌ Dependency install failed: {err_msg}')
+            cmd_hint = 'pip3 install ' + ' '.join(missing) + ' --break-system-packages'
+            self.after(0, lambda: messagebox.showwarning(
+                'Dependency Install Failed',
+                f'Could not install: {", ".join(missing)}\n\n{err_msg}\n\n'
+                f'Install manually with:\n{cmd_hint}'))
 
     def _do_win_frozen_update(self, new_ver, asset_url):
         """
