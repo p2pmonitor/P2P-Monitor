@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.8
+P2P Monitor v2.0.0-beta.9
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.8"
+VERSION      = "2.0.0-beta.9"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -483,18 +483,19 @@ class App(tk.Tk):
         Quietly load + cache the Stats tab's history data a few seconds
         after startup, so a manual click into Stats later doesn't have to
         wait on the disk read — without ever touching a single Tkinter
-        widget or matplotlib object. StatsTab.prewarm() is data-only by
-        design: it loads levelup rows on a background thread and caches
-        them, nothing more. Building the actual filter row / KPI cards /
-        chart / donut / panels is reserved entirely for the moment the user
-        opens the tab for real (on_tab_shown(), via tkraise()), because that
-        is the only point where the Stats frame is guaranteed to have real,
-        realized screen dimensions. Building or drawing matplotlib canvases
-        into a frame that isn't yet mapped (because some other tab is the
-        one currently raised) turned out to be exactly what caused a Linux-
-        specific bug: a partial build could silently fail mid-construction,
-        leaving `self._built` never set and the tab rebuilding itself on top
-        of its own broken remains the next time it was opened.
+        widget. StatsTab.prewarm() is data-only by design: it loads levelup
+        rows on a background thread and caches them, nothing more. Building
+        the actual filter row / KPI cards / chart / donut / panels is
+        reserved entirely for the moment the user opens the tab for real
+        (on_tab_shown(), via tkraise()), because that is the only point
+        where the Stats frame is guaranteed to have real, realized screen
+        dimensions. Building or drawing canvases into a frame that isn't
+        yet mapped (because some other tab is the one currently raised)
+        turned out to be exactly what caused a Linux-specific bug back when
+        the chart used matplotlib: a partial build could silently fail
+        mid-construction, leaving `self._built` never set and the tab
+        rebuilding itself on top of its own broken remains the next time it
+        was opened.
 
         Runs once (this method itself is only ever scheduled a single time,
         via the one self.after(4000, ...) call in _build() — no recurring
@@ -510,10 +511,10 @@ class App(tk.Tk):
         if a prewarm load is already in flight, or if data is already cached.
 
         Disabled on Linux for this beta: despite prewarm being verified
-        data-only (no widget/matplotlib construction at all), Linux still
-        showed the duplicate-Stats-section symptom, pointing at a race this
-        fix hasn't fully pinned down yet. Stable behavior matters more than
-        first-click speed, so prewarm is Windows-only until that's resolved.
+        data-only (no widget construction at all), Linux still showed the
+        duplicate-Stats-section symptom, pointing at a race this fix hasn't
+        fully pinned down yet. Stable behavior matters more than first-click
+        speed, so prewarm is Windows-only until that's resolved.
         StatsTab itself still has its own build-lock + failure-cleanup guard
         (_building) as defense in depth regardless of platform.
         """

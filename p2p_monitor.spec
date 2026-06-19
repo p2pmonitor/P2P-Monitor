@@ -7,7 +7,6 @@
 #   pip install -r requirements-windows.txt
 #   python -c "import discord; print('discord.py OK')"   # verify before building
 #   python -c "from PIL import Image, ImageGrab, ImageChops; print('Pillow OK')"
-#   python -c "import matplotlib; print('matplotlib OK', matplotlib.__version__)"
 #   pyinstaller p2p_monitor.spec
 #
 # Output: dist/P2P Monitor.exe (single file, no console window)
@@ -60,12 +59,6 @@ a = Analysis(
         # pystray (system tray)
         'pystray',
         'pystray._win32',
-        # matplotlib — Stats tab charting. PyInstaller ships a built-in
-        # matplotlib hook that handles mpl-data/fonts automatically, but the
-        # TkAgg backend specifically is loaded dynamically and is sometimes
-        # missed by static analysis, so it's listed explicitly here to match
-        # this spec's existing defensive style for third-party packages.
-        'matplotlib.backends.backend_tkagg',
         # tkinter
         'tkinter',
         'tkinter.ttk',

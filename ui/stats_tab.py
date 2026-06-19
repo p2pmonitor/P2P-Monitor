@@ -1,8 +1,14 @@
-"""ui/stats_tab.py — Stats tab for P2P Monitor (Checkpoint 2: real implementation)
+"""ui/stats_tab.py — Stats tab for P2P Monitor (v2.0.0-beta.9: native Tk Canvas charts)
 
 Levelup aggregation lives in py/stats.py (pure, testable, no Tkinter). This
-file only handles widget construction, the matplotlib chart embed, and wiring
-filter/date-range changes to py.stats's pure functions.
+file only handles widget construction, the Tk Canvas chart/donut drawing, and
+wiring filter/date-range changes to py.stats's pure functions.
+
+Charts are drawn with plain tkinter.Canvas primitives on every platform —
+no matplotlib anywhere. matplotlib was used for the chart/donut through
+beta.8, but a Linux-specific FreeType render crash (and the dependency
+weight/build complexity it brought) led to a native-Canvas rewrite that's
+now the only rendering path, Linux and Windows alike.
 
 Lazy-built: __init__ only creates a lightweight placeholder; the real widgets
 (filters, KPI cards, chart, panels) are built on the first on_tab_shown()
@@ -18,24 +24,26 @@ Caching / recalculation rules (per spec):
     the *next* on_tab_shown() triggers a fresh disk reload instead of a no-op.
   - The two lower panels (Levels by Skill / Top Accounts) rebuild only their
     own row widgets on update, not the rest of the tab.
+
+Filter semantics (per spec, beta.9):
+  - KPI cards + Daily Levels chart: obey Account + Skill + Date range.
+  - Levels by Skill panel: obeys Account + Date range, ignores Skill (a
+    skill filter would otherwise reduce this panel to a single slice).
+  - Top Accounts panel: obeys Skill + Date range, ignores Account (an
+    account filter would otherwise reduce this panel to a single row).
 """
+import math
 import threading
 import tkinter as tk
 from tkinter import ttk
+
+from py.util import write_debug_entry
 
 from py.stats import (
     load_levelup_rows, filter_rows, compute_kpis, distinct_skills,
     daily_series_for_range, aggregate_skill_totals, aggregate_account_totals,
     date_bounds_for_preset, DATE_PRESETS, group_top_n_with_other,
 )
-
-try:
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.ticker import MaxNLocator
-    MATPLOTLIB_AVAILABLE = True
-except Exception:
-    MATPLOTLIB_AVAILABLE = False
 
 
 class StatsTab:
@@ -51,45 +59,73 @@ class StatsTab:
         self._all_rows = []    # full unfiltered levelup dataset, in memory
         self._date_preset = 'ALL'
 
-        # Prewarm cache — populated by prewarm() (data-only, no widgets, no
-        # matplotlib) and consumed once by _ensure_built() the first time the
+        # Prewarm cache — populated by prewarm() (data-only, no widgets)
+        # and consumed once by _ensure_built() the first time the
         # real UI actually gets built, so a prewarmed open skips a redundant
         # disk read instead of re-loading from scratch.
         self._prewarm_rows    = None
         self._prewarm_loading = False
         self._building        = False  # build-lock guard against races
+        self._donut_resize_pending = False  # guards the single after_idle retry in _size_donut_to_panel
+        self._donut_redraw_in_progress = False  # reentrancy guard — see _redraw_skill_donut
 
         # Lightweight placeholder — replaced by _build_real_content() on first show
-        self._placeholder = tk.Frame(parent_frame, bg=app.BG2)
+        self._placeholder = None
+        self._show_loading_placeholder()
+
+    def _show_loading_placeholder(self):
+        self._placeholder = tk.Frame(self._frame, bg=self.app.BG2)
         self._placeholder.pack(fill='both', expand=True)
-        tk.Label(self._placeholder, text="Loading Stats…", font=app.SANS,
-                 bg=app.BG2, fg=app.FG2).pack(expand=True)
+        tk.Label(self._placeholder, text="Loading Stats…", font=self.app.SANS,
+                 bg=self.app.BG2, fg=self.app.FG2).pack(expand=True)
+
+    def _show_build_error(self, err_msg):
+        """Visible, recoverable error state for when _build_real_content()
+        itself fails (a genuine widget/layout construction error). Stats
+        must never sit on 'Loading Stats...' forever with no way forward."""
+        app = self.app
+        self._placeholder = tk.Frame(self._frame, bg=app.BG2)
+        self._placeholder.pack(fill='both', expand=True)
+        tk.Frame(self._placeholder, bg=app.BG2).pack(expand=True)
+        tk.Label(self._placeholder, text="Stats failed to load", font=app.SANSL,
+                 bg=app.BG2, fg=app.RED).pack()
+        tk.Label(self._placeholder, text=err_msg, font=app.SANSS, bg=app.BG2,
+                 fg=app.FG2, wraplength=500, justify='center').pack(pady=(6, 12))
+        tk.Button(self._placeholder, text="↻  Retry", font=app.SANSB,
+                  bg=app.ACC, fg=app.BG, relief='flat', padx=14, pady=6,
+                  cursor='hand2', command=self._retry_build).pack()
+        tk.Frame(self._placeholder, bg=app.BG2).pack(expand=True)
+
+    def _retry_build(self):
+        self._placeholder.destroy()
+        self._show_loading_placeholder()
+        self.on_tab_shown()
 
     # ── Public API (called by App) ───────────────────────────────────────────
     def on_tab_shown(self):
-        if not self._ensure_built():
+        if self._built:
             if self._dirty:
                 self._reload_from_disk()
+            return
+        self._ensure_built()
 
     def prewarm(self):
         """
         Data-only warm-up: load + cache levelup rows from disk in a
         background thread. Deliberately does NOT touch Tkinter widgets in
-        any way — no filter row, no KPI cards, no chart/donut canvases, no
-        matplotlib Figure/Canvas construction, and never calls
-        _build_real_content(). The widget-construction path is reserved for
-        the moment the user actually opens the tab, when its frame is about
-        to be tkraise()'d and is therefore guaranteed to have real, realized
-        screen dimensions — building (and especially drawing matplotlib
-        canvases) into a frame that isn't yet mapped/sized is exactly what
-        caused the Linux duplicate-Stats-section bug: a partial build could
-        fail partway through (observed as "FT_Render_Glyph raster overflow"
-        from matplotlib's Agg/FreeType text renderer hitting a degenerate
-        canvas size) before `self._built` was ever set, so the next real
-        visit rebuilt the whole tab from scratch on top of the broken one.
-        Making prewarm purely data-only removes that entire class of risk by
-        construction — there is nothing here that can leave partial widgets
-        behind, because nothing widget-related is created at all.
+        any way — no filter row, no KPI cards, no chart/donut canvases,
+        and never calls _build_real_content(). The widget-construction path
+        is reserved for the moment the user actually opens the tab, when its
+        frame is about to be tkraise()'d and is therefore guaranteed to have
+        real, realized screen dimensions — building (and drawing) canvases
+        into a frame that isn't yet mapped/sized is exactly what caused the
+        Linux duplicate-Stats-section bug back when the chart used
+        matplotlib: a partial build could fail partway through before
+        `self._built` was ever set, so the next real visit rebuilt the whole
+        tab from scratch on top of the broken one. Making prewarm purely
+        data-only removes that entire class of risk by construction — there
+        is nothing here that can leave partial widgets behind, because
+        nothing widget-related is created at all.
 
         Safe to call any number of times: a no-op if the tab is already
         built (the user got there first), if data is already cached, or if
@@ -118,26 +154,31 @@ class StatsTab:
 
     def _ensure_built(self) -> bool:
         """Build the real Stats content + load its data, exactly once.
-        Returns True the one time it actually builds, False on every call
-        after that. Guarded by self._building so two near-simultaneous calls
-        (e.g. a fast double-click) can't both start building. If the build
-        throws partway through, whatever got created is destroyed so no
-        broken/partial widgets linger — a later call can retry cleanly."""
+        Returns True the one time it actually builds, False if guarded out
+        or if the build failed. Guarded by self._building so two near-
+        simultaneous calls (e.g. a fast double-click) can't both start
+        building. If the build throws partway through (a genuine widget/
+        layout construction error — chart/donut *rendering* failures are
+        caught separately inside _redraw_chart()/_redraw_skill_donut() and
+        never reach here), the partial widgets are destroyed and a visible,
+        recoverable error state with a Retry button is shown instead of
+        silently restoring 'Loading Stats...' forever."""
         if self._built or self._building:
             return False
         self._building = True
         try:
             self._placeholder.destroy()
             self._build_real_content()
-        except Exception:
+        except Exception as e:
             for w in self._frame.winfo_children():
                 w.destroy()
-            self._placeholder = tk.Frame(self._frame, bg=self.app.BG2)
-            self._placeholder.pack(fill='both', expand=True)
-            tk.Label(self._placeholder, text="Loading Stats…", font=self.app.SANS,
-                     bg=self.app.BG2, fg=self.app.FG2).pack(expand=True)
             self._building = False
-            raise
+            try:
+                write_debug_entry('stats_build_error', {'error': str(e)})
+            except Exception:
+                pass
+            self._show_build_error(str(e))
+            return False
         self._built = True
         self._building = False
         if self._prewarm_rows is not None:
@@ -242,56 +283,35 @@ class StatsTab:
             tk.Label(card, textvariable=sub_var, font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w')
             self._kpi_vars[key] = (val_var, sub_var)
 
-    # ── Chart theming (shared by the main chart and the skill donut) ────────
-    # ax.clear() resets most per-Axes styling back to matplotlib's light-theme
-    # defaults, so this must be called both at initial build AND after every
-    # clear() — not just once. This is also what fixes the white-chart-on-
-    # Linux bug: the figure patch was previously only set once at build time,
-    # and the underlying Tk canvas widget's OWN background (separate from
-    # matplotlib's figure/axes facecolor) was never touched at all, so any
-    # gap between the widget's first paint and the first real plot could show
-    # through as Tk's default (white) canvas background.
-    def _theme_chart_axes(self, fig, ax, canvas_widget):
-        app = self.app
-        fig.patch.set_facecolor(app.BG3)
-        ax.set_facecolor(app.BG3)
-        ax.tick_params(colors=app.FG2, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color(app.BG4)
-        ax.xaxis.label.set_color(app.FG2)
-        ax.yaxis.label.set_color(app.FG2)
-        ax.title.set_color(app.FG)
-        canvas_widget.configure(bg=app.BG3, highlightthickness=0, bd=0)
-
     def _build_chart(self, parent):
         app = self.app
         frame = tk.Frame(parent, bg=app.BG3, padx=8, pady=8)
         frame.pack(fill='both', expand=True, padx=12, pady=(0, 10))
         tk.Label(frame, text="Daily Levels Gained", font=app.SANSB,
                  bg=app.BG3, fg=app.FG).pack(anchor='w', padx=4, pady=(0, 4))
+        self._chart_frame = frame
 
-        if MATPLOTLIB_AVAILABLE:
-            fig = Figure(figsize=(8, 3), dpi=100)
-            ax = fig.add_subplot(111)
-            canvas = FigureCanvasTkAgg(fig, master=frame)
-            tk_widget = canvas.get_tk_widget()
-            tk_widget.pack(fill='both', expand=True)
-            self._fig, self._ax, self._canvas = fig, ax, canvas
-            self._theme_chart_axes(fig, ax, tk_widget)
-            canvas.draw()   # force an immediate real paint now, before any
-                             # data exists — never leave the widget showing
-                             # Tk's default (white) canvas background
-        else:
-            tk.Label(frame, text="matplotlib is not installed — chart unavailable.\n"
-                                  "Run: pip install matplotlib",
-                     font=app.SANS, bg=app.BG3, fg=app.FG2, justify='center').pack(expand=True, pady=30)
-            self._fig = self._ax = self._canvas = None
+        canvas = tk.Canvas(frame, bg=app.BG3, highlightthickness=0, bd=0)
+        canvas.pack(fill='both', expand=True)
+        self._chart_canvas = canvas
 
     # Palette for the skill donut/bars — sage/olive first (the biggest slice),
     # then amber/coral/lavender/amber-orange for the rest, cycling if needed.
     # 'Other' always gets a deliberately neutral muted tan, never a theme accent.
     _DONUT_PALETTE_KEYS = ['ACC', 'YEL', 'RED', 'PUR', 'ACC2']
     _DONUT_OTHER_COLOR  = '#a89a78'   # muted warm tan
+
+    # Dynamic donut sizing (see _size_donut_to_panel): the donut frame is
+    # resized on every redraw to match the real rendered height of the
+    # skill-bar rows next to it, so it stays aligned whether 1 or 9 rows
+    # (top-8 + Other) are showing. _DONUT_FALLBACK_SIZE is used only when
+    # there's no data, or when Tk hasn't finished laying out the panel yet
+    # (e.g. the very first build, before a mainloop pass) — in the latter
+    # case a single after_idle retry corrects the size once real geometry
+    # is available, guarded by _donut_resize_pending so it can't loop.
+    _DONUT_FALLBACK_SIZE  = 130
+    _DONUT_MIN_VALID_SIZE = 40
+
 
     def _color_for_skill_slot(self, index, name):
         app = self.app
@@ -312,20 +332,20 @@ class StatsTab:
         skill_body = tk.Frame(left, bg=app.BG3)
         skill_body.pack(fill='both', expand=True, pady=(8, 0))
 
-        donut_frame = tk.Frame(skill_body, bg=app.BG3, width=130, height=130)
-        donut_frame.pack(side='left', fill='y')
-        if MATPLOTLIB_AVAILABLE:
-            donut_fig = Figure(figsize=(1.9, 1.9), dpi=100)
-            donut_ax = donut_fig.add_subplot(111)
-            donut_canvas = FigureCanvasTkAgg(donut_fig, master=donut_frame)
-            donut_widget = donut_canvas.get_tk_widget()
-            donut_widget.pack(fill='both', expand=True)
-            self._donut_fig, self._donut_ax, self._donut_canvas = donut_fig, donut_ax, donut_canvas
-            self._theme_chart_axes(donut_fig, donut_ax, donut_widget)
-            donut_ax.axis('off')
-            donut_canvas.draw()
-        else:
-            self._donut_fig = self._donut_ax = self._donut_canvas = None
+        donut_frame = tk.Frame(skill_body, bg=app.BG3,
+                                width=self._DONUT_FALLBACK_SIZE,
+                                height=self._DONUT_FALLBACK_SIZE)
+        # pack_propagate(False) + no fill='y': the frame's size is driven
+        # entirely by _size_donut_to_panel() (called from _redraw_skill_donut),
+        # which measures the real height of the skill-bar rows and resizes
+        # this frame to match — not by Tk's default child-driven sizing or
+        # by stretching to fill the row's height.
+        donut_frame.pack_propagate(False)
+        donut_frame.pack(side='left')
+        self._donut_frame = donut_frame
+        donut_canvas = tk.Canvas(donut_frame, bg=app.BG3, highlightthickness=0, bd=0)
+        donut_canvas.pack(fill='both', expand=True)
+        self._donut_canvas = donut_canvas
 
         self._skill_panel_inner = tk.Frame(skill_body, bg=app.BG3)
         self._skill_panel_inner.pack(side='left', fill='both', expand=True, padx=(12, 0))
@@ -403,20 +423,30 @@ class StatsTab:
         skill   = None if skill in ('', self.ALL_SKILLS) else skill
         date_from, date_to = date_bounds_for_preset(self._date_preset)
 
+        # KPI cards + Daily Levels chart: obey every filter.
         rows = filter_rows(self._all_rows, account=account, skill=skill,
                             date_from=date_from, date_to=date_to)
-
         kpis = compute_kpis(rows, date_from=date_from, date_to=date_to)
         self._update_kpis(kpis, date_from, date_to)
 
         series = daily_series_for_range(rows, date_from=date_from, date_to=date_to)
         self._redraw_chart(series)
 
-        grouped_skills = group_top_n_with_other(aggregate_skill_totals(rows), n=5)
-        self._redraw_skill_donut(grouped_skills)
+        # Levels by Skill: obeys Account + Date range, ignores Skill — a
+        # skill filter would otherwise collapse this panel to one slice.
+        rows_for_skills = filter_rows(self._all_rows, account=account, skill=None,
+                                       date_from=date_from, date_to=date_to)
+        grouped_skills = group_top_n_with_other(aggregate_skill_totals(rows_for_skills), n=8)
+        # Skill bars first — the donut measures their rendered height and
+        # resizes itself to match (see _size_donut_to_panel).
         self._update_skill_bars(grouped_skills)
+        self._redraw_skill_donut(grouped_skills)
 
-        self._update_account_panel(aggregate_account_totals(rows))
+        # Top Accounts: obeys Skill + Date range, ignores Account — an
+        # account filter would otherwise collapse this panel to one row.
+        rows_for_accounts = filter_rows(self._all_rows, account=None, skill=skill,
+                                         date_from=date_from, date_to=date_to)
+        self._update_account_panel(aggregate_account_totals(rows_for_accounts))
 
     # ── KPI cards ─────────────────────────────────────────────────────────────
     def _update_kpis(self, kpis, date_from, date_to):
@@ -441,66 +471,232 @@ class StatsTab:
         sub.set(f"{count} levels" if acct else 'No data')
 
     # ── Chart ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _nice_tick_step(max_val, target_steps=5):
+        """Pick a clean whole-number step (1/2/5/10/20/25/50/100/...) for
+        y-axis gridlines instead of dividing max_val into raw fractional
+        chunks (e.g. max=23 -> 0/5/9/14/18/23). Mirrors the intent of
+        matplotlib's MaxNLocator without the dependency."""
+        if max_val <= 0:
+            return 1
+        raw_step = max_val / target_steps
+        magnitude = 10 ** math.floor(math.log10(raw_step)) if raw_step >= 1 else 1
+        for mult in (1, 2, 5, 10):
+            step = mult * magnitude
+            if step >= raw_step:
+                return max(1, int(round(step)))
+        return max(1, int(round(magnitude * 10)))
+
+    @staticmethod
+    def _format_date_for_axis(date_str):
+        """Display-only reformat for the Daily Levels chart's x-axis labels:
+        stored rows use 'YYYY-MM-DD' (needed for correct string sorting/
+        filtering elsewhere) — this renders that as 'MM-DD-YY' purely for
+        the chart. Falls back to the raw string for anything that doesn't
+        actually look like 'YYYY-MM-DD'."""
+        try:
+            y, m, d = date_str.split('-')
+            if len(y) == 4 and len(m) == 2 and len(d) == 2:
+                return f"{m}-{d}-{y[2:]}"
+        except Exception:
+            pass
+        return date_str
+
     def _redraw_chart(self, series):
-        if not MATPLOTLIB_AVAILABLE or self._ax is None:
-            return
+        """Pure-Tkinter Canvas line chart — used on every platform so chart
+        rendering never depends on matplotlib at all. Whole-number y-axis
+        ticks only, since fractional levels-per-day are meaningless."""
         app = self.app
-        ax = self._ax
-        ax.clear()
-        self._theme_chart_axes(self._fig, ax, self._canvas.get_tk_widget())
+        c = self._chart_canvas
+        try:
+            c.delete('all')
+            c.update_idletasks()
+            w, h = c.winfo_width(), c.winfo_height()
+            if w < 10 or h < 10:
+                w, h = 700, 260
+            # pad_r is generous enough that the rightmost x-axis label
+            # (anchored to its own right edge, not centered) never runs
+            # off the canvas.
+            pad_l, pad_r, pad_t, pad_b = 42, 32, 12, 28
+            plot_w = max(w - pad_l - pad_r, 10)
+            plot_h = max(h - pad_t - pad_b, 10)
 
-        if series:
+            if not series:
+                c.create_text(w / 2, h / 2, text='No data for this filter',
+                              fill=app.FG2, font=app.SANS)
+                return
+
             dates  = [d for d, _ in series]
-            counts = [c for _, c in series]
-            x = range(len(dates))
-            ax.plot(x, counts, color=app.ACC, linewidth=2, marker='o', markersize=3)
-            ax.fill_between(x, counts, color=app.ACC, alpha=0.10)
-            n = len(dates)
-            step = max(1, n // 8)
-            tick_idx = list(range(0, n, step))
-            ax.set_xticks(tick_idx)
-            ax.set_xticklabels([dates[i] for i in tick_idx], rotation=30, ha='right', fontsize=8)
-            ax.set_ylim(bottom=0)
-            # Levels gained per day is a whole-number count — never show
-            # fractional ticks like 0.5/1.5 (MaxNLocator with integer=True
-            # also de-duplicates if matplotlib's autoscaling would otherwise
-            # produce repeated/identical integer ticks on a very small range).
-            ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        else:
-            ax.text(0.5, 0.5, 'No data for this filter', ha='center', va='center',
-                    color=app.FG2, transform=ax.transAxes)
-            ax.set_xticks([])
+            counts = [v for _, v in series]
+            n = len(series)
+            data_max = max(max(counts), 1)
 
-        ax.grid(True, color=app.BG4, linewidth=0.6, alpha=0.6)
-        self._fig.tight_layout()
-        self._canvas.draw()   # force, not draw_idle() -- see _theme_chart_axes docstring
+            # Clean gridlines: round the axis top up to the next whole
+            # multiple of a "nice" step (0/10/20/30/... instead of
+            # 0/5/9/14/18/23), so the chart never plots flush to the top.
+            step = self._nice_tick_step(data_max)
+            y_top = step
+            while y_top < data_max:
+                y_top += step
+            tick_vals = list(range(0, y_top + 1, step))
+
+            def xy(i, val):
+                x = pad_l + (i / max(n - 1, 1)) * plot_w
+                y = pad_t + plot_h - (val / y_top) * plot_h
+                return x, y
+
+            for val in tick_vals:
+                _, y = xy(0, val)
+                c.create_line(pad_l, y, pad_l + plot_w, y, fill=app.BG4)
+                c.create_text(pad_l - 6, y, text=str(val), fill=app.FG2,
+                              font=app.SANSS, anchor='e')
+
+            label_step = max(1, n // 6)
+            tick_idx = list(range(0, n, label_step))
+            if tick_idx[-1] != n - 1:
+                tick_idx.append(n - 1)  # always show the actual last day
+            for i in tick_idx:
+                x, _ = xy(i, 0)
+                # The first/last labels anchor to their own edge instead of
+                # centering, so they can't run off either side of the canvas.
+                anchor = 'nw' if i == 0 else ('ne' if i == n - 1 else 'n')
+                c.create_text(x, h - pad_b + 12, text=self._format_date_for_axis(dates[i]),
+                              fill=app.FG2, font=app.SANSS, anchor=anchor)
+
+            points = [xy(i, v) for i, v in enumerate(counts)]
+            if len(points) > 1:
+                c.create_line(*[coord for pt in points for coord in pt],
+                              fill=app.ACC, width=2)
+            for x, y in points:
+                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=app.ACC, outline=app.ACC)
+        except Exception as e:
+            self._show_chart_error(str(e))
+
+    def _show_chart_error(self, err_msg):
+        """Non-fatal fallback when chart *rendering* itself fails. Hides the
+        canvas and shows a clean message instead; the rest of the Stats tab
+        (KPIs, donut, panels) is unaffected."""
+        try:
+            write_debug_entry('stats_chart_error', {'chart': 'main', 'error': err_msg})
+        except Exception:
+            pass
+        self._chart_canvas.pack_forget()
+        if getattr(self, '_chart_error_lbl', None) is None:
+            self._chart_error_lbl = tk.Label(self._chart_frame, text="Chart unavailable on this system",
+                                              font=self.app.SANS, bg=self.app.BG3, fg=self.app.FG2)
+        self._chart_error_lbl.pack(expand=True, pady=30)
 
     # ── Lower panels — rebuild only their own rows, not the whole tab ───────
-    def _redraw_skill_donut(self, grouped):
-        if not MATPLOTLIB_AVAILABLE or self._donut_ax is None:
-            return
-        app = self.app
-        ax = self._donut_ax
-        ax.clear()
-        self._theme_chart_axes(self._donut_fig, ax, self._donut_canvas.get_tk_widget())
-        ax.axis('off')
+    def _size_donut_to_panel(self, grouped):
+        """Resize the donut frame to match the real rendered height of the
+        skill-bar rows next to it (self._skill_panel_inner), so the donut
+        stays visually aligned whether 1 row or all 9 (top-8 + Other) are
+        showing — no hardcoded guess. Must be called *after*
+        _update_skill_bars() has already populated those rows for this
+        redraw, or there's nothing real to measure yet.
 
+        Safe fallback: if there's no data, or if Tk hasn't finished laying
+        out the panel yet (measured height reads as 0 / unrealistically
+        small — e.g. the very first build, before a mainloop pass has run),
+        use _DONUT_FALLBACK_SIZE for now. In the layout-not-ready case only
+        (real data, just not measurable yet), schedule a single after_idle
+        retry to correct the size once real geometry is available — guarded
+        by _donut_resize_pending so a still-small measurement on retry can't
+        reschedule itself forever.
+        """
         if not grouped:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center',
-                    color=app.FG2, transform=ax.transAxes, fontsize=9)
-            self._donut_canvas.draw()
-            return
+            self._donut_frame.configure(width=self._DONUT_FALLBACK_SIZE,
+                                         height=self._DONUT_FALLBACK_SIZE)
+            return self._DONUT_FALLBACK_SIZE
 
-        values = [count for _, count in grouped]
-        colors = [self._color_for_skill_slot(i, name) for i, (name, _) in enumerate(grouped)]
-        ax.pie(values, colors=colors, startangle=90,
-               wedgeprops=dict(width=0.42, edgecolor=app.BG3, linewidth=1.5))
-        total = sum(values)
-        ax.text(0, 0.10, str(total), ha='center', va='center',
-                color=app.FG, fontsize=15, fontweight='bold')
-        ax.text(0, -0.14, 'TOTAL', ha='center', va='center', color=app.FG2, fontsize=7)
-        self._donut_fig.tight_layout()
-        self._donut_canvas.draw()
+        self._skill_panel_inner.update_idletasks()
+        measured = self._skill_panel_inner.winfo_height()
+
+        if measured >= self._DONUT_MIN_VALID_SIZE:
+            self._donut_resize_pending = False
+            size = measured
+        else:
+            size = self._DONUT_FALLBACK_SIZE
+            if not self._donut_resize_pending:
+                self._donut_resize_pending = True
+                self.app.after_idle(lambda: self._on_donut_resize_retry(grouped))
+
+        self._donut_frame.configure(width=size, height=size)
+        return size
+
+    def _on_donut_resize_retry(self, grouped):
+        """One-shot retry for _size_donut_to_panel(): re-runs the donut
+        redraw now that a mainloop pass has hopefully given the skill panel
+        real dimensions. Clears the pending flag itself via the normal
+        _size_donut_to_panel() success path, or leaves it for one further
+        natural filter-change attempt if it's still not ready."""
+        self._donut_resize_pending = False
+        self._redraw_skill_donut(grouped)
+
+    def _redraw_skill_donut(self, grouped):
+        """Pure-Tkinter Canvas donut, drawn at the size _size_donut_to_panel()
+        computes. Uses create_arc(style=PIESLICE) for wedges and a solid
+        center circle (matching the card background) to punch the donut
+        hole, since Tk has no native ring/annulus primitive.
+
+        Reentrancy guard: update_idletasks() (called here and in
+        _size_donut_to_panel) processes Tk's *entire* idle queue, not just
+        this widget — which can include another already-queued
+        _on_donut_resize_retry callback. Without a guard, that callback
+        firing reentrantly mid-redraw could nest indefinitely under rapid
+        filter changes and blow the Python call stack. The guard makes a
+        reentrant call into this method a harmless no-op instead — the
+        outer call (already in progress) finishes the redraw anyway.
+        """
+        if self._donut_redraw_in_progress:
+            return
+        self._donut_redraw_in_progress = True
+        try:
+            app = self.app
+            self._size_donut_to_panel(grouped)
+            c = self._donut_canvas
+            try:
+                c.delete('all')
+                c.update_idletasks()
+                w, h = c.winfo_width(), c.winfo_height()
+                if w < 10 or h < 10:
+                    w = h = self._DONUT_FALLBACK_SIZE
+                cx, cy = w / 2, h / 2
+                r = min(w, h) / 2 - 4
+
+                if not grouped:
+                    c.create_text(cx, cy, text='No data', fill=app.FG2, font=app.SANSS)
+                    return
+
+                total = sum(v for _, v in grouped) or 1
+                start = 90.0
+                for i, (name, val) in enumerate(grouped):
+                    extent = -360.0 * (val / total)
+                    color = self._color_for_skill_slot(i, name)
+                    c.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
+                                 fill=color, outline=app.BG3, width=2, style=tk.PIESLICE)
+                    start += extent
+
+                hole_r = r * 0.55
+                c.create_oval(cx - hole_r, cy - hole_r, cx + hole_r, cy + hole_r,
+                              fill=app.BG3, outline=app.BG3)
+                c.create_text(cx, cy - 7, text=str(total), fill=app.FG,
+                              font=(app.SANS[0], 15, 'bold'))
+                c.create_text(cx, cy + 9, text='TOTAL', fill=app.FG2, font=app.SANSS)
+            except Exception as e:
+                self._show_donut_error(str(e))
+        finally:
+            self._donut_redraw_in_progress = False
+
+    def _show_donut_error(self, err_msg):
+        """Non-fatal fallback when the donut *rendering* itself fails.
+        Hides/disables only the donut area — the skill bars (built
+        separately in _update_skill_bars) still render normally."""
+        try:
+            write_debug_entry('stats_chart_error', {'chart': 'donut', 'error': err_msg})
+        except Exception:
+            pass
+        self._donut_canvas.pack_forget()
 
     def _update_skill_bars(self, grouped):
         app = self.app
