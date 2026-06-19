@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.4
+P2P Monitor v2.0.0-beta.5
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -60,7 +60,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.4"
+VERSION      = "2.0.0-beta.5"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -254,6 +254,12 @@ class App(tk.Tk):
         self._status_lbl = tk.Label(chrome, textvariable=self._status_var,
                                     font=self.SANSB, bg=self.BG, fg=self.RED)
         self._status_lbl.pack(side='right', pady=(2, 0))
+        # Hidden until a Linux dependency install completes and the user picks
+        # "Later" instead of restarting immediately — see _show_restart_required_notice().
+        self._restart_notice_lbl = tk.Label(chrome, text="⚠ Restart required to finish dependency update",
+                                            font=self.SANSB, bg=self.BG, fg=self.YEL, cursor='hand2')
+        self._restart_notice_lbl.bind('<Button-1>', lambda e: self._on_restart_notice_clicked())
+        self._dep_restart_required = False
 
         # ── Navigation bar ─────────────────────────────────────────────────────
         tk.Frame(self, bg=self.BG4, height=1).pack(fill='x')   # top border
@@ -722,17 +728,7 @@ class App(tk.Tk):
             def _restart():
                 if messagebox.askyesno('Update Complete',
                         f'Updated to {new_ver}!\n\nRestart now?'):
-                    if self.watcher:
-                        self.watcher.stop()
-                    if _is_frozen():
-                        # Packaged exe — cannot patch files in place.
-                        # This path should not be reached (frozen builds use
-                        # browser-open update flow), but guard defensively.
-                        import webbrowser
-                        webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
-                    else:
-                        # Source install — restart via execv
-                        os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
+                    self._restart_app()
             self.after(0, _restart)
 
     def _check_and_install_linux_deps(self, install_dir):
@@ -817,6 +813,7 @@ class App(tk.Tk):
                 [sys.executable, '-m', 'pip', 'install', *missing,
                  '--break-system-packages', '--quiet'], timeout=180)
             self._log('✅ Python dependencies installed')
+            self.after(0, self._prompt_restart_after_dep_install)
         except Exception as e:
             err_msg = str(e)
             self._log(f'❌ Dependency install failed: {err_msg}')
@@ -825,6 +822,79 @@ class App(tk.Tk):
                 'Dependency Install Failed',
                 f'Could not install: {", ".join(missing)}\n\n{err_msg}\n\n'
                 f'Install manually with:\n{cmd_hint}'))
+
+    def _prompt_restart_after_dep_install(self):
+        """Main-thread only. Shown right after a successful Linux dependency
+        pip install (from either _check_and_install_linux_deps caller).
+        Restarting now is the only way the newly installed package actually
+        gets loaded — Python's import system won't pick it up mid-process."""
+        if self._show_restart_now_later_dialog(
+                "Dependencies installed successfully.",
+                "Please restart P2P Monitor for the new packages to load."):
+            self._restart_app()
+        else:
+            self._show_restart_required_notice()
+
+    def _show_restart_now_later_dialog(self, title_line, body_line):
+        """Modal Toplevel with 'Restart Now' / 'Later' buttons — styled like
+        the existing _on_close() tray/quit dialog. Returns True if the user
+        chose to restart, False otherwise. Main-thread only (creates widgets
+        and calls wait_window(), both of which require the main thread)."""
+        result = {'restart': False}
+        dlg = tk.Toplevel(self)
+        dlg.title("P2P Monitor")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.configure(bg=self.BG2)
+        tk.Label(dlg, text=title_line, font=self.SANSL,
+                 bg=self.BG2, fg=self.FG, padx=24).pack(pady=(16, 4))
+        tk.Label(dlg, text=body_line, font=self.SANS,
+                 bg=self.BG2, fg=self.FG2, padx=24).pack(pady=(0, 12))
+        row = tk.Frame(dlg, bg=self.BG2, padx=16, pady=12)
+        row.pack()
+        def _choose(restart):
+            result['restart'] = restart
+            dlg.destroy()
+        tk.Button(row, text="Restart Now", font=self.SANSB,
+                  bg=self.ACC, fg=self.BG, relief='flat', padx=12, pady=6, cursor='hand2',
+                  command=lambda: _choose(True)).pack(side='left', padx=(0, 8))
+        tk.Button(row, text="Later", font=self.SANSB,
+                  bg=self.BG3, fg=self.FG2, relief='flat', padx=12, pady=6, cursor='hand2',
+                  command=lambda: _choose(False)).pack(side='left')
+        dlg.update_idletasks()
+        x = self.winfo_x() + self.winfo_width()  // 2 - dlg.winfo_width()  // 2
+        y = self.winfo_y() + self.winfo_height() // 2 - dlg.winfo_height() // 2
+        dlg.geometry(f"+{x}+{y}")
+        dlg.wait_window()
+        return result['restart']
+
+    def _show_restart_required_notice(self):
+        """Persistent reminder in the window chrome after the user picks
+        'Later' instead of restarting immediately. Stays until they actually
+        restart — clicking it offers to restart right then."""
+        self._dep_restart_required = True
+        self._restart_notice_lbl.pack(side='right', padx=(0, 12), pady=(2, 0))
+        self._log('⚠ Restart required to finish dependency update.')
+
+    def _on_restart_notice_clicked(self):
+        if messagebox.askyesno('Restart P2P Monitor?',
+                'Restart now to finish loading the newly installed dependencies?'):
+            self._restart_app()
+
+    def _restart_app(self):
+        """Cleanly restart P2P Monitor: stop the watcher if running, then
+        either open the GitHub releases page (frozen non-Windows builds
+        shouldn't reach this at all — guarded defensively) or re-exec the
+        current Python process (source installs). Shared by the post-update
+        restart prompt and the post-dependency-install restart prompt so
+        there's only one restart code path, not two copies of the same logic."""
+        if self.watcher:
+            self.watcher.stop()
+        if _is_frozen():
+            import webbrowser
+            webbrowser.open(f'https://github.com/{GITHUB_REPO}/releases/latest')
+        else:
+            os.execv(sys.executable, [sys.executable, SCRIPT_PATH])
 
     def _do_win_frozen_update(self, new_ver, asset_url):
         """

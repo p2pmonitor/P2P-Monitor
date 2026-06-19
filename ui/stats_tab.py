@@ -139,8 +139,8 @@ class StatsTab:
 
     def _build_kpis(self, parent):
         app = self.app
-        row = tk.Frame(parent, bg=app.BG2, padx=12, pady=(0, 10))
-        row.pack(fill='x')
+        row = tk.Frame(parent, bg=app.BG2, padx=12)
+        row.pack(fill='x', pady=(0, 10))
 
         self._kpi_vars = {}
         cards = [
@@ -183,8 +183,8 @@ class StatsTab:
 
     def _build_panels(self, parent):
         app = self.app
-        row = tk.Frame(parent, bg=app.BG2, padx=12, pady=(0, 12))
-        row.pack(fill='both', expand=True)
+        row = tk.Frame(parent, bg=app.BG2, padx=12)
+        row.pack(fill='both', expand=True, pady=(0, 12))
 
         left = tk.Frame(row, bg=app.BG3, padx=12, pady=10)
         left.pack(side='left', fill='both', expand=True, padx=(0, 6))
