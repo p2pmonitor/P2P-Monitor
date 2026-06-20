@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.10
+P2P Monitor v2.0.0-beta.11
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -30,6 +30,7 @@ import os
 import platform as _plat
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -60,7 +61,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.10"
+VERSION      = "2.0.0-beta.11"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -210,6 +211,14 @@ class App(tk.Tk):
             save_config(self.cfg)
         self.watcher = None   # created in _start() to avoid orphaned screenshot worker thread
         self._counts = {k: 0 for k in ('task', 'chat', 'error', 'drop', 'death', 'levelup')}
+        # Session-overview bookkeeping for the Monitor tab (v2.0.0-beta.11) —
+        # purely additive UI state, never read by the watcher/parser/Discord
+        # routing. _session_start_ts is set fresh on every _start() call.
+        # _highlights tracks only the most recent occurrence of each type,
+        # fed directly from the same real _on_event() calls that already
+        # drive the counters — never fabricated.
+        self._session_start_ts = None
+        self._highlights = {'task': None, 'levelup': None, 'error': None, 'drop': None}
         self._style()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -332,7 +341,7 @@ class App(tk.Tk):
             self._tab_frames[name] = f
 
         # ── Build tab content ──────────────────────────────────────────────────
-        MonitorTab(self,        self._tab_frames['Monitor'])
+        self._monitor_tab = MonitorTab(self, self._tab_frames['Monitor'])
         self._status_tab = StatusTab(self,   self._tab_frames['Status'])
         self._stats_tab  = StatsTab(self,    self._tab_frames['Stats'])
         self._history    = HistoryTab(self,  self._tab_frames['History'])
@@ -357,6 +366,7 @@ class App(tk.Tk):
             line_count = int(t.index('end-1c').split('.')[0])
             if line_count > 2000:
                 t.delete('1.0', f'{line_count - 1800}.0')
+            line_start = t.index('end-1c')
             ts = datetime.now().strftime('%H:%M:%S')
             t.insert('end', f"[{ts}] ", 'ts')
             if any(x in msg for x in ['❌', '🚫']):               tag = 'error'
@@ -373,6 +383,16 @@ class App(tk.Tk):
             elif any(x in msg for x in ['💓', '🟢', '🗡️']):        tag = 'ok'
             else:                                                    tag = 'info'
             t.insert('end', msg + '\n', tag)
+            # Whole-line event-category tag — used only by the Monitor tab's
+            # "All Events" filter dropdown (elide-based show/hide on the Text
+            # widget). Purely additive: derived from the same `tag` already
+            # computed above, doesn't change classification or coloring.
+            category = {
+                'error': 'error', 'warn': 'error', 'quest': 'quest', 'task': 'task',
+                'chat': 'chat', 'drop': 'drop', 'death': 'death', 'levelup': 'levelup',
+                'script_event': 'system',
+            }.get(tag, 'other')
+            t.tag_add(f'cat_{category}', line_start, 'end')
             t.configure(state='disabled')
             t.see('end')
         self.after(0, _do)
@@ -384,12 +404,29 @@ class App(tk.Tk):
             v = self._sv.get(counter_key)
             if v:
                 v.set(str(self._counts[etype]))
+            # Session-overview "Highlights" bookkeeping (Monitor tab) — tracks
+            # only the most recent real occurrence of each type, fed directly
+            # from this same callback. Never fabricated, never read by the
+            # watcher/parser/Discord routing.
+            highlight_key = {'task': 'task', 'levelup': 'levelup',
+                              'error': 'error', 'drop': 'drop'}.get(etype)
+            if highlight_key:
+                self._highlights[highlight_key] = {
+                    'account': folder, 'value': v1, 'activity': v2, 'ts': time.time(),
+                }
             if self._status_debounce_id:
                 self.after_cancel(self._status_debounce_id)
-            self._status_debounce_id = self.after(2000, self._status_tab.refresh)
+            self._status_debounce_id = self.after(2000, self._debounced_refresh_tick)
             if etype == 'levelup' and getattr(self, '_stats_tab', None):
                 self._stats_tab.mark_dirty()
         self.after(0, _do)
+
+    def _debounced_refresh_tick(self):
+        """Single debounced refresh target for both Status and Monitor's
+        highlights — avoids scheduling two separate timers per event."""
+        self._status_tab.refresh()
+        if getattr(self, '_monitor_tab', None):
+            self._monitor_tab.refresh_highlights()
 
     def _on_status_refresh(self):
         self.after(0, self._status_tab.push_refresh)
@@ -430,6 +467,13 @@ class App(tk.Tk):
         self._counts = {k: 0 for k in self._counts}
         for v in self._sv.values():
             v.set('0')
+        self._session_start_ts = time.time()
+        self._highlights = {'task': None, 'levelup': None, 'error': None, 'drop': None}
+        if getattr(self, '_monitor_tab', None):
+            self._monitor_tab.refresh_session_overview()
+            self._monitor_tab.refresh_highlights()
+        if getattr(self, '_status_tab', None):
+            self._status_tab.refresh_session_overview()
         self._log("=" * 60)
         self._log(f"▶ Starting P2P Monitor v{VERSION}...")
         self.watcher = LogWatcher(
@@ -454,6 +498,10 @@ class App(tk.Tk):
         self._status_var.set("● STOPPED")
         self._status_lbl.configure(fg=self.RED)
         self._log("■ Monitoring stopped")
+        if getattr(self, '_monitor_tab', None):
+            self._monitor_tab.refresh_session_overview()
+        if getattr(self, '_status_tab', None):
+            self._status_tab.refresh_session_overview()
 
     # ── Auto-updater ───────────────────────────────────────────────────────────
     def _check_for_update(self):
