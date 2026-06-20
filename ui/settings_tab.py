@@ -1,144 +1,423 @@
 """
-settings_tab.py — Settings tab for P2P Monitor
-Merged EVENT NOTIFICATIONS table: event row + Notify checkbox + Screenshot checkbox.
-Script Events: Notify column only — no Screenshot column, no hide paint entry.
+ui/settings_tab.py — Settings tab for P2P Monitor (v2.0.0-beta.10 redesign)
+
+Replaces the old single giant scrollable expand/collapse layout with a
+left-side section nav + 5 cached pages, shown via tkraise() — consistent
+with the cached-frame pattern used for the app's main tab shell and the
+Stats tab. All 5 pages are built once, eagerly, when the Settings tab
+itself is constructed (no lazy per-section build): Settings has no
+expensive disk/network work at build time, so there's no Stats-style
+reason to defer it, and building eagerly keeps save()/load_fields() simple
+and correct — every page's widgets/vars exist in memory from the start,
+so saving always covers every setting regardless of which section is
+currently visible.
+
+Sections (per the agreed mockup-driven structure — supersedes the
+original 7-section text breakdown):
+  1. General Settings    — logs folder, monitoring interval, manual update
+                            check (the app's own self-update), debug,
+                            paint reference
+  2. Discord Alerts       — bot setup, bot instructions, webhooks
+  3. Event Notifications  — script events, per-event notify/screenshot/ping
+                            grid, levelup-every, hide-paint-overlay grid
+  4. Daily Summary        — daily summary + screenshot scheduling
+  5. Restarts & Updates   — auto restart, update awareness (DreamBot/script
+                            update checking — a different system from
+                            General's manual update check)
+
+Every existing config key, default, and behavior is preserved — this is
+a UI/organization checkpoint, not a settings/behavior change. Save/load
+still iterate over self._vars exactly as before, so app.py's existing
+`self._settings.save()` call (from Monitor's Start button) keeps working
+unchanged.
+
+All booleans use plain styled tk.Checkbutton (not custom toggle switches
+or pill/chip buttons) — agreed simplification over the mockups for lower
+risk, since Tkinter has no native toggle-switch widget.
 """
 
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from py.discord import post_discord, bot_setup_discord, _embed
-from py.util    import now_str
+from py.util    import now_str, DEBUG_LOG_FILE, is_frozen
 from py.config  import save_config, is_logs_root_account_folder
 
 
 class SettingsTab:
     """Settings tab. Receives App reference for shared cfg, colours, fonts, watcher."""
 
+    SECTIONS = [
+        ('general',       '⚙',  'General Settings'),
+        ('discord',       '🤖', 'Discord Alerts'),
+        ('notifications', '🔔', 'Event Notifications'),
+        ('summary',       '📅', 'Daily Summary'),
+        ('restarts',      '🔄', 'Restarts & Updates'),
+    ]
+
     def __init__(self, app, parent_frame):
         self.app = app
-        self._vars = {}   # key -> tk variable
+        self._vars = {}          # key -> tk variable (shared across all pages)
+        self._nav_btns = {}      # section_id -> (wrap_frame, label, indicator)
+        self._pages = {}         # section_id -> page frame
+        self._active_section = None
         self._build(parent_frame)
         self.load_fields()
 
-    # ── Build ──────────────────────────────────────────────────────────────────
+    # ── Shell: sidebar + cached pages + persistent save bar ─────────────────
     def _build(self, f):
         app = self.app
-        canvas = tk.Canvas(f, bg=app.BG2, highlightthickness=0)
-        sb = ttk.Scrollbar(f, orient='vertical', command=canvas.yview)
+        root = tk.Frame(f, bg=app.BG2)
+        root.pack(fill='both', expand=True)
+
+        # Persistent save bar — packed with side='bottom' BEFORE the body,
+        # so it reserves its strip at the bottom regardless of which
+        # section is active. Divider line sits just above it.
+        save_bar = tk.Frame(root, bg=app.BG2, padx=16, pady=10)
+        save_bar.pack(fill='x', side='bottom')
+        tk.Button(save_bar, text="💾  Save Settings", font=app.SANSB,
+                  bg=app.ACC, fg=app.BG, relief='flat', padx=16, pady=8,
+                  cursor='hand2', command=self.save).pack(side='left')
+        tk.Label(save_bar, text="Your changes will be applied immediately.",
+                 font=app.SANSS, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(12, 0))
+        self._saved_lbl = tk.Label(save_bar, text="", font=app.SANSB, bg=app.BG2, fg=app.GREEN)
+        self._saved_lbl.pack(side='left', padx=(12, 0))
+        tk.Frame(root, bg=app.BG4, height=1).pack(fill='x', side='bottom')
+
+        body = tk.Frame(root, bg=app.BG2)
+        body.pack(fill='both', expand=True)
+
+        self._build_sidebar(body)
+
+        container = tk.Frame(body, bg=app.BG2)
+        container.pack(side='left', fill='both', expand=True)
+        container.grid_rowconfigure(0, weight=1)
+        container.grid_columnconfigure(0, weight=1)
+
+        for sid, _icon, _label in self.SECTIONS:
+            page = tk.Frame(container, bg=app.BG2)
+            page.grid(row=0, column=0, sticky='nsew')
+            self._pages[sid] = page
+
+        self._build_general_page(self._pages['general'])
+        self._build_discord_page(self._pages['discord'])
+        self._build_notifications_page(self._pages['notifications'])
+        self._build_summary_page(self._pages['summary'])
+        self._build_restarts_page(self._pages['restarts'])
+
+        self.show_section('general')
+
+    def _build_sidebar(self, parent):
+        app = self.app
+        nav = tk.Frame(parent, bg=app.BG2, width=200)
+        nav.pack(side='left', fill='y')
+        nav.pack_propagate(False)
+        tk.Label(nav, text="SETTINGS", font=app.SANSS, bg=app.BG2, fg=app.FG2
+                 ).pack(anchor='w', padx=16, pady=(16, 8))
+        for sid, icon, label in self.SECTIONS:
+            wrap = tk.Frame(nav, bg=app.BG2)
+            wrap.pack(fill='x', padx=8, pady=1)
+            indicator = tk.Frame(wrap, width=3, bg=app.BG2)
+            indicator.pack(side='left', fill='y')
+            lbl = tk.Label(wrap, text=f"{icon}  {label}", font=app.SANSB,
+                           bg=app.BG2, fg=app.FG2, anchor='w', padx=12, pady=10,
+                           cursor='hand2')
+            lbl.pack(side='left', fill='x', expand=True)
+            for w in (wrap, lbl):
+                w.bind('<Button-1>', lambda e, s=sid: self.show_section(s))
+            self._nav_btns[sid] = (wrap, lbl, indicator)
+
+    def show_section(self, section_id):
+        """Switch the visible Settings section by id. Raises the cached page
+        via tkraise() — no rebuild, no destroy, no widget duplication."""
+        app = self.app
+        for sid, (wrap, lbl, ind) in self._nav_btns.items():
+            if sid == section_id:
+                wrap.configure(bg=app.BG3)
+                lbl.configure(bg=app.BG3, fg=app.ACC)
+                ind.configure(bg=app.ACC)
+            else:
+                wrap.configure(bg=app.BG2)
+                lbl.configure(bg=app.BG2, fg=app.FG2)
+                ind.configure(bg=app.BG2)
+        if section_id in self._pages:
+            self._pages[section_id].tkraise()
+        self._active_section = section_id
+
+    # ── Shared row/card builders (used by every page) ───────────────────────
+    def _page_header(self, parent, title, subtitle):
+        app = self.app
+        wrap = tk.Frame(parent, bg=app.BG2, padx=24, pady=20)
+        wrap.pack(fill='x')
+        tk.Label(wrap, text=title, font=(app.SANS[0], 20, 'bold'),
+                 bg=app.BG2, fg=app.FG).pack(anchor='w')
+        tk.Label(wrap, text=subtitle, font=app.SANS, bg=app.BG2, fg=app.FG2
+                 ).pack(anchor='w', pady=(2, 0))
+
+    def _scrollable_body(self, parent):
+        """A vertically-scrollable container for a page's cards, matching
+        the original file's mouse-wheel-on-hover scroll behavior."""
+        app = self.app
+        outer = tk.Frame(parent, bg=app.BG2)
+        outer.pack(fill='both', expand=True, padx=24, pady=(0, 12))
+        canvas = tk.Canvas(outer, bg=app.BG2, highlightthickness=0)
+        sb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y')
         canvas.pack(side='left', fill='both', expand=True)
         inner = tk.Frame(canvas, bg=app.BG2)
-        win   = canvas.create_window((0, 0), window=inner, anchor='nw')
+        win = canvas.create_window((0, 0), window=inner, anchor='nw')
 
-        def _update_scroll(e=None):
+        def _update_scroll(_e=None):
             canvas.configure(scrollregion=canvas.bbox('all'))
         inner.bind('<Configure>', _update_scroll)
         canvas.bind('<Configure>', lambda e: canvas.itemconfig(win, width=e.width))
+
         def _on_enter(_):
-            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1*(e.delta//120), 'units'))
+            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
             canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
             canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+
         def _on_leave(_):
             canvas.unbind_all('<MouseWheel>')
             canvas.unbind_all('<Button-4>')
             canvas.unbind_all('<Button-5>')
         canvas.bind('<Enter>', _on_enter)
         canvas.bind('<Leave>', _on_leave)
+        return inner
 
+    def _card(self, parent, icon, title, subtitle=None):
+        """A card: icon+title header, optional wrapped subtitle, and a body
+        frame for rows. Subtitle wraplength tracks the card's real width
+        via <Configure> so it reads correctly whether the card sits in a
+        two-column or full-width page."""
+        app = self.app
+        card = tk.Frame(parent, bg=app.BG3, padx=16, pady=14)
+        card.pack(fill='x', pady=(0, 12))
+        hdr = tk.Frame(card, bg=app.BG3)
+        hdr.pack(fill='x', anchor='w')
+        tk.Label(hdr, text=icon, font=(app.SANS[0], 13), bg=app.BG3, fg=app.ACC
+                 ).pack(side='left', padx=(0, 8))
+        tk.Label(hdr, text=title, font=app.SANSB, bg=app.BG3, fg=app.FG).pack(side='left')
+        if subtitle:
+            sub_lbl = tk.Label(card, text=subtitle, font=app.SANSS, bg=app.BG3,
+                                fg=app.FG2, justify='left', anchor='w')
+            sub_lbl.pack(fill='x', anchor='w', pady=(4, 10))
+            card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 32, 100)))
+        body = tk.Frame(card, bg=app.BG3)
+        body.pack(fill='x')
+        return card, body
 
-        def section(title):
-            tk.Frame(inner, bg=app.ACC, height=1).pack(fill='x', padx=16, pady=(16, 0))
-            row = tk.Frame(inner, bg=app.BG2); row.pack(fill='x', padx=16, pady=(4, 2))
-            tk.Label(row, text=title, font=app.MONOB, bg=app.BG2, fg=app.ACC).pack(side='left')
+    def _row_bool(self, parent, label, attr, default=False, helper=None):
+        app = self.app
+        row = tk.Frame(parent, bg=app.BG3)
+        row.pack(fill='x', pady=4, anchor='w')
+        var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
+        tk.Checkbutton(row, text=label, variable=var, font=app.SANS,
+            bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
+            selectcolor=app.BG2, relief='flat', cursor='hand2', anchor='w'
+            ).pack(side='top', anchor='w')
+        if helper:
+            tk.Label(row, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                     justify='left', anchor='w').pack(side='top', anchor='w', padx=(24, 0))
+        self._vars[attr] = var
+        return var
 
-        def field(lbl, attr, pw=False, parent=None, padx=16):
-            p   = parent or inner
-            row = tk.Frame(p, bg=app.BG2); row.pack(fill='x', padx=padx, pady=2)
-            tk.Label(row, text=lbl, font=app.MONO, bg=app.BG2, fg=app.FG2,
-                     width=28, anchor='w').pack(side='left')
-            var = tk.StringVar(value=app.cfg.get(attr, ''))
-            kw  = {'show': '•'} if pw else {}
-            tk.Entry(row, textvariable=var, font=app.MONO, bg=app.BG3, fg=app.FG,
-                     relief='flat', insertbackground=app.ACC,
-                     **kw).pack(side='left', fill='x', expand=True, ipady=4, padx=(4, 0))
-            self._vars[attr] = var
+    def _row_text(self, parent, label, attr, helper=None, pw=False, width_label=22):
+        app = self.app
+        row = tk.Frame(parent, bg=app.BG3)
+        row.pack(fill='x', pady=4)
+        tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
+                 width=width_label, anchor='w').pack(side='left')
+        var = tk.StringVar(value=str(app.cfg.get(attr, '')))
+        kw = {'show': '•'} if pw else {}
+        tk.Entry(row, textvariable=var, font=app.SANS, bg=app.BG4, fg=app.FG,
+                  relief='flat', insertbackground=app.ACC, **kw
+                 ).pack(side='left', fill='x', expand=True, ipady=4, padx=(8, 0))
+        self._vars[attr] = var
+        if helper:
+            tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                     justify='left', anchor='w').pack(fill='x', pady=(0, 2))
+        return var
 
-        def intfield(lbl, attr, lo, hi):
-            row = tk.Frame(inner, bg=app.BG2); row.pack(fill='x', padx=16, pady=2)
-            tk.Label(row, text=lbl, font=app.MONO, bg=app.BG2, fg=app.FG2,
-                     width=28, anchor='w').pack(side='left')
-            default = app.cfg.get(attr, lo)
-            var = tk.IntVar(value=int(default))
-            tk.Spinbox(row, from_=lo, to=hi, textvariable=var, width=8, font=app.MONO,
-                       bg=app.BG3, fg=app.FG, buttonbackground=app.BG4,
-                       relief='flat').pack(side='left', padx=(4, 0))
-            self._vars[attr] = var
+    def _row_int(self, parent, label, attr, lo, hi, default=None, helper=None, width_label=22):
+        app = self.app
+        row = tk.Frame(parent, bg=app.BG3)
+        row.pack(fill='x', pady=4)
+        tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
+                 width=width_label, anchor='w').pack(side='left')
+        d = default if default is not None else lo
+        var = tk.IntVar(value=int(app.cfg.get(attr, d)))
+        tk.Spinbox(row, from_=lo, to=hi, textvariable=var, width=6, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                  ).pack(side='left', padx=(8, 0))
+        self._vars[attr] = var
+        if helper:
+            tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                     justify='left', anchor='w').pack(fill='x', pady=(0, 2))
+        return var
 
-        def boolfield(lbl, attr, default=False, parent=None):
-            p = parent or inner
-            row = tk.Frame(p, bg=app.BG2); row.pack(fill='x', padx=16, pady=2)
-            var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
-            tk.Checkbutton(row, text=lbl, variable=var, font=app.MONO,
-                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-            self._vars[attr] = var
+    def _disclosure(self, parent, icon, title):
+        """Collapsible info block (used only for Bot Setup Instructions).
+        Starts collapsed. No cfg persistence — this was session-only local
+        state before the redesign too, never saved."""
+        app = self.app
+        holder = tk.Frame(parent, bg=app.BG3)
+        holder.pack(fill='x', pady=(4, 12))
+        hdr = tk.Frame(holder, bg=app.BG4, cursor='hand2')
+        hdr.pack(fill='x')
+        tk.Label(hdr, text=icon, font=app.SANS, bg=app.BG4, fg=app.FG2
+                 ).pack(side='left', padx=(10, 6), pady=8)
+        tk.Label(hdr, text=title, font=app.SANSB, bg=app.BG4, fg=app.FG
+                 ).pack(side='left', pady=8)
+        chevron = tk.Label(hdr, text='▾', font=app.SANS, bg=app.BG4, fg=app.FG2)
+        chevron.pack(side='right', padx=10)
+        body = tk.Frame(holder, bg=app.BG3, padx=16)
+        state = {'open': False}
 
-        def collapsible(title, cfg_key):
-            holder = tk.Frame(inner, bg=app.BG2); holder.pack(fill='x', padx=0, pady=(8, 0))
-            hdr    = tk.Frame(holder, bg=app.BG3); hdr.pack(fill='x')
-            is_open = tk.BooleanVar(value=bool(app.cfg.get(cfg_key, True)))
-            body    = tk.Frame(holder, bg=app.BG2)
-            arrow   = '▼' if is_open.get() else '▶'
-            btn = tk.Button(hdr, text=f"{arrow}  {title}",
-                font=app.MONOB, bg=app.BG3, fg=app.ACC, relief='flat',
-                padx=10, pady=6, cursor='hand2', anchor='w')
-            btn.pack(side='left', fill='x', expand=True)
-            def _toggle(b=btn, v=is_open, bdy=body, t=title, ck=cfg_key):
-                if v.get():
-                    bdy.pack_forget(); v.set(False); b.configure(text=f"▶  {t}"); app.cfg[ck] = False
-                else:
-                    bdy.pack(fill='x', padx=8, pady=(4, 4)); v.set(True); b.configure(text=f"▼  {t}"); app.cfg[ck] = True
-            btn.configure(command=_toggle)
-            if is_open.get():
-                body.pack(fill='x', padx=8, pady=(4, 4))
-            return holder, body, _toggle
+        def _toggle(_e=None):
+            if state['open']:
+                body.pack_forget()
+                state['open'] = False
+                chevron.configure(text='▾')
+            else:
+                body.pack(fill='x', pady=(8, 10))
+                state['open'] = True
+                chevron.configure(text='▴')
+        hdr.bind('<Button-1>', _toggle)
+        for child in hdr.winfo_children():
+            child.bind('<Button-1>', _toggle)
+        return body
 
-        # ── Logs folder ───────────────────────────────────────────────────────
-        section("DREAMBOT LOGS FOLDER")
-        dr = tk.Frame(inner, bg=app.BG2); dr.pack(fill='x', padx=16, pady=4)
+    def _warning_banner(self, parent, text):
+        app = self.app
+        banner = tk.Frame(parent, bg=app.BG4)
+        banner.pack(fill='x', pady=(8, 0))
+        tk.Frame(banner, bg=app.RED, width=4).pack(side='left', fill='y')
+        inner = tk.Frame(banner, bg=app.BG4, padx=12, pady=8)
+        inner.pack(side='left', fill='x', expand=True)
+        lbl = tk.Label(inner, text=f"⚠  {text}", font=app.SANSS, bg=app.BG4,
+                        fg=app.RED, justify='left', anchor='w')
+        lbl.pack(fill='x', anchor='w')
+        banner.bind('<Configure>', lambda e: lbl.configure(wraplength=max(e.width - 24, 100)))
+        return banner
+
+    # ── Page 1: General Settings ─────────────────────────────────────────────
+    def _build_general_page(self, parent):
+        app = self.app
+        self._page_header(parent, "General Settings", "Core configuration, tools, and diagnostics")
+        inner = self._scrollable_body(parent)
+
+        cols = tk.Frame(inner, bg=app.BG2)
+        cols.pack(fill='both', expand=True)
+        left = tk.Frame(cols, bg=app.BG2)
+        left.pack(side='left', fill='both', expand=True, padx=(0, 6))
+        right = tk.Frame(cols, bg=app.BG2)
+        right.pack(side='left', fill='both', expand=True, padx=(6, 0))
+
+        # ── Logs folder ──────────────────────────────────────────────────────
+        _, body = self._card(left, '📁', 'DreamBot Logs Folder',
+                              "Location of DreamBot log files used for monitoring and diagnostics.")
+        dr = tk.Frame(body, bg=app.BG3)
+        dr.pack(fill='x')
         self._vars['logs_root'] = tk.StringVar(value=app.cfg.get('logs_root', ''))
-        tk.Entry(dr, textvariable=self._vars['logs_root'], font=app.MONO, bg=app.BG3, fg=app.FG,
+        tk.Entry(dr, textvariable=self._vars['logs_root'], font=app.SANS, bg=app.BG4, fg=app.FG,
             relief='flat', insertbackground=app.ACC).pack(side='left', fill='x', expand=True, ipady=4)
-        tk.Button(dr, text="Browse", font=app.MONO, bg=app.BG3, fg=app.ACC,
+        tk.Button(dr, text="📁  Browse", font=app.SANS, bg=app.BG4, fg=app.ACC,
             relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._browse_dir).pack(side='left', padx=(6, 0))
-
-        # Warning label — shown when logs_root points directly to an account folder
         self._logs_root_warn = tk.Label(
-            inner, text="", font=app.MONO, bg=app.BG2, fg=app.YEL,
-            wraplength=820, justify='left')
-        self._logs_root_warn.pack(fill='x', padx=16, pady=(0, 2))
+            body, text="", font=app.SANSS, bg=app.BG3, fg=app.YEL,
+            wraplength=420, justify='left')
+        self._logs_root_warn.pack(fill='x', pady=(6, 0))
+        body.bind('<Configure>', lambda e: self._logs_root_warn.configure(wraplength=max(e.width - 8, 100)))
         self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
         self._check_logs_root_warning()
 
-        # ── Discord Alerts ────────────────────────────────────────────────────
-        _, discord_body, _ = collapsible("DISCORD ALERTS", 'ui_section_discord_open')
+        # ── Manual Update Check (app's own self-update — distinct from the
+        # Update Awareness DreamBot/script checker on the Restarts & Updates
+        # page) ──────────────────────────────────────────────────────────────
+        _, body = self._card(left, '🔄', 'Manual Update Check')
+        tk.Label(body, text="P2P Monitor does not auto-update.\n"
+                             "Updates are checked manually only and are not auto-installed.",
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left'
+                 ).pack(anchor='w', pady=(0, 8))
+        tk.Button(body, text="🔄  Check for Updates", font=app.SANSB,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=14, pady=6,
+            cursor='hand2', command=app._check_for_update).pack(anchor='w')
+        self._row_bool(body, "Pre-release / Beta Updates", 'beta_updates', default=False,
+                       helper="Silent startup check always uses stable only.")
 
-        field("Bot Token:",         'bot_token',    pw=True,  parent=discord_body)
-        field("Server ID:",         'bot_server_id',          parent=discord_body)
-        field("Discord Mention ID:", 'mention_id',             parent=discord_body)
+        # ── Paint Reference ──────────────────────────────────────────────────
+        _, body = self._card(left, '🖌', 'Paint Reference',
+                              "Capture the current screen colors (RGB) to help calibrate "
+                              "paint detection and matching.")
+        snap_row = tk.Frame(body, bg=app.BG3)
+        snap_row.pack(fill='x')
+        self._snap_lbl = tk.Label(snap_row, text="", font=app.SANSS, bg=app.BG3, fg=app.GREEN)
 
-        setup_row = tk.Frame(discord_body, bg=app.BG2); setup_row.pack(fill='x', padx=8, pady=(6, 2))
-        self._bot_setup_lbl = tk.Label(setup_row, text="", font=app.MONO, bg=app.BG2, fg=app.FG2,
-                                       wraplength=500, justify='left')
-        self._bot_setup_lbl.pack(side='left', padx=(0, 12), fill='x', expand=True)
-        tk.Button(setup_row, text="🤖  Run Bot Setup", font=app.MONO, bg=app.BG3, fg=app.ACC,
-            relief='flat', padx=12, pady=5, cursor='hand2',
-            command=self._manual_bot_setup).pack(side='right')
+        def _do_snap():
+            self._snap_lbl.configure(text="⏳ Snapping...", fg=app.YEL)
+            app.update_idletasks()
+            def _snap():
+                from py.screenshot import snap_paint_reference
+                ok, msg = snap_paint_reference(log=app._log)
+                def _done():
+                    self._snap_lbl.configure(
+                        text=f"✅ {msg}" if ok else f"❌ {msg}",
+                        fg=app.GREEN if ok else app.RED)
+                app.after(0, _done)
+            threading.Thread(target=_snap, daemon=True).start()
+        tk.Button(snap_row, text="🎯  Snap Paint Reference", font=app.SANSB,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=14, pady=6,
+            cursor='hand2', command=_do_snap).pack(side='left')
+        self._snap_lbl.pack(side='left', padx=12)
+
+        # ── Monitoring Intervals ─────────────────────────────────────────────
+        _, body = self._card(right, '🕐', 'Monitoring Intervals')
+        self._row_int(body, "Log check interval (seconds):", 'check_interval', 1, 60,
+                      helper="How often P2P Monitor checks DreamBot logs for changes.")
+
+        # ── Debug ────────────────────────────────────────────────────────────
+        _, body = self._card(right, '🐛', 'Debug')
+        self._row_bool(body, "Enable debug logging", 'debug', default=False)
+        self._row_bool(body, "Enable anonymous usage stats", 'enable_usage_stats', default=True)
+        path_row = tk.Frame(body, bg=app.BG3)
+        path_row.pack(fill='x', pady=(8, 0))
+        tk.Label(path_row, text="Session debug file:", font=app.SANSS,
+                 bg=app.BG3, fg=app.FG2).pack(anchor='w')
+        tk.Label(path_row, text=str(DEBUG_LOG_FILE), font=app.SANSS,
+                 bg=app.BG4, fg=app.FG2, anchor='w', padx=8, pady=4
+                 ).pack(fill='x', pady=(4, 0))
+
+    # ── Page 2: Discord Alerts ───────────────────────────────────────────────
+    def _build_discord_page(self, parent):
+        app = self.app
+        self._page_header(parent, "Discord Alerts", "Configure Discord bot integration for alerts and notifications.")
+        inner = self._scrollable_body(parent)
+
+        # ── Bot Setup ────────────────────────────────────────────────────────
+        _, body = self._card(inner, '🤖', 'Bot Setup')
+        cols = tk.Frame(body, bg=app.BG3)
+        cols.pack(fill='x')
+        fields_col = tk.Frame(cols, bg=app.BG3)
+        fields_col.pack(side='left', fill='both', expand=True, padx=(0, 16))
+        status_col = tk.Frame(cols, bg=app.BG3)
+        status_col.pack(side='left', fill='y')
+
+        self._row_text(fields_col, "Bot Token:",          'bot_token', pw=True)
+        self._row_text(fields_col, "Server ID:",          'bot_server_id')
+        self._row_text(fields_col, "Discord Mention ID:", 'mention_id')
+
+        self._bot_setup_lbl = tk.Label(status_col, text="", font=app.SANSS, bg=app.BG3,
+                                       fg=app.FG2, wraplength=220, justify='left')
+        self._bot_setup_lbl.pack(anchor='w', pady=(0, 8))
+        tk.Button(status_col, text="🤖  Run Bot Setup", font=app.SANSB,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,
+            cursor='hand2', command=self._manual_bot_setup).pack(anchor='w')
 
         if app.cfg.get('bot_setup_done'):
             ch_ids = app.cfg.get('bot_channel_ids', {})
@@ -147,92 +426,62 @@ class SettingsTab:
                 text=f"✅ Setup complete — {len(ch_ids)} channels, {len(th_ids)} account(s) ready.",
                 fg=app.GREEN)
 
-        # Bot instructions (collapsible sub-section)
-        self._inst_expanded = tk.BooleanVar(value=False)
-        inst_holder = tk.Frame(discord_body, bg=app.BG2); inst_holder.pack(fill='x', padx=8, pady=(8, 0))
-        inst_hdr = tk.Frame(inst_holder, bg=app.BG3); inst_hdr.pack(fill='x')
-        inst_inner = tk.Frame(inst_holder, bg=app.BG2)
+        # ── Bot Setup Instructions (collapsible) ────────────────────────────
+        inst_body = self._disclosure(inner, 'ⓘ', 'Bot Setup Instructions & Permissions')
+        tk.Label(inst_body,
+            text="Setup:\n"
+                 "1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
+                 "2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
+                 "3. OAuth2 → URL Generator → Scope: bot → Permissions: Send Messages,\n"
+                 "   Read Message History, Manage Channels, Manage Webhooks,\n"
+                 "   View Channels, Embed Links, Attach Files, Create Public Threads,\n"
+                 "   Send Messages in Threads, Manage Threads, Use Slash Commands\n"
+                 "4. Copy the generated URL → open in browser → select server → Authorize\n"
+                 "5. Right-click your server icon → Copy Server ID → paste above\n"
+                 "6. Right-click your name in Discord → Copy User ID → paste in Discord Mention ID above\n"
+                 "7. Hit Save then '🤖 Run Bot Setup'\n\n"
+                 "Slash commands (registered automatically on first run):\n"
+                 "  /ss [account]                    — screenshot(s) → account monitor thread\n"
+                 "  /s                               — status of all accounts → #monitor channel\n"
+                 "  /force <account> <action> [amt]  — force a skill, action, or time adjustment;\n"
+                 "                                      amt (1-20) only applies to -10m / +10m\n"
+                 "Tip: /ss and /force inside an account thread target that account only.",
+            font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left').pack(anchor='w')
 
-        def toggle_instructions():
-            if self._inst_expanded.get():
-                inst_inner.pack_forget(); self._inst_expanded.set(False)
-                inst_btn.configure(text="▶  Bot Setup Instructions & Permissions")
-            else:
-                inst_inner.pack(fill='x', padx=8, pady=(4, 0)); self._inst_expanded.set(True)
-                inst_btn.configure(text="▼  Bot Setup Instructions & Permissions")
+        # ── Webhooks ─────────────────────────────────────────────────────────
+        _, body = self._card(inner, '🔗', 'Webhooks (optional fallback)',
+                              "The Default Webhook is the main monitor channel. Any events "
+                              "without a specific webhook will fall back to it.")
+        wh_cols = tk.Frame(body, bg=app.BG3)
+        wh_cols.pack(fill='x')
+        wh_left = tk.Frame(wh_cols, bg=app.BG3)
+        wh_left.pack(side='left', fill='both', expand=True, padx=(0, 12))
+        wh_right = tk.Frame(wh_cols, bg=app.BG3)
+        wh_right.pack(side='left', fill='both', expand=True)
 
-        inst_btn = tk.Button(inst_hdr, text="▶  Bot Setup Instructions & Permissions",
-            font=app.MONOB, bg=app.BG3, fg=app.ACC2, relief='flat',
-            padx=8, pady=5, cursor='hand2', anchor='w', command=toggle_instructions)
-        inst_btn.pack(side='left', fill='x', expand=True)
-        tk.Label(inst_inner,
-            text="  Setup:\n"
-                 "  1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
-                 "  2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
-                 "  3. OAuth2 → URL Generator → Scope: bot → Permissions: Send Messages,\n"
-                 "     Read Message History, Manage Channels, Manage Webhooks,\n"
-                 "     View Channels, Embed Links, Attach Files, Create Public Threads,\n"
-                 "     Send Messages in Threads, Manage Threads, Use Slash Commands\n"
-                 "  4. Copy the generated URL → open in browser → select server → Authorize\n"
-                 "  5. Right-click your server icon → Copy Server ID → paste above\n"
-                 "  6. Right-click your name in Discord → Copy User ID → paste in Discord Mention ID above\n"
-                 "  7. Hit Save then '🤖 Run Bot Setup'\n\n"
-                 "  Slash commands (registered automatically on first run):\n"
-                 "    /ss [account]                    — screenshot(s) → account monitor thread\n"
-                 "    /s                               — status of all accounts → #monitor channel\n"
-                 "    /force <account> <action> [amt]  — force a skill, action, or time adjustment;\n"
-                 "                                       amt (1-20) only applies to -10m / +10m\n"
-                 "  Tip: /ss and /force inside an account thread target that account only.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(anchor='w', padx=8, pady=(4, 8))
+        self._row_text(wh_left,  "Default Webhook:",  'webhook_default', width_label=14)
+        self._row_text(wh_left,  "Quest Webhook:",     'webhook_quest',   width_label=14)
+        self._row_text(wh_left,  "Task Webhook:",      'webhook_task',    width_label=14)
+        self._row_text(wh_left,  "Chat Webhook:",       'webhook_chat',    width_label=14)
+        self._row_text(wh_right, "Error Webhook:",     'webhook_error',   width_label=14)
+        self._row_text(wh_right, "Drops Webhook:",     'webhook_drops',   width_label=14)
+        self._row_text(wh_right, "Deaths Webhook:",    'webhook_deaths',  width_label=14)
+        self._row_text(wh_right, "Level Up Webhook:",  'webhook_levelup', width_label=14)
 
-        # Webhooks (collapsible)
-        wh_frame_holder = tk.Frame(discord_body, bg=app.BG2); wh_frame_holder.pack(fill='x', padx=8, pady=(8, 0))
-        self._wh_expanded = tk.BooleanVar(value=False)
-        wh_hdr = tk.Frame(wh_frame_holder, bg=app.BG3); wh_hdr.pack(fill='x')
-        wh_inner = tk.Frame(wh_frame_holder, bg=app.BG2)
+        tk.Button(body, text="⚡  Test Webhooks", font=app.SANSB,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,
+            cursor='hand2', command=self._test_webhooks).pack(anchor='w', pady=(8, 0))
 
-        def toggle_webhooks():
-            if self._wh_expanded.get():
-                wh_inner.pack_forget(); self._wh_expanded.set(False)
-                wh_btn.configure(text="▶  Webhooks  (optional fallback)")
-            else:
-                wh_inner.pack(fill='x'); self._wh_expanded.set(True)
-                wh_btn.configure(text="▼  Webhooks  (optional fallback)")
+    # ── Page 3: Event Notifications ──────────────────────────────────────────
+    def _build_notifications_page(self, parent):
+        app = self.app
+        self._page_header(parent, "Event Notifications", "Configure how and when P2P Monitor sends event notifications.")
+        inner = self._scrollable_body(parent)
 
-        wh_btn = tk.Button(wh_hdr, text="▶  Webhooks  (optional fallback)",
-            font=app.MONOB, bg=app.BG3, fg=app.ACC2, relief='flat',
-            padx=8, pady=5, cursor='hand2', anchor='w', command=toggle_webhooks)
-        wh_btn.pack(side='left', fill='x', expand=True)
-
-        tk.Frame(wh_inner, bg=app.BG2, height=6).pack()
-        tk.Label(wh_inner,
-            text="  Default Webhook is the main monitor channel. If no other webhooks are\n"
-                 "  filled in, all events will be sent to the Default Webhook.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(fill='x', pady=(0, 4))
-        field("Default Webhook:",  'webhook_default',  parent=wh_inner, padx=0)
-        field("Quest Webhook:",    'webhook_quest',    parent=wh_inner, padx=0)
-        field("Task Webhook:",     'webhook_task',     parent=wh_inner, padx=0)
-        field("Chat Webhook:",     'webhook_chat',     parent=wh_inner, padx=0)
-        field("Error Webhook:",    'webhook_error',    parent=wh_inner, padx=0)
-        field("Drops Webhook:",    'webhook_drops',    parent=wh_inner, padx=0)
-        field("Deaths Webhook:",   'webhook_deaths',   parent=wh_inner, padx=0)
-        field("Level Up Webhook:", 'webhook_levelup',  parent=wh_inner, padx=0)
-        wh_btn_row = tk.Frame(wh_inner, bg=app.BG2); wh_btn_row.pack(fill='x', pady=(4, 0))
-        tk.Button(wh_btn_row, text="🔔  TEST WEBHOOKS", font=app.MONO,
-            bg=app.BG3, fg=app.ACC, relief='flat', padx=12, pady=5,
-            cursor='hand2', command=self._test_webhooks).pack(side='right')
-
-        # ── EVENT NOTIFICATIONS ───────────────────────────────────────────────
-        _, notif_body, _ = collapsible("EVENT NOTIFICATIONS", 'ui_section_notifications_open')
-
-        tk.Label(notif_body,
-            text="  Toggle Discord notifications and screenshots per event type.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(anchor='w', padx=8, pady=(4, 6))
-
-        # Script Events — inline checkboxes at top
-        script_row = tk.Frame(notif_body, bg=app.BG2); script_row.pack(fill='x', padx=8, pady=(0, 2))
-        tk.Label(script_row, text="Script Events - Notify when Script:", font=app.MONO,
-                 bg=app.BG2, fg=app.FG2).pack(side='left', padx=(0, 6))
+        # ── Script Events ────────────────────────────────────────────────────
+        _, body = self._card(inner, '📜', 'Script Events — Notify when Script:')
+        script_row = tk.Frame(body, bg=app.BG3)
+        script_row.pack(fill='x')
         for ev_lbl, ev_attr in [
             ("Starts",  'monitor_script_start'),
             ("Pauses",  'monitor_script_pause'),
@@ -240,32 +489,34 @@ class SettingsTab:
             ("Stops",   'monitor_script_stop'),
         ]:
             v = tk.BooleanVar(value=bool(app.cfg.get(ev_attr, True)))
-            tk.Checkbutton(script_row, text=ev_lbl, variable=v, font=app.MONO,
-                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left', padx=(0, 8))
+            tk.Checkbutton(script_row, text=ev_lbl, variable=v, font=app.SANS,
+                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
+                selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left', padx=(0, 12))
             self._vars[ev_attr] = v
-
-        ping_se_row = tk.Frame(notif_body, bg=app.BG2); ping_se_row.pack(fill='x', padx=8, pady=(0, 8))
         ping_se_var = tk.BooleanVar(value=bool(app.cfg.get('ping_script_event', True)))
-        tk.Checkbutton(ping_se_row, text="Ping for script events", variable=ping_se_var,
-            font=app.MONO, bg=app.BG2, fg=app.FG, activebackground=app.BG2,
+        tk.Checkbutton(script_row, text="Ping for script events", variable=ping_se_var,
+            font=app.SANS, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
             activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
-            cursor='hand2').pack(side='left', padx=(140, 0))
+            cursor='hand2').pack(side='left', padx=(24, 0))
         self._vars['ping_script_event'] = ping_se_var
 
-        # Grid table — col 0: label, col 1: Notify cb, col 2: Screenshot cb, col 3: Ping cb
-        tbl = tk.Frame(notif_body, bg=app.BG2)
-        tbl.pack(anchor='w', padx=16, pady=(0, 4))
+        # ── Per-event grid ───────────────────────────────────────────────────
+        _, body = self._card(inner, '🔔', 'Event Types')
+        tbl = tk.Frame(body, bg=app.BG3)
+        tbl.pack(anchor='w', fill='x', pady=(4, 0))
         tbl.columnconfigure(0, minsize=140)
-        tbl.columnconfigure(1, minsize=80)
-        tbl.columnconfigure(2, minsize=100)
-        tbl.columnconfigure(3, minsize=80)
+        tbl.columnconfigure(1, minsize=90)
+        tbl.columnconfigure(2, minsize=110)
+        tbl.columnconfigure(3, minsize=90)
 
-        # Header row
-        tk.Label(tbl, text="",           font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=0, sticky='w')
-        tk.Label(tbl, text="Notify",     font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=1, sticky='w', padx=(8,0))
-        tk.Label(tbl, text="Screenshot", font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=2, sticky='w', padx=(8,0))
-        tk.Label(tbl, text="Ping",       font=app.MONOB, bg=app.BG2, fg=app.ACC).grid(row=0, column=3, sticky='w', padx=(8,0))
+        tk.Label(tbl, text="EVENT TYPE",  font=app.SANSB, bg=app.BG3, fg=app.ACC
+                 ).grid(row=0, column=0, sticky='w')
+        tk.Label(tbl, text="NOTIFY",      font=app.SANSB, bg=app.BG3, fg=app.ACC
+                 ).grid(row=0, column=1, sticky='w', padx=(8, 0))
+        tk.Label(tbl, text="SCREENSHOT",  font=app.SANSB, bg=app.BG3, fg=app.ACC
+                 ).grid(row=0, column=2, sticky='w', padx=(8, 0))
+        tk.Label(tbl, text="PING",        font=app.SANSB, bg=app.BG3, fg=app.ACC
+                 ).grid(row=0, column=3, sticky='w', padx=(8, 0))
 
         EVENT_ROWS = [
             ("Quests",    'monitor_quests',   'ss_event_quest',   'ping_quest'),
@@ -277,46 +528,47 @@ class SettingsTab:
             ("Level Ups", 'monitor_levelups', 'ss_event_levelup', 'ping_levelup'),
         ]
         for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
-            tk.Label(tbl, text=label, font=app.MONO, bg=app.BG2, fg=app.FG,
-                     anchor='w').grid(row=r, column=0, sticky='w', pady=2)
+            tk.Label(tbl, text=label, font=app.SANS, bg=app.BG3, fg=app.FG,
+                     anchor='w').grid(row=r, column=0, sticky='w', pady=3)
 
             notify_var = tk.BooleanVar(value=bool(app.cfg.get(notify_attr, True)))
-            tk.Checkbutton(tbl, variable=notify_var, font=app.MONO,
-                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').grid(row=r, column=1, padx=(16, 0), pady=2)
+            tk.Checkbutton(tbl, variable=notify_var, font=app.SANS,
+                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
+                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                ).grid(row=r, column=1, padx=(16, 0), pady=3)
             self._vars[notify_attr] = notify_var
 
             ss_var = tk.BooleanVar(value=bool(app.cfg.get(ss_attr, False)))
-            tk.Checkbutton(tbl, variable=ss_var, font=app.MONO,
-                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').grid(row=r, column=2, padx=(16, 0), pady=2)
+            tk.Checkbutton(tbl, variable=ss_var, font=app.SANS,
+                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
+                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                ).grid(row=r, column=2, padx=(16, 0), pady=3)
             self._vars[ss_attr] = ss_var
 
             ping_default = app.cfg.get(ping_attr, ping_attr in ('ping_error', 'ping_death'))
             ping_var = tk.BooleanVar(value=bool(ping_default))
-            tk.Checkbutton(tbl, variable=ping_var, font=app.MONO,
-                bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').grid(row=r, column=3, padx=(16, 0), pady=2)
+            tk.Checkbutton(tbl, variable=ping_var, font=app.SANS,
+                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
+                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                ).grid(row=r, column=3, padx=(16, 0), pady=3)
             self._vars[ping_attr] = ping_var
 
-        # Level every-N row
-        lvl_row = tk.Frame(notif_body, bg=app.BG2); lvl_row.pack(fill='x', padx=8, pady=(2, 8))
-        tk.Label(lvl_row, text="    Notify every N levels:", font=app.MONO,
-                 bg=app.BG2, fg=app.FG2, width=28, anchor='w').pack(side='left')
+        lvl_row = tk.Frame(body, bg=app.BG3)
+        lvl_row.pack(fill='x', pady=(10, 0))
+        tk.Label(lvl_row, text="Notify every N levels:", font=app.SANS,
+                 bg=app.BG3, fg=app.FG2).pack(side='left')
         lev_var = tk.IntVar(value=int(app.cfg.get('levelup_every', 5)))
-        tk.Spinbox(lvl_row, from_=1, to=99, textvariable=lev_var, width=6, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(side='left', padx=(4, 0))
+        tk.Spinbox(lvl_row, from_=1, to=99, textvariable=lev_var, width=6, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                   ).pack(side='left', padx=(8, 0))
         self._vars['levelup_every'] = lev_var
-        tk.Label(lvl_row, text=" levels  (total level milestones always posted)",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(6, 0))
+        tk.Label(lvl_row, text="  (total level milestones are always posted)",
+            font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(6, 0))
 
-        # ── Hide paint overlay (end of EVENT NOTIFICATIONS) ─────────────────
-        tk.Frame(notif_body, bg=app.BG4, height=1).pack(fill='x', padx=8, pady=(6, 4))
-        hp_hdr_row = tk.Frame(notif_body, bg=app.BG2); hp_hdr_row.pack(fill='x', padx=8, pady=(4, 4))
-        tk.Label(hp_hdr_row, text="  Hide paint overlay during screenshot:",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
-        hp_table = tk.Frame(notif_body, bg=app.BG3, padx=10, pady=8)
-        hp_table.pack(fill='x', padx=8, pady=(0, 8))
+        # ── Hide paint overlay ───────────────────────────────────────────────
+        _, body = self._card(inner, '🖌', 'Hide paint overlay during screenshot')
+        hp_table = tk.Frame(body, bg=app.BG3)
+        hp_table.pack(fill='x', pady=(2, 0))
         hp_entries = [
             ("Scheduled",  'ss_hide_paint_scheduled'),
             ("Task",       'ss_hide_paint_task'),
@@ -330,209 +582,164 @@ class SettingsTab:
             ("Death",      'ss_hide_paint_death'),
             ("Level Up",   'ss_hide_paint_levelup'),
         ]
-        HP_COLS = 6
+        HP_COLS = 4
         for i, (lbl, key) in enumerate(hp_entries):
             row_i, col = divmod(i, HP_COLS)
             cell = tk.Frame(hp_table, bg=app.BG3)
-            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=2)
+            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 18), pady=3)
             var = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
-            tk.Checkbutton(cell, text=lbl, variable=var, font=app.MONO,
+            tk.Checkbutton(cell, text=lbl, variable=var, font=app.SANS,
                 bg=app.BG3, fg=app.FG2, activebackground=app.BG3, activeforeground=app.ACC,
                 selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
             self._vars[key] = var
 
-        # ── Monitoring Intervals ──────────────────────────────────────────────
-        section("MONITORING INTERVALS")
-        intfield("Log check interval (seconds):", 'check_interval', 1, 60)
+    # ── Page 4: Daily Summary ────────────────────────────────────────────────
+    def _settings_row(self, parent, icon, title, subtitle, build_control):
+        """A single full-width settings row: icon + title/subtitle on the
+        left, a control built by build_control(row) on the right, divider
+        below. Matches the Daily Summary mockup's list style (distinct from
+        the card-grid style used on the other pages, since each setting
+        here is independent rather than naturally grouped)."""
+        app = self.app
+        row = tk.Frame(parent, bg=app.BG2, pady=12)
+        row.pack(fill='x')
+        left = tk.Frame(row, bg=app.BG2)
+        left.pack(side='left', fill='x', expand=True)
+        tk.Label(left, text=icon, font=(app.SANS[0], 13), bg=app.BG2, fg=app.ACC
+                 ).pack(side='left', anchor='n', padx=(0, 10))
+        text_col = tk.Frame(left, bg=app.BG2)
+        text_col.pack(side='left', fill='x', expand=True)
+        tk.Label(text_col, text=title, font=app.SANSB, bg=app.BG2, fg=app.FG,
+                 anchor='w', justify='left').pack(fill='x', anchor='w')
+        if subtitle:
+            tk.Label(text_col, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2,
+                     anchor='w', justify='left').pack(fill='x', anchor='w')
+        control_col = tk.Frame(row, bg=app.BG2)
+        control_col.pack(side='right')
+        build_control(control_col)
+        tk.Frame(parent, bg=app.BG4, height=1).pack(fill='x')
 
-        # ── Daily Summary ─────────────────────────────────────────────────────
-        section("DAILY SUMMARY")
-        boolfield("Enable daily summary", 'summary_enabled')
-        field("Send time (HH:MM):", 'summary_time')
+    def _build_summary_page(self, parent):
+        app = self.app
+        self._page_header(parent, "Daily Summary", "Configure daily summary reports and automatic screenshot options.")
+        inner = self._scrollable_body(parent)
+        card = tk.Frame(inner, bg=app.BG2)
+        card.pack(fill='x')
 
-        # Scheduled screenshots — now lives in Daily Summary section
-        ss_startup_row = tk.Frame(inner, bg=app.BG2); ss_startup_row.pack(fill='x', padx=16, pady=2)
-        ss_startup_var = tk.BooleanVar(value=bool(app.cfg.get('screenshot_on_startup', False)))
-        tk.Checkbutton(ss_startup_row, text="Screenshot on monitor startup", variable=ss_startup_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['screenshot_on_startup'] = ss_startup_var
+        def _ctrl_bool(attr, default):
+            def build(parent_):
+                var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
+                tk.Checkbutton(parent_, variable=var, font=app.SANS,
+                    bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
+                    selectcolor=app.BG3, relief='flat', cursor='hand2').pack()
+                self._vars[attr] = var
+            return build
 
-        ss_row = tk.Frame(inner, bg=app.BG2); ss_row.pack(fill='x', padx=16, pady=2)
-        ss_var = tk.BooleanVar(value=bool(app.cfg.get('screenshots_enabled', False)))
-        tk.Checkbutton(ss_row, text="Enable scheduled screenshots", variable=ss_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['screenshots_enabled'] = ss_var
+        self._settings_row(card, '✅', "Enable daily summary",
+                            "Automatically generate and send a daily summary report.",
+                            _ctrl_bool('summary_enabled', False))
 
-        int_row = tk.Frame(inner, bg=app.BG2); int_row.pack(fill='x', padx=16, pady=2)
-        tk.Label(int_row, text="Screenshot interval (minutes):", font=app.MONO,
-                 bg=app.BG2, fg=app.FG2, width=28, anchor='w').pack(side='left')
-        int_var = tk.IntVar(value=int(app.cfg.get('screenshot_minutes', 60)))
-        tk.Spinbox(int_row, from_=5, to=1440, textvariable=int_var, width=8, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(side='left', padx=(4, 0))
-        self._vars['screenshot_minutes'] = int_var
+        def _build_summary_time(parent_):
+            var = tk.StringVar(value=str(app.cfg.get('summary_time', '22:00')))
+            tk.Entry(parent_, textvariable=var, font=app.SANS, bg=app.BG4, fg=app.FG,
+                      relief='flat', insertbackground=app.ACC, width=10
+                     ).pack(ipady=4)
+            self._vars['summary_time'] = var
+        self._settings_row(card, '🕐', "Send time (HH:MM)",
+                            "Set the time of day when the daily summary is sent.",
+                            _build_summary_time)
 
-        # ── Auto Restart ──────────────────────────────────────────────────────
-        _, ar_body, _ = collapsible("AUTO RESTART", 'ui_section_auto_restart_open')
+        self._settings_row(card, '⏻', "Screenshot on monitor startup",
+                            "Take a screenshot automatically when a monitor starts.",
+                            _ctrl_bool('screenshot_on_startup', False))
 
-        tk.Label(ar_body,
-            text="  Automatically relaunch accounts after Script Stopped is detected.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2, justify='left').pack(anchor='w', padx=8, pady=(4, 2))
+        self._settings_row(card, '📷', "Enable scheduled screenshots",
+                            "Take screenshots automatically at regular intervals.",
+                            _ctrl_bool('screenshots_enabled', False))
 
-        boolfield("Auto restart client after Script Stopped",
-                  'auto_restart_enabled', default=False, parent=ar_body)
-        boolfield("Only auto restart during game update window  (Tue/Wed 1–4 AM PT)",
-                  'auto_restart_game_update_window_only', default=True, parent=ar_body)
-        boolfield("Respect breaks on relaunch",
-                  'auto_restart_respect_breaks', default=True, parent=ar_body)
+        def _build_ss_interval(parent_):
+            var = tk.IntVar(value=int(app.cfg.get('screenshot_minutes', 60)))
+            tk.Spinbox(parent_, from_=5, to=1440, textvariable=var, width=8, font=app.SANS,
+                       bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack()
+            self._vars['screenshot_minutes'] = var
+        self._settings_row(card, '⏱', "Screenshot interval (minutes)",
+                            "Set how often scheduled screenshots are taken.",
+                            _build_ss_interval)
 
-        tk.Label(ar_body, text="  Restart delay (random within window, ignored when respecting breaks):",
-                 font=app.MONO, bg=app.BG2, fg=app.FG2).pack(anchor='w', padx=8, pady=(6, 0))
+    # ── Page 5: Restarts & Updates ───────────────────────────────────────────
+    def _build_restarts_page(self, parent):
+        app = self.app
+        self._page_header(parent, "Restarts & Updates", "Configure automatic restarts and update awareness behaviors.")
+        inner = self._scrollable_body(parent)
 
-        delay_row = tk.Frame(ar_body, bg=app.BG2); delay_row.pack(fill='x', padx=16, pady=2)
-        tk.Label(delay_row, text="Min minutes:", font=app.MONO, bg=app.BG2, fg=app.FG2,
-                 width=16, anchor='w').pack(side='left')
+        # ── Auto Restart ─────────────────────────────────────────────────────
+        _, body = self._card(inner, '🔄', 'Auto Restart',
+                              "Automatically relaunch accounts after Script Stopped is detected.")
+        self._row_bool(body, "Auto restart client after Script Stopped",
+                       'auto_restart_enabled', default=False)
+        self._row_bool(body, "Only auto restart during game update window (Tue/Wed 1–4 AM PT)",
+                       'auto_restart_game_update_window_only', default=True)
+        self._row_bool(body, "Respect breaks on relaunch",
+                       'auto_restart_respect_breaks', default=True)
+
+        tk.Label(body, text="Restart Delay", font=app.SANSB, bg=app.BG3, fg=app.FG
+                 ).pack(anchor='w', pady=(10, 0))
+        tk.Label(body, text="Restart delay (random within window, ignored when respecting breaks):",
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w', pady=(0, 6))
+        delay_row = tk.Frame(body, bg=app.BG3)
+        delay_row.pack(fill='x')
+        tk.Label(delay_row, text="Min minutes:", font=app.SANS, bg=app.BG3, fg=app.FG2
+                 ).pack(side='left')
         ar_min_var = tk.IntVar(value=int(app.cfg.get('auto_restart_min_minutes', 1)))
-        tk.Spinbox(delay_row, from_=0, to=1440, textvariable=ar_min_var, width=6, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4,
-                   relief='flat').pack(side='left', padx=(4, 16))
+        tk.Spinbox(delay_row, from_=0, to=1440, textvariable=ar_min_var, width=6, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                   ).pack(side='left', padx=(6, 20))
         self._vars['auto_restart_min_minutes'] = ar_min_var
-
-        tk.Label(delay_row, text="Max minutes:", font=app.MONO, bg=app.BG2, fg=app.FG2,
-                 width=14, anchor='w').pack(side='left')
+        tk.Label(delay_row, text="Max minutes:", font=app.SANS, bg=app.BG3, fg=app.FG2
+                 ).pack(side='left')
         ar_max_var = tk.IntVar(value=int(app.cfg.get('auto_restart_max_minutes', 30)))
-        tk.Spinbox(delay_row, from_=1, to=1440, textvariable=ar_max_var, width=6, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4,
-                   relief='flat').pack(side='left', padx=(4, 0))
+        tk.Spinbox(delay_row, from_=1, to=1440, textvariable=ar_max_var, width=6, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                   ).pack(side='left', padx=(6, 0))
         self._vars['auto_restart_max_minutes'] = ar_max_var
 
-        # ── Update Awareness ─────────────────────────────────────────────────
-        section("UPDATE AWARENESS")
-        boolfield("Check for P2P Master AI / DreamBot client updates",
-                  'update_check_enabled', default=True)
-        tk.Label(inner,
-            text="  Checks DreamBot SDN for P2P Master AI updates. "
-                 "Falls back silently to the backup Worker if SDN is unavailable. "
-                 "Sends one grouped Discord alert when any account needs a script or client update.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2,
-            wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 4))
+        # ── Update Awareness (DreamBot/script updates — distinct from the
+        # Manual Update Check on the General Settings page) ─────────────────
+        _, body = self._card(inner, '☁', 'Update Awareness')
+        self._row_bool(body, "Check for P2P Master AI / DreamBot client updates",
+                       'update_check_enabled', default=True,
+                       helper="Checks DreamBot SDN for updates and silently falls back if needed.")
 
-        # Check interval HH:MM
-        intv_row = tk.Frame(inner, bg=app.BG2); intv_row.pack(fill='x', padx=16, pady=2)
-        tk.Label(intv_row, text="Check interval:", font=app.MONO,
-                 bg=app.BG2, fg=app.FG2).pack(side='left')
+        intv_row = tk.Frame(body, bg=app.BG3)
+        intv_row.pack(fill='x', pady=(4, 4))
+        tk.Label(intv_row, text="Check interval:", font=app.SANS,
+                 bg=app.BG3, fg=app.FG2).pack(side='left')
         intv_h_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_hours', 6)))
-        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(
-                   side='left', padx=(8, 2))
-        tk.Label(intv_row, text="h", font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                   ).pack(side='left', padx=(8, 2))
+        tk.Label(intv_row, text="h", font=app.SANS, bg=app.BG3, fg=app.FG2).pack(side='left')
         intv_m_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_minutes', 0)))
-        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=app.MONO,
-                   bg=app.BG3, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack(
-                   side='left', padx=(6, 2))
-        tk.Label(intv_row, text="m  (min: 1m  |  default: 6h 0m)", font=app.MONO,
-                 bg=app.BG2, fg=app.FG2).pack(side='left', padx=(2, 0))
+        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=app.SANS,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
+                   ).pack(side='left', padx=(6, 2))
+        tk.Label(intv_row, text="m   (min: 1m | default: 6h 0m)", font=app.SANSS,
+                 bg=app.BG3, fg=app.FG2).pack(side='left', padx=(2, 0))
         self._vars['update_check_interval_hours']   = intv_h_var
         self._vars['update_check_interval_minutes'] = intv_m_var
 
-        ping_upd_row = tk.Frame(inner, bg=app.BG2); ping_upd_row.pack(fill='x', padx=16, pady=2)
-        ping_upd_var = tk.BooleanVar(value=bool(app.cfg.get('ping_update', True)))
-        tk.Checkbutton(ping_upd_row, text="Ping configured user on update alerts",
-            variable=ping_upd_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['ping_update'] = ping_upd_var
-
-        ar_upd_row = tk.Frame(inner, bg=app.BG2); ar_upd_row.pack(fill='x', padx=16, pady=2)
-        ar_upd_var = tk.BooleanVar(value=bool(app.cfg.get('auto_relaunch_on_update', False)))
-        tk.Checkbutton(ar_upd_row, text="Auto-relaunch clients when script/client update is found",
-            variable=ar_upd_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['auto_relaunch_on_update'] = ar_upd_var
-        tk.Label(inner,
-            text="  ⚠ Auto-relaunch on update will immediately restart affected clients when a "
-                 "script/client update is detected. This can interrupt any current activity, "
-                 "including Inferno/Jad.",
-            font=app.MONO, bg=app.BG2, fg=app.RED,
-            wraplength=820, justify='left', padx=16).pack(anchor='w', pady=(0, 8))
-
-        # ── Auto-update ───────────────────────────────────────────────────────
-        section("AUTO-UPDATE")
-        upd_row = tk.Frame(inner, bg=app.BG2); upd_row.pack(fill='x', padx=16, pady=6)
-        tk.Button(upd_row, text="🔄  Check for Update", font=app.MONOL,
-            bg=app.BG3, fg=app.ACC, relief='flat', padx=14, pady=6,
-            cursor='hand2', command=app._check_for_update).pack(side='left')
-
-        beta_row = tk.Frame(inner, bg=app.BG2); beta_row.pack(fill='x', padx=16, pady=(0, 4))
-        beta_var = tk.BooleanVar(value=bool(app.cfg.get('beta_updates', False)))
-        tk.Checkbutton(beta_row, text="Include pre-release versions when checking for updates manually",
-            variable=beta_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['beta_updates'] = beta_var
-        tk.Label(beta_row, text="  (silent startup check always uses stable only)",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
-
-        # ── Debug mode ────────────────────────────────────────────────────────
-        section("DEBUG")
-        debug_row = tk.Frame(inner, bg=app.BG2); debug_row.pack(fill='x', padx=16, pady=(4, 4))
-        debug_var = tk.BooleanVar(value=bool(app.cfg.get('debug', False)))
-        tk.Checkbutton(debug_row, text="Enable debug logging",
-            variable=debug_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['debug'] = debug_var
-        tk.Label(debug_row, text="  (logs internal errors and failures to the monitor tab)",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
-
-        stats_row = tk.Frame(inner, bg=app.BG2); stats_row.pack(fill='x', padx=16, pady=(0, 8))
-        stats_var = tk.BooleanVar(value=bool(app.cfg.get('enable_usage_stats', True)))
-        tk.Checkbutton(stats_row, text="Enable anonymous usage stats",
-            variable=stats_var, font=app.MONO,
-            bg=app.BG2, fg=app.FG2, activebackground=app.BG2, activeforeground=app.ACC,
-            selectcolor=app.BG3, relief='flat', cursor='hand2').pack(side='left')
-        self._vars['enable_usage_stats'] = stats_var
-        tk.Label(stats_row, text="  (sends version + OS on startup, no personal data)",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
-
-        # ── Paint reference snap ───────────────────────────────────────────────
-        section("PAINT REFERENCE")
-        snap_info = tk.Frame(inner, bg=app.BG2); snap_info.pack(fill='x', padx=16, pady=(4,2))
-        tk.Label(snap_info,
-            text="Make sure paint is VISIBLE (Hide button showing) on a DreamBot client, then click Snap.",
-            font=app.MONO, bg=app.BG2, fg=app.FG2, wraplength=600, justify='left').pack(side='left')
-        snap_row = tk.Frame(inner, bg=app.BG2); snap_row.pack(fill='x', padx=16, pady=(0,8))
-        self._snap_lbl = tk.Label(snap_row, text="", font=app.MONO, bg=app.BG2, fg=app.GREEN)
-        def _do_snap():
-            self._snap_lbl.configure(text="⏳ Snapping...", fg=app.YEL)
-            app.update_idletasks()
-            def _snap():
-                from py.screenshot import snap_paint_reference
-                ok, msg = snap_paint_reference(log=app._log)
-                def _done():
-                    self._snap_lbl.configure(
-                        text=f"✅ {msg}" if ok else f"❌ {msg}",
-                        fg=app.GREEN if ok else app.RED)
-                app.after(0, _done)
-            import threading
-            threading.Thread(target=_snap, daemon=True).start()
-        tk.Button(snap_row, text="📸  Snap Paint Reference", font=app.MONOL,
-            bg=app.BG3, fg=app.ACC, relief='flat', padx=14, pady=6,
-            cursor='hand2', command=_do_snap).pack(side='left')
-        self._snap_lbl.pack(side='left', padx=12)
-
-        tk.Frame(inner, bg=app.BG2, height=8).pack()
-        tk.Button(inner, text="💾  SAVE SETTINGS", font=app.MONOL,
-            bg=app.ACC, fg=app.BG, relief='flat', padx=20, pady=8,
-            cursor='hand2', command=self.save).pack(pady=12)
-        self._saved_lbl = tk.Label(inner, text="", font=app.MONOB, bg=app.BG2, fg=app.GREEN)
-        self._saved_lbl.pack()
-        tk.Frame(inner, bg=app.BG2, height=20).pack()
+        self._row_bool(body, "Ping configured user on update alerts", 'ping_update', default=True)
+        self._row_bool(body, "Auto-relaunch clients when script/client update is found",
+                       'auto_relaunch_on_update', default=False)
+        self._warning_banner(body,
+            "Auto-relaunch on update will immediately restart affected clients. "
+            "This may interrupt your current activity, including critical encounters such as Inferno/Jad.")
 
     # ── Save ───────────────────────────────────────────────────────────────────
     def save(self):
+        """Save every setting from every page, regardless of which section is
+        currently visible — all pages are built eagerly at construction time,
+        so self._vars always holds every setting's widget variable."""
         app = self.app
         for attr, var in self._vars.items():
             try:
@@ -598,7 +805,6 @@ class SettingsTab:
                     f"(e.g. {parent}). Only this one account will be monitored — sibling accounts "
                     f"will not be discovered. To monitor multiple accounts, select the parent "
                     f"Logs folder instead."
-                    f"(e.g. {parent})."
                 )
             )
         else:
@@ -651,7 +857,6 @@ class SettingsTab:
             try:
                 import discord  # noqa: F401
             except ImportError:
-                from py.util import is_frozen
                 if is_frozen():
                     # Packaged build — cannot pip-install at runtime.
                     def _frozen_fail():
@@ -663,7 +868,6 @@ class SettingsTab:
                 app.after(0, lambda: self._bot_setup_lbl.configure(
                     text="⏳ Installing discord.py...", fg=app.YEL))
                 try:
-                    import subprocess
                     subprocess.check_call(
                         [sys.executable, '-m', 'pip', 'install', 'discord.py',
                          '--break-system-packages', '--quiet'],

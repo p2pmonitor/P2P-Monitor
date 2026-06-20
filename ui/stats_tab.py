@@ -35,6 +35,7 @@ Filter semantics (per spec, beta.9):
 import math
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 
 from py.util import write_debug_entry
@@ -295,6 +296,10 @@ class StatsTab:
         canvas.pack(fill='both', expand=True)
         self._chart_canvas = canvas
 
+        # Cached once (not per-redraw) — used to measure actual x-axis label
+        # pixel widths for collision avoidance in _select_chart_x_labels().
+        self._axis_font = tkfont.Font(root=app, family=app.SANSS[0], size=app.SANSS[1])
+
     # Palette for the skill donut/bars — sage/olive first (the biggest slice),
     # then amber/coral/lavender/amber-orange for the rest, cycling if needed.
     # 'Other' always gets a deliberately neutral muted tan, never a theme accent.
@@ -502,6 +507,61 @@ class StatsTab:
             pass
         return date_str
 
+    def _select_chart_x_labels(self, candidate_idx, dates, xy):
+        """Thin a candidate list of x-axis label indices down to ones that
+        won't visually collide, using each label's actual rendered pixel
+        width (via the cached self._axis_font) as the required gap — not a
+        guessed constant, so it stays correct if the font or date format
+        ever changes. The first and last candidate are always kept; on
+        dense data the forced-last-day label can otherwise land just a few
+        pixels from the previous natural tick and visually merge with it.
+
+        Algorithm: keep index 0 and the last index unconditionally. Walk
+        the remaining middle candidates right-to-left, dropping any that
+        are closer than one label-width-plus-margin to the nearest kept
+        label to their right (starting from the always-kept last index).
+        Then walk what's left left-to-right, applying the same check
+        against the always-kept first index, so neither edge can collide
+        either.
+        """
+        if len(candidate_idx) <= 2:
+            return candidate_idx
+
+        first, last = candidate_idx[0], candidate_idx[-1]
+        middle = [i for i in candidate_idx[1:-1]]
+        if not middle:
+            return [first, last]
+
+        label_w = max(
+            (self._axis_font.measure(self._format_date_for_axis(dates[i]))
+             for i in candidate_idx),
+            default=50,
+        )
+        min_gap = label_w + 14  # small breathing room between adjacent labels
+
+        # Right-to-left pass, anchored at the always-kept last label.
+        kept = []
+        ref_x, _ = xy(last, 0)
+        for i in reversed(middle):
+            x, _ = xy(i, 0)
+            if ref_x - x >= min_gap:
+                kept.append(i)
+                ref_x = x
+        kept.reverse()  # restore left-to-right order
+
+        # Left-to-right pass over the survivors, anchored at the
+        # always-kept first label, so the leftmost middle label can't
+        # collide with index 0 either.
+        final_middle = []
+        ref_x, _ = xy(first, 0)
+        for i in kept:
+            x, _ = xy(i, 0)
+            if x - ref_x >= min_gap:
+                final_middle.append(i)
+                ref_x = x
+
+        return [first] + final_middle + [last]
+
     def _redraw_chart(self, series):
         """Pure-Tkinter Canvas line chart — used on every platform so chart
         rendering never depends on matplotlib at all. Whole-number y-axis
@@ -555,6 +615,7 @@ class StatsTab:
             tick_idx = list(range(0, n, label_step))
             if tick_idx[-1] != n - 1:
                 tick_idx.append(n - 1)  # always show the actual last day
+            tick_idx = self._select_chart_x_labels(tick_idx, dates, xy)
             for i in tick_idx:
                 x, _ = xy(i, 0)
                 # The first/last labels anchor to their own edge instead of

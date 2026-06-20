@@ -48,7 +48,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 
 ### Update awareness
 - Checks the DreamBot SDN API (`sdn.dreambot.org/scripts/all`) for the latest P2P Master AI version — falls back silently to the Cloudflare Worker cache if SDN is unavailable
-- Runs once when the monitor starts, then on a configurable interval (default 6 hours, minimum 1 minute) — set in Settings → Update Awareness
+- Runs once when the monitor starts, then on a configurable interval (default 6 hours, minimum 1 minute) — set in Settings → Restarts & Updates → Update Awareness
 - Detects when the local P2P Master AI script version is behind the SDN version; handles trailing-zero versions correctly (SDN `2.15` = 2.150, newer than 2.149)
 - Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
 - Sends **one grouped Discord alert** to the main monitor channel listing all accounts that need an update, organised by type (script only, client only, or both)
@@ -155,7 +155,7 @@ See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full Windows build details.
 ## Setup
 
 ### DreamBot logs
-Set your DreamBot log folder path in **Settings → Log Folder**. This should be the **parent Logs folder** that contains your account subfolders — not an individual account folder.
+Set your DreamBot log folder path in **Settings → General Settings → DreamBot Logs Folder**. This should be the **parent Logs folder** that contains your account subfolders — not an individual account folder.
 
 - Linux default: `/home/debian/DreamBot/Logs`
 - Windows default: `C:\Users\<you>\DreamBot\Logs`
@@ -204,7 +204,7 @@ Confirm that DreamBot opens, selects the correct account/script/proxy, and start
 Confirm the client closes, reopens, and starts the script again without manual clicks.
 
 ### Auto restart setup
-Auto restart is configured in Settings.
+Auto restart is configured in Settings → Restarts & Updates → Auto Restart.
 
 Recommended starting settings:
 
@@ -252,7 +252,7 @@ Multiple accounts needing updates appear in the same message. The embed recommen
 Webhook mode is the simplest setup if you do not want to create a Discord bot.
 
 1. Create a Discord webhook in any channel
-2. Paste the URL into **Settings → Webhooks → Default Webhook**
+2. Paste the URL into **Settings → Discord Alerts → Webhooks → Default Webhook**
 3. Optionally add per-event webhooks (drops, deaths, errors, etc.)
 4. Hit **Save**
 
@@ -265,8 +265,8 @@ Discord webhooks are **not required** when using bot mode. You can leave webhook
 2. Enable **Message Content Intent** under Privileged Gateway Intents
 3. OAuth2 → URL Generator → Scope: `bot` → Permissions: Send Messages, Read Message History, Manage Channels, Manage Webhooks, View Channels, Embed Links, Attach Files, Create Public Threads, Send Messages in Threads, Manage Threads, Use Slash Commands
 4. Open the generated URL → select your server → Authorize
-5. Right-click your server icon → Copy Server ID → paste into **Settings → Server ID**
-6. Paste your bot token into **Settings → Bot Token**
+5. Right-click your server icon → Copy Server ID → paste into **Settings → Discord Alerts → Server ID**
+6. Paste your bot token into **Settings → Discord Alerts → Bot Token**
 7. Hit **Save** then **🤖 Run Bot Setup**
 
 ### Slash commands
@@ -307,9 +307,9 @@ On Windows, `~` resolves to `C:\Users\<you>`.
 
 ## Updating
 
-**In-app (Linux):** Settings → 🔄 Check for Update — downloads and applies the update automatically, then prompts to restart.
+**In-app (Linux):** Settings → General Settings → Manual Update Check → 🔄 Check for Updates — downloads and applies the update automatically, then prompts to restart.
 
-**In-app (Windows packaged):** Settings → 🔄 Check for Update — downloads the new `.exe` directly from the GitHub release, replaces the current binary, and prompts to relaunch. No manual steps needed.
+**In-app (Windows packaged):** Settings → General Settings → Manual Update Check → 🔄 Check for Updates — downloads the new `.exe` directly from the GitHub release, replaces the current binary, and prompts to relaunch. No manual steps needed.
 
 **Manual fallback:** Download the latest release from the [Releases](https://github.com/p2pmonitor/P2P-Monitor/releases/latest) page and replace the existing file.
 
