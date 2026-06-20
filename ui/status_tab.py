@@ -41,9 +41,10 @@ class StatusTab:
         self.app = app
         self._refresh_in_flight = False  # prevents thread accumulation
         self._row_widgets = {}           # account -> dict of widget refs
+        self._overview_tick_id = None    # guards against duplicate ticker chains
         self._build(parent_frame)
         self._tick_uptime()
-        self._tick_overview()
+        self._schedule_overview_tick()
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self, f):
@@ -100,18 +101,36 @@ class StatusTab:
         val_lbl.pack(side='left', fill='x', expand=True)
         return val_lbl
 
+    def _schedule_overview_tick(self):
+        """Only ever schedules a tick if one isn't already pending — this
+        guard is what makes it impossible for multiple call sites (the
+        ticker itself, plus App._start()/_stop() calling
+        refresh_session_overview() directly) to ever stack up parallel
+        ticker chains."""
+        if self._overview_tick_id is None:
+            self._overview_tick_id = self.app.after(1000, self._tick_overview)
+
     def _tick_overview(self):
         """Pure local math, same pattern as Monitor's — no I/O. Runs every
         second regardless of which tab is visible (passive self.after()
         chain), since it's cheap and keeps things in sync the moment you
-        switch back to Status."""
+        switch back to Status. This is the *only* method that schedules
+        the next tick — refresh_session_overview() must stay display-only."""
+        self._overview_tick_id = None
         self.refresh_session_overview()
-        self.app.after(1000, self._tick_overview)
+        self._schedule_overview_tick()
 
     def refresh_session_overview(self):
-        """The actual display update, separated from the reschedule above
-        so App._start()/_stop() can call this directly for an immediate
-        refresh without spawning a second parallel ticker chain."""
+        """Display-only — updates labels from current state, never
+        schedules anything. Called both by the ticker above and directly
+        by App._start()/_stop() for an immediate refresh; if this method
+        scheduled its own tick, every one of those extra call sites would
+        spawn a second, independent ticker chain. With two schedulers
+        (this method and _tick_overview()) both firing every second, the
+        number of pending callbacks doubles every tick — 1, 2, 4, 8, 16,
+        32... — and within seconds the entire Tk event queue is flooded,
+        making the whole app permanently unresponsive. That bug existed
+        here before — fixed by making this method strictly display-only."""
         app = self.app
         running = str(app._btn_stop.cget('state')) == 'normal'
         self._so_status_lbl.configure(
@@ -131,7 +150,6 @@ class StatusTab:
             self._so_started_lbl.configure(text="—")
             self._so_uptime_lbl.configure(text="—")
         self._so_events_lbl.configure(text=str(sum(app._counts.values())))
-        app.after(1000, self._tick_overview)
 
     # ── Accounts Overview ────────────────────────────────────────────────────────
     def _build_accounts_overview(self, parent):
