@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.0-beta.13
+### Fix: the actual cause of the Monitor/app freeze — an exponential timer-doubling bug in StatusTab
+
+**beta.12's fix was real but addressed the wrong problem.** It fixed a genuine main-thread-blocking issue in Monitor's account refresh, but that bug only happens after Start is pressed — it couldn't explain the freeze happening immediately on app launch, before Start is ever reachable, which is what was actually being reported. Diagnosed wrong twice in a row on this one before the real cause was identified.
+
+**The actual bug:** `StatusTab.refresh_session_overview()` had a leftover `app.after(1000, self._tick_overview)` call — a duplicate of the scheduling that `_tick_overview()` itself already does correctly. Every tick produced *two* new scheduled ticks instead of one. Worse, `refresh_session_overview()` is also called directly by `App._start()`/`_stop()` (added in beta.11, specifically to make Status's overview update immediately rather than waiting for the next tick) — every one of those calls spawned its own independent doubling chain too. The result: 1, 2, 4, 8, 16, 32, 64, 128... pending timer callbacks, doubling every second, starting the instant `StatusTab` is constructed during app startup — completely independent of Monitor, Start, or any account data. Within seconds the entire Tk event queue is flooded and the single-threaded UI never gets a chance to process a real click again. Matches exactly what was reported: Monitor loads, the UI "refreshes" to a half-painted state as the queue backs up, and the app never recovers.
+
+This existed since beta.11, introduced as a side effect of the exact fix described in that release's changelog (separating the immediate-refresh call from the ticker) — the separation itself was the right idea, but the old scheduling line wasn't fully removed from the method being separated.
+
+**Fix:** `refresh_session_overview()` is now strictly display-only — it updates labels and nothing else, never schedules anything. Only `_tick_overview()` schedules the next tick, and only via a new guarded `_schedule_overview_tick()` that refuses to schedule a second tick while one is already pending (tracked via `_overview_tick_id`), so no future call site can ever recreate this class of bug by accident, even indirectly. Monitor's equivalent method was checked and confirmed clean — this was isolated to Status.
+
+**Validated:** confirmed by direct experiment that the bug, when deliberately reintroduced, doesn't just slow the app down — it hangs hard enough to time out a 30-second automated test run. Added a dedicated test that counts real pending Tcl `after()` callbacks over 14 seconds of realistic activity (the ticker running, plus repeated direct `refresh_session_overview()` calls simulating Start/Stop) and asserts the count stays flat rather than growing — confirmed flat (3–6 pending callbacks throughout) on the fix, confirmed the same test run against the original buggy code never completes at all. All 247 existing checks across the other six suites re-run clean.
+
+**Files changed:** `ui/status_tab.py` (the fix), `p2p_monitor.py` (version bump only), `CHANGELOG.md`. `update_manifest.txt` unchanged — no new files.
+
+---
+
 ## v2.0.0-beta.12
 ### Fix: Monitor freeze on Start (Linux) — Active Accounts refresh was blocking the main thread
 
@@ -415,7 +432,6 @@ The stable public release remains v1.8.3 until the full v2.0.0 is ready.
 - Extracts the latest script version from the SDN response; compile metadata may be logged for debug if present but is not used for update decisions
 - Cloudflare Worker (`p2p-sdn-watch.p2pmonitor.workers.dev`) kept as silent fallback — used automatically if SDN is unreachable, returns bad JSON, or does not contain P2P Master AI
 - Source and fallback details are debug-only — no user-facing alerts for source failures alone
-- Thanks to **@Ziggy** for finding the DreamBot SDN API endpoint
 
 **Version comparison: Decimal-aware**
 - SDN returns versions as JSON numbers (e.g. `2.15` for 2.150, dropping trailing zero)

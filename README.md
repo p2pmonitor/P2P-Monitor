@@ -53,7 +53,6 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
 - Sends **one grouped Discord alert** to the main monitor channel listing all accounts that need an update, organised by type (script only, client only, or both)
 - Per-account deduplication — same update state does not re-alert after restart; a new version resets the alert
-- Thanks to **@Ziggy** for finding the DreamBot SDN API endpoint
 
 ### Discord notifications
 - Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, script lifecycle events, launcher events, update alerts, and daily summaries
