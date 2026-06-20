@@ -68,6 +68,8 @@ class StatsTab:
         self._prewarm_loading = False
         self._building        = False  # build-lock guard against races
         self._donut_resize_pending = False  # guards the single after_idle retry in _size_donut_to_panel
+        self._chart_points = []          # set for real in _build_chart/_redraw_chart
+        self._tooltip_last_idx = None
         self._donut_redraw_in_progress = False  # reentrancy guard — see _redraw_skill_donut
 
         # Lightweight placeholder — replaced by _build_real_content() on first show
@@ -297,8 +299,37 @@ class StatsTab:
         self._chart_canvas = canvas
 
         # Cached once (not per-redraw) — used to measure actual x-axis label
-        # pixel widths for collision avoidance in _select_chart_x_labels().
-        self._axis_font = tkfont.Font(root=app, family=app.SANSS[0], size=app.SANSS[1])
+        # pixel widths for collision avoidance in _select_chart_x_labels(),
+        # and for sizing the hover tooltip box.
+        self._axis_font     = tkfont.Font(root=app, family=app.SANSS[0], size=app.SANSS[1])
+        self._tooltip_font  = tkfont.Font(root=app, family=app.SANS[0],  size=app.SANS[1])
+        self._tooltip_font_b = tkfont.Font(root=app, family=app.SANS[0], size=app.SANS[1], weight='bold')
+
+        # Hover tooltip state — see _on_chart_motion/_show_tooltip/_hide_tooltip.
+        # _chart_points holds one dict per plotted day (x, y, date, total,
+        # accounts) rebuilt on every _redraw_chart() call; hover never
+        # triggers a full chart redraw, only tooltip-tagged canvas items.
+        self._chart_points = []
+        self._tooltip_last_idx = None
+        self._TOOLTIP_HIT_RADIUS = 9
+
+        canvas.bind('<Motion>', self._on_chart_motion)
+        canvas.bind('<Leave>', self._on_chart_leave)
+
+    @staticmethod
+    def _daily_account_breakdown(rows):
+        """date_str -> {account: count}, computed directly here from the
+        same already-filtered rows used for the chart/KPIs — not via
+        py/stats.py, so existing aggregation there stays untouched. Powers
+        the hover tooltip's per-account breakdown only; doesn't affect any
+        displayed total."""
+        breakdown = {}
+        for r in rows:
+            d = r.get('date')
+            acct = r.get('account', '?')
+            day = breakdown.setdefault(d, {})
+            day[acct] = day.get(acct, 0) + 1
+        return breakdown
 
     # Palette for the skill donut/bars — sage/olive first (the biggest slice),
     # then amber/coral/lavender/amber-orange for the rest, cycling if needed.
@@ -435,7 +466,8 @@ class StatsTab:
         self._update_kpis(kpis, date_from, date_to)
 
         series = daily_series_for_range(rows, date_from=date_from, date_to=date_to)
-        self._redraw_chart(series)
+        breakdown = self._daily_account_breakdown(rows)
+        self._redraw_chart(series, breakdown)
 
         # Levels by Skill: obeys Account + Date range, ignores Skill — a
         # skill filter would otherwise collapse this panel to one slice.
@@ -562,12 +594,14 @@ class StatsTab:
 
         return [first] + final_middle + [last]
 
-    def _redraw_chart(self, series):
+    def _redraw_chart(self, series, breakdown=None):
         """Pure-Tkinter Canvas line chart — used on every platform so chart
         rendering never depends on matplotlib at all. Whole-number y-axis
         ticks only, since fractional levels-per-day are meaningless."""
         app = self.app
         c = self._chart_canvas
+        breakdown = breakdown or {}
+        self._tooltip_last_idx = None  # any previously-hovered index is now stale
         try:
             c.delete('all')
             c.update_idletasks()
@@ -584,6 +618,7 @@ class StatsTab:
             if not series:
                 c.create_text(w / 2, h / 2, text='No data for this filter',
                               fill=app.FG2, font=app.SANS)
+                self._chart_points = []
                 return
 
             dates  = [d for d, _ in series]
@@ -630,6 +665,15 @@ class StatsTab:
                               fill=app.ACC, width=2)
             for x, y in points:
                 c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=app.ACC, outline=app.ACC)
+
+            # Hover metadata — one entry per plotted day, consumed by
+            # _on_chart_motion()/_show_tooltip(). Never read by anything
+            # that triggers a redraw.
+            self._chart_points = [
+                {'x': x, 'y': y, 'date': dates[i], 'total': counts[i],
+                 'accounts': breakdown.get(dates[i], {})}
+                for i, (x, y) in enumerate(points)
+            ]
         except Exception as e:
             self._show_chart_error(str(e))
 
@@ -641,11 +685,91 @@ class StatsTab:
             write_debug_entry('stats_chart_error', {'chart': 'main', 'error': err_msg})
         except Exception:
             pass
+        self._chart_points = []
+        self._tooltip_last_idx = None
         self._chart_canvas.pack_forget()
         if getattr(self, '_chart_error_lbl', None) is None:
             self._chart_error_lbl = tk.Label(self._chart_frame, text="Chart unavailable on this system",
                                               font=self.app.SANS, bg=self.app.BG3, fg=self.app.FG2)
         self._chart_error_lbl.pack(expand=True, pady=30)
+
+    # ── Hover tooltip ─────────────────────────────────────────────────────────
+    def _on_chart_motion(self, event):
+        """<Motion> handler — nearest-point hit testing within a small pixel
+        radius. Never triggers a chart redraw; only touches tooltip-tagged
+        canvas items. Skips redrawing the tooltip entirely when the nearest
+        point hasn't changed since the last motion event, since <Motion>
+        fires very frequently and dense charts would otherwise flicker."""
+        if not self._chart_points:
+            self._hide_tooltip()
+            return
+        best_idx, best_dist = None, None
+        for i, p in enumerate(self._chart_points):
+            dx = event.x - p['x']
+            dy = event.y - p['y']
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist <= self._TOOLTIP_HIT_RADIUS and (best_dist is None or dist < best_dist):
+                best_idx, best_dist = i, dist
+        if best_idx is None:
+            self._hide_tooltip()
+            return
+        if best_idx == self._tooltip_last_idx:
+            return  # already showing this point — avoid redundant redraw
+        self._tooltip_last_idx = best_idx
+        self._show_tooltip(self._chart_points[best_idx])
+
+    def _on_chart_leave(self, _event):
+        self._hide_tooltip()
+
+    def _hide_tooltip(self):
+        if self._tooltip_last_idx is not None:
+            self._chart_canvas.delete('chart_tooltip')
+            self._tooltip_last_idx = None
+
+    def _show_tooltip(self, point):
+        """Draw the hover tooltip as plain Canvas items (tagged
+        'chart_tooltip', always cleared before redrawing — never
+        accumulates duplicates) near the point, clamped to stay inside the
+        chart's own bounds where possible."""
+        app = self.app
+        c = self._chart_canvas
+        c.delete('chart_tooltip')
+
+        date_line  = self._format_date_for_axis(point['date'])
+        total_line = f"Total: {point['total']}"
+        acct_lines = [f"• {acct}: {cnt}" for acct, cnt in
+                      sorted(point['accounts'].items(), key=lambda kv: -kv[1])]
+
+        pad = 8
+        line_gap = 4
+        rows = [(date_line, self._tooltip_font_b, app.FG)]
+        rows.append((total_line, self._tooltip_font_b, app.ACC2))
+        for line in acct_lines:
+            rows.append((line, self._tooltip_font, app.ACC))
+
+        box_w = max(self._tooltip_font_b.measure(date_line),
+                    self._tooltip_font_b.measure(total_line),
+                    max((self._tooltip_font.measure(l) for l in acct_lines), default=0)) + pad * 2
+        line_h = self._tooltip_font.metrics('linespace')
+        box_h = sum(line_h + line_gap for _ in rows) - line_gap + pad * 2
+
+        canvas_w, canvas_h = c.winfo_width(), c.winfo_height()
+        x0 = point['x'] + 12
+        y0 = point['y'] - box_h - 12
+        if x0 + box_w > canvas_w - 4:
+            x0 = point['x'] - box_w - 12  # flip to the left of the point
+        if y0 < 4:
+            y0 = point['y'] + 12          # flip below the point
+        x0 = max(4, min(x0, max(canvas_w - box_w - 4, 4)))
+        y0 = max(4, min(y0, max(canvas_h - box_h - 4, 4)))
+
+        c.create_rectangle(x0, y0, x0 + box_w, y0 + box_h,
+                            fill=app.BG2, outline=app.FG2, width=1, tags='chart_tooltip')
+        ty = y0 + pad
+        for text, font, color in rows:
+            c.create_text(x0 + pad, ty, text=text, font=font, fill=color,
+                           anchor='nw', tags='chart_tooltip')
+            ty += line_h + line_gap
 
     # ── Lower panels — rebuild only their own rows, not the whole tab ───────
     def _size_donut_to_panel(self, grouped):

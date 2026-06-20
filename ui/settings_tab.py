@@ -36,15 +36,18 @@ or pill/chip buttons) — agreed simplification over the mockups for lower
 risk, since Tkinter has no native toggle-switch widget.
 """
 
+import os
 import subprocess
 import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from py.discord import post_discord, bot_setup_discord, _embed
 from py.util    import now_str, DEBUG_LOG_FILE, is_frozen
-from py.config  import save_config, is_logs_root_account_folder
+from py.config  import save_config, is_logs_root_account_folder, CONFIG_FILE
+from py.platform_ops import open_path
 
 
 class SettingsTab:
@@ -158,28 +161,45 @@ class SettingsTab:
                  ).pack(anchor='w', pady=(2, 0))
 
     def _scrollable_body(self, parent):
-        """A vertically-scrollable container for a page's cards, matching
-        the original file's mouse-wheel-on-hover scroll behavior."""
+        """A container for a page's cards that behaves like a plain Frame
+        when content fits the available height — no visible scrollbar, no
+        scroll-panel feel — but automatically grows a scrollbar and enables
+        mousewheel scrolling if the window is shrunk small enough that
+        content would otherwise be clipped. The scrollbar is never packed
+        up front; _sync() adds/removes it based on a real measured-height
+        comparison, every time the page or window is resized."""
         app = self.app
         outer = tk.Frame(parent, bg=app.BG2)
         outer.pack(fill='both', expand=True, padx=24, pady=(0, 12))
         canvas = tk.Canvas(outer, bg=app.BG2, highlightthickness=0)
+        canvas.pack(side='left', fill='both', expand=True)
         sb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y')
-        canvas.pack(side='left', fill='both', expand=True)
         inner = tk.Frame(canvas, bg=app.BG2)
         win = canvas.create_window((0, 0), window=inner, anchor='nw')
+        state = {'sb_visible': False}
 
-        def _update_scroll(_e=None):
+        def _sync(_e=None):
             canvas.configure(scrollregion=canvas.bbox('all'))
-        inner.bind('<Configure>', _update_scroll)
-        canvas.bind('<Configure>', lambda e: canvas.itemconfig(win, width=e.width))
+            content_h = inner.winfo_reqheight()
+            visible_h = canvas.winfo_height()
+            needs_scroll = content_h > visible_h > 1
+            if needs_scroll and not state['sb_visible']:
+                sb.pack(side='right', fill='y')
+                state['sb_visible'] = True
+            elif not needs_scroll and state['sb_visible']:
+                sb.pack_forget()
+                state['sb_visible'] = False
+                canvas.yview_moveto(0)  # snap back to top once scrolling is no longer needed
+
+        inner.bind('<Configure>', _sync)
+        canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync()))
 
         def _on_enter(_):
-            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
-            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
-            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+            if state['sb_visible']:
+                canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+                canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
+                canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
 
         def _on_leave(_):
             canvas.unbind_all('<MouseWheel>')
@@ -260,37 +280,28 @@ class SettingsTab:
                      justify='left', anchor='w').pack(fill='x', pady=(0, 2))
         return var
 
-    def _disclosure(self, parent, icon, title):
-        """Collapsible info block (used only for Bot Setup Instructions).
-        Starts collapsed. No cfg persistence — this was session-only local
-        state before the redesign too, never saved."""
+    def _path_row_with_open(self, parent, label, path):
+        """A read-only path display with an Open button that hands off to
+        open_path() (platform_ops.py — xdg-open on Linux, os.startfile on
+        Windows). The button disables itself with a clean message rather
+        than silently no-op'ing if the path doesn't exist yet (e.g. debug
+        logging has never been turned on, so the file was never created)."""
         app = self.app
-        holder = tk.Frame(parent, bg=app.BG3)
-        holder.pack(fill='x', pady=(4, 12))
-        hdr = tk.Frame(holder, bg=app.BG4, cursor='hand2')
-        hdr.pack(fill='x')
-        tk.Label(hdr, text=icon, font=app.SANS, bg=app.BG4, fg=app.FG2
-                 ).pack(side='left', padx=(10, 6), pady=8)
-        tk.Label(hdr, text=title, font=app.SANSB, bg=app.BG4, fg=app.FG
-                 ).pack(side='left', pady=8)
-        chevron = tk.Label(hdr, text='▾', font=app.SANS, bg=app.BG4, fg=app.FG2)
-        chevron.pack(side='right', padx=10)
-        body = tk.Frame(holder, bg=app.BG3, padx=16)
-        state = {'open': False}
-
-        def _toggle(_e=None):
-            if state['open']:
-                body.pack_forget()
-                state['open'] = False
-                chevron.configure(text='▾')
-            else:
-                body.pack(fill='x', pady=(8, 10))
-                state['open'] = True
-                chevron.configure(text='▴')
-        hdr.bind('<Button-1>', _toggle)
-        for child in hdr.winfo_children():
-            child.bind('<Button-1>', _toggle)
-        return body
+        wrap = tk.Frame(parent, bg=app.BG3)
+        wrap.pack(fill='x', pady=(8, 0))
+        tk.Label(wrap, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
+                 ).pack(anchor='w')
+        row = tk.Frame(wrap, bg=app.BG3)
+        row.pack(fill='x', pady=(4, 0))
+        tk.Label(row, text=str(path), font=app.SANSS, bg=app.BG4, fg=app.FG2,
+                 anchor='w', padx=8, pady=4).pack(side='left', fill='x', expand=True)
+        exists = Path(path).exists()
+        tk.Button(row, text="📂 Open" if exists else "📂 Open (not created yet)",
+                  font=app.SANSS, bg=app.BG4, fg=app.ACC if exists else app.FG2,
+                  relief='flat', padx=8, pady=4,
+                  cursor='hand2' if exists else 'arrow',
+                  state='normal' if exists else 'disabled',
+                  command=lambda: open_path(path)).pack(side='left', padx=(6, 0))
 
     def _warning_banner(self, parent, text):
         app = self.app
@@ -385,13 +396,8 @@ class SettingsTab:
         _, body = self._card(right, '🐛', 'Debug')
         self._row_bool(body, "Enable debug logging", 'debug', default=False)
         self._row_bool(body, "Enable anonymous usage stats", 'enable_usage_stats', default=True)
-        path_row = tk.Frame(body, bg=app.BG3)
-        path_row.pack(fill='x', pady=(8, 0))
-        tk.Label(path_row, text="Session debug file:", font=app.SANSS,
-                 bg=app.BG3, fg=app.FG2).pack(anchor='w')
-        tk.Label(path_row, text=str(DEBUG_LOG_FILE), font=app.SANSS,
-                 bg=app.BG4, fg=app.FG2, anchor='w', padx=8, pady=4
-                 ).pack(fill='x', pady=(4, 0))
+        self._path_row_with_open(body, "Session debug file:", DEBUG_LOG_FILE)
+        self._path_row_with_open(body, "Config file:", CONFIG_FILE)
 
     # ── Page 2: Discord Alerts ───────────────────────────────────────────────
     def _build_discord_page(self, parent):
@@ -415,9 +421,14 @@ class SettingsTab:
         self._bot_setup_lbl = tk.Label(status_col, text="", font=app.SANSS, bg=app.BG3,
                                        fg=app.FG2, wraplength=220, justify='left')
         self._bot_setup_lbl.pack(anchor='w', pady=(0, 8))
-        tk.Button(status_col, text="🤖  Run Bot Setup", font=app.SANSB,
+        btn_row = tk.Frame(status_col, bg=app.BG3)
+        btn_row.pack(anchor='w')
+        tk.Button(btn_row, text="🤖  Run Bot Setup", font=app.SANSB,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,
-            cursor='hand2', command=self._manual_bot_setup).pack(anchor='w')
+            cursor='hand2', command=self._manual_bot_setup).pack(side='left')
+        tk.Button(btn_row, text="📖  Show Setup Guide", font=app.SANS,
+            bg=app.BG3, fg=app.FG2, relief='flat', padx=8, pady=6,
+            cursor='hand2', command=self._show_setup_guide_modal).pack(side='left', padx=(8, 0))
 
         if app.cfg.get('bot_setup_done'):
             ch_ids = app.cfg.get('bot_channel_ids', {})
@@ -426,27 +437,9 @@ class SettingsTab:
                 text=f"✅ Setup complete — {len(ch_ids)} channels, {len(th_ids)} account(s) ready.",
                 fg=app.GREEN)
 
-        # ── Bot Setup Instructions (collapsible) ────────────────────────────
-        inst_body = self._disclosure(inner, 'ⓘ', 'Bot Setup Instructions & Permissions')
-        tk.Label(inst_body,
-            text="Setup:\n"
-                 "1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
-                 "2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
-                 "3. OAuth2 → URL Generator → Scope: bot → Permissions: Send Messages,\n"
-                 "   Read Message History, Manage Channels, Manage Webhooks,\n"
-                 "   View Channels, Embed Links, Attach Files, Create Public Threads,\n"
-                 "   Send Messages in Threads, Manage Threads, Use Slash Commands\n"
-                 "4. Copy the generated URL → open in browser → select server → Authorize\n"
-                 "5. Right-click your server icon → Copy Server ID → paste above\n"
-                 "6. Right-click your name in Discord → Copy User ID → paste in Discord Mention ID above\n"
-                 "7. Hit Save then '🤖 Run Bot Setup'\n\n"
-                 "Slash commands (registered automatically on first run):\n"
-                 "  /ss [account]                    — screenshot(s) → account monitor thread\n"
-                 "  /s                               — status of all accounts → #monitor channel\n"
-                 "  /force <account> <action> [amt]  — force a skill, action, or time adjustment;\n"
-                 "                                      amt (1-20) only applies to -10m / +10m\n"
-                 "Tip: /ss and /force inside an account thread target that account only.",
-            font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left').pack(anchor='w')
+        # Bot Setup Instructions now live in a themed popup (Show Setup
+        # Guide above), not inline — keeps this page compact by default so
+        # it never needs scrolling on its own. See _show_setup_guide_modal.
 
         # ── Webhooks ─────────────────────────────────────────────────────────
         _, body = self._card(inner, '🔗', 'Webhooks (optional fallback)',
@@ -582,13 +575,13 @@ class SettingsTab:
             ("Death",      'ss_hide_paint_death'),
             ("Level Up",   'ss_hide_paint_levelup'),
         ]
-        HP_COLS = 4
+        HP_COLS = 6  # 11 entries -> 2 rows (6 + 5) instead of 3 (4+4+3) — more compact
         for i, (lbl, key) in enumerate(hp_entries):
             row_i, col = divmod(i, HP_COLS)
             cell = tk.Frame(hp_table, bg=app.BG3)
-            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 18), pady=3)
+            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=3)
             var = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
-            tk.Checkbutton(cell, text=lbl, variable=var, font=app.SANS,
+            tk.Checkbutton(cell, text=lbl, variable=var, font=app.SANSS,
                 bg=app.BG3, fg=app.FG2, activebackground=app.BG3, activeforeground=app.ACC,
                 selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
             self._vars[key] = var
@@ -795,7 +788,6 @@ class SettingsTab:
         path = self._vars['logs_root'].get().strip()
         if is_logs_root_account_folder(path):
             try:
-                from pathlib import Path
                 parent = str(Path(path).parent)
             except Exception:
                 parent = "the parent Logs folder"
@@ -813,7 +805,6 @@ class SettingsTab:
     def _browse_dir(self):
         d = filedialog.askdirectory(title="Select DreamBot log folder")
         if d:
-            import os
             self._vars['logs_root'].set(os.path.normpath(d))
 
     def _test_webhooks(self):
@@ -833,6 +824,78 @@ class SettingsTab:
             tested += 1
         if not tested:
             app._log("⚠ No webhooks configured to test")
+
+    def _show_setup_guide_modal(self):
+        """Themed popup window with the full Bot Setup instructions —
+        purely informational, never touches bot setup state and never
+        runs setup itself. Keeps the main Discord page compact (see
+        _build_discord_page) since this content used to live inline."""
+        app = self.app
+        win = tk.Toplevel(app)
+        win.title("Bot Setup Instructions & Permissions")
+        win.configure(bg=app.BG2)
+        win.transient(app)
+        win.geometry("640x520")
+        win.minsize(420, 300)
+        win.bind('<Escape>', lambda e: win.destroy())
+
+        header = tk.Frame(win, bg=app.BG2, padx=16, pady=12)
+        header.pack(fill='x')
+        tk.Label(header, text="ⓘ  Bot Setup Instructions & Permissions", font=app.SANSB,
+                 bg=app.BG2, fg=app.FG).pack(anchor='w')
+
+        body_outer = tk.Frame(win, bg=app.BG2, padx=16)
+        body_outer.pack(fill='both', expand=True, pady=(0, 12))
+        canvas = tk.Canvas(body_outer, bg=app.BG3, highlightthickness=0)
+        sb = ttk.Scrollbar(body_outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        inner = tk.Frame(canvas, bg=app.BG3, padx=16, pady=14)
+        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+        inner.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        canvas.bind('<Configure>', lambda e: canvas.itemconfig(win_id, width=e.width))
+
+        def _on_enter(_):
+            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+
+        def _on_leave(_):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+        canvas.bind('<Enter>', _on_enter)
+        canvas.bind('<Leave>', _on_leave)
+
+        tk.Label(inner, justify='left', anchor='w', font=app.SANSS, bg=app.BG3, fg=app.FG2,
+            text="Setup:\n"
+                 "1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
+                 "2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
+                 "3. OAuth2 → URL Generator → Scope: bot → Permissions: Send Messages,\n"
+                 "   Read Message History, Manage Channels, Manage Webhooks,\n"
+                 "   View Channels, Embed Links, Attach Files, Create Public Threads,\n"
+                 "   Send Messages in Threads, Manage Threads, Use Slash Commands\n"
+                 "4. Copy the generated URL → open in browser → select server → Authorize\n"
+                 "5. Right-click your server icon → Copy Server ID → paste above\n"
+                 "6. Right-click your name in Discord → Copy User ID → paste in Discord Mention ID above\n"
+                 "7. Hit Save then '🤖 Run Bot Setup'\n\n"
+                 "Slash commands (registered automatically on first run):\n"
+                 "  /ss [account]                    — screenshot(s) → account monitor thread\n"
+                 "  /s                               — status of all accounts → #monitor channel\n"
+                 "  /force <account> <action> [amt]  — force a skill, action, or time adjustment;\n"
+                 "                                      amt (1-20) only applies to -10m / +10m\n"
+                 "Tip: /ss and /force inside an account thread target that account only."
+            ).pack(anchor='w', fill='x')
+
+        footer = tk.Frame(win, bg=app.BG2, padx=16, pady=12)
+        footer.pack(fill='x', side='bottom')
+        tk.Button(footer, text="Close", font=app.SANSB, bg=app.BG4, fg=app.ACC,
+                  relief='flat', padx=14, pady=6, cursor='hand2',
+                  command=win.destroy).pack(side='right')
+
+        win.grab_set()
+        win.focus_set()
 
     def _manual_bot_setup(self):
         self.save()
