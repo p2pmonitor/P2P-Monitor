@@ -26,6 +26,7 @@ Adds, purely additively:
   content, no change to how lines get classified or colored.
 """
 import tkinter as tk
+import threading
 import time
 from datetime import datetime
 from tkinter import ttk
@@ -37,6 +38,7 @@ class MonitorTab:
         self._last_account_rows = []
         self._log_line_count_at_last_search = 0
         self._search_debounce_id = None
+        self._accounts_refresh_in_flight = False  # guards against overlapping background fetches
         self._build(parent_frame)
         self.refresh_session_overview()
         self.refresh_highlights()
@@ -247,17 +249,44 @@ class MonitorTab:
         self._hl_accounts_sub.pack(fill='x', anchor='w')
 
     def refresh_highlights(self):
-        """Refreshes from app._highlights (pure dict read, no I/O) and one
-        watcher.get_account_rows() call — only triggered by the existing
-        event-driven debounce (App._debounced_refresh_tick) or once at
-        Start, never polled on a timer or on tab-switch."""
+        """app._highlights is a pure dict read (no I/O) — but
+        watcher.get_account_rows() does real filesystem work (checking
+        every monitored account's log directory for rotation), so that
+        part always runs on a background thread, never on the caller's
+        thread. This matters because the caller is sometimes
+        App._debounced_refresh_tick(), which runs on the main/Tk thread —
+        calling get_account_rows() directly from there would freeze the
+        whole app for however long that disk check takes. _do() fetches
+        the rows off-thread, then hands them to _apply_highlights_data()
+        via app.after(0, ...) for the actual widget updates (Tkinter
+        widgets aren't thread-safe, so that part must run on the main
+        thread). Guarded by _accounts_refresh_in_flight — same pattern as
+        StatusTab.refresh()/push_refresh() — so a fast burst of events
+        (e.g. the startup catchup scan) can't pile up overlapping
+        background checks."""
         app = self.app
-        rows = []
-        if app.watcher:
+        if not app.watcher:
+            self._apply_highlights_data([])
+            return
+        if self._accounts_refresh_in_flight:
+            return
+        self._accounts_refresh_in_flight = True
+
+        def _do():
             try:
                 rows = app.watcher.get_account_rows()
+                app.after(0, lambda: self._apply_highlights_data(rows))
             except Exception:
-                rows = []
+                app.after(0, lambda: self._apply_highlights_data([]))
+            finally:
+                self._accounts_refresh_in_flight = False
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_highlights_data(self, rows):
+        """Main-thread-only: applies already-fetched account rows to the
+        Active Accounts / Highlights widgets. Never does I/O itself —
+        rows are always handed in by refresh_highlights()'s background
+        thread."""
         self._last_account_rows = rows
         self._render_active_accounts(rows)
         self._hl_accounts_val.configure(
