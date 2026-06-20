@@ -1,5 +1,36 @@
-"""ui/history_tab.py — History tab for P2P Monitor"""
-import subprocess
+"""
+ui/history_tab.py — History tab for P2P Monitor (v2.0.0-beta.11 redesign)
+
+Hybrid architecture, deliberately: account headers (few — one per
+monitored account) become real Frame-based cards with avatar circles and
+genuine Summary/Runtime Stats buttons, matching the mockup. Event rows
+*within* each account (potentially hundreds) stay a per-account
+ttk.Treeview — rebuilding those as individual Tkinter widgets would risk
+exactly the "large history freezes the UI" regression this checkpoint
+explicitly warns against. Treeview tag-coloring approximates "badges" as
+colored text, not literal rounded pills — a deliberate, documented
+simplification of the mockup, same call made for Settings/Monitor/Status.
+
+Preserves exactly (same public names, same signatures, same callers in
+p2p_monitor.py / ui/status_tab.py):
+  - load(force_full=False)   — reload cache from disk, rebuild display
+  - append_entry(account, entry) — live append + debounced rebuild
+  - focus_account(account)   — collapse all, expand+scroll to one account
+  - on_tab_shown()           — reload on tab switch
+
+Untouched: py/history.py (file format, writing, parsing, dedupe, backfill,
+runtime-stats computation) and the date-range filter's logic/validation
+(MM/DD/YY parsing, 7-day max, auto-sync From->To) — only its colors/fonts
+changed. Column-width persistence (hist_col_widths) is preserved per
+account-table column, same config key.
+
+Adds, purely as a presentation-layer filter over the already-loaded
+in-memory cache (no new disk reads): a search box (matches account name,
+task, or activity/details) and an event-type filter dropdown, plus a
+per-event Severity classification derived from the existing `etype` field
+(Error/Success/Info) — none of this changes event semantics or what gets
+written to disk.
+"""
 import tkinter as tk
 from datetime import datetime, timedelta
 from tkinter import ttk
@@ -12,100 +43,149 @@ from py.util    import fmt_ts
 
 
 class HistoryTab:
+    TYPE_FILTER_OPTIONS = [
+        ("All Event Types", None),
+        ("Task",          'task'),
+        ("Quest",         'quest_completed'),
+        ("Chat",          'chat'),
+        ("Error",         'error'),
+        ("Drop",          'drop'),
+        ("Death",         'death'),
+        ("Level Up",      'levelup'),
+        ("Script Event",  'script_event'),
+        ("Slayer Task",   'slayer_task'),
+        ("Slayer Complete", 'slayer_complete'),
+        ("Break",         'break'),
+    ]
+
     def __init__(self, app, parent_frame):
         self.app              = app
-        self._filter_date     = None   # None or (ds_from, ds_to)
-        self._cache           = {}     # account -> list of entry dicts
-        self._open_accounts   = set()
-        self._raw_times       = {}     # tree item id -> raw timestamp str
-        self._summary         = {}     # parent item id -> summary string
-        self._sort_col        = 'time'
-        self._sort_rev        = False
-        self._debounce_id     = None
-        self._initial_load    = True
+        self._filter_date      = None   # None or (ds_from, ds_to)
+        self._cache            = {}     # account -> list of entry dicts
+        self._open_accounts    = set()
+        self._account_widgets  = {}     # account -> dict of widget refs
+        self._sort_col         = 'time'
+        self._sort_rev         = False
+        self._debounce_id      = None
+        self._initial_load     = True
+        self._search_debounce_id = None
         self._build(parent_frame)
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self, f):
         app = self.app
+        root = tk.Frame(f, bg=app.BG2, padx=16, pady=16)
+        root.pack(fill='both', expand=True)
 
-        # Header
-        hdr = tk.Frame(f, bg=app.BG2, padx=12, pady=8)
-        hdr.pack(fill='x')
-        tk.Label(hdr, text="Event History  (last 24h)", font=app.MONOL,
-                 bg=app.BG2, fg=app.ACC).pack(side='left')
-        self._date_lbl = tk.Label(hdr, text="", font=app.MONO, bg=app.BG2, fg=app.YEL)
-        self._date_lbl.pack(side='left', padx=(12, 0))
+        hdr = tk.Frame(root, bg=app.BG2)
+        hdr.pack(fill='x', pady=(0, 4))
+        tk.Label(hdr, text="Event History", font=(app.SANS[0], 18, 'bold'),
+                 bg=app.BG2, fg=app.FG).pack(anchor='w')
+        tk.Label(hdr, text="Recent account activity and archived events",
+                 font=app.SANS, bg=app.BG2, fg=app.FG2).pack(anchor='w')
 
-        # Toolbar
-        tb = tk.Frame(f, bg=app.BG3, padx=12, pady=6)
-        tb.pack(fill='x')
-        tk.Button(tb, text="Expand All", font=app.MONO, bg=app.BG4, fg=app.FG2,
-            relief='flat', padx=8, pady=3, cursor='hand2',
+        toolbar = tk.Frame(root, bg=app.BG2, pady=10)
+        toolbar.pack(fill='x')
+        tk.Button(toolbar, text="⤓ Expand All", font=app.SANSS, bg=app.BG4, fg=app.FG2,
+            relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._expand_all).pack(side='left', padx=(0, 6))
-        tk.Button(tb, text="Collapse All", font=app.MONO, bg=app.BG4, fg=app.FG2,
-            relief='flat', padx=8, pady=3, cursor='hand2',
+        tk.Button(toolbar, text="⤒ Collapse All", font=app.SANSS, bg=app.BG4, fg=app.FG2,
+            relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._collapse_all).pack(side='left', padx=(0, 6))
-        hist_folder_btn = tk.Button(tb, text="📂 History Folder", font=app.MONO,
-            bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=3, cursor='hand2',
-            command=lambda: _open_path(HISTORY_DIR))
-        hist_folder_btn.pack(side='left', padx=(0, 6))
-        self._date_btn = tk.Button(tb, text="📅 Filter Date", font=app.MONO,
-            bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=3, cursor='hand2',
+        tk.Button(toolbar, text="📂 Open History Folder", font=app.SANSS,
+            bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=4, cursor='hand2',
+            command=lambda: _open_path(HISTORY_DIR)).pack(side='left', padx=(0, 6))
+
+        self._date_btn = tk.Button(toolbar, text="📅 Filter Date", font=app.SANSS,
+            bg=app.BG4, fg=app.FG2, relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._toggle_date_picker)
-        self._date_btn.pack(side='right', padx=(6, 0))
+        self._date_btn.pack(side='right')
+        self._date_lbl = tk.Label(toolbar, text="", font=app.SANSS, bg=app.BG2, fg=app.YEL)
+        self._date_lbl.pack(side='right', padx=(0, 8))
 
-        # Treeview
-        cols = ('time', 'type', 'value', 'activity')
-        self._tree = ttk.Treeview(f, columns=cols, show='tree headings', height=22)
-        col_defaults = {'#0': 220, 'time': 130, 'type': 100, 'value': 260, 'activity': 500}
-        saved_widths = app.cfg.get('hist_col_widths', {})
-        self._tree.heading('#0', text='Account')
-        self._tree.column('#0', width=saved_widths.get('#0', 220), stretch=False, anchor='w')
-        for col, lbl in [('time', 'Time'), ('type', 'Type'),
-                          ('value', 'Task'), ('activity', 'Activity')]:
-            self._tree.heading(col, text=lbl, command=lambda c=col: self._sort(c))
-            self._tree.column(col, width=saved_widths.get(col, col_defaults[col]),
-                              stretch=False, anchor='w')
+        self._type_filter_var = tk.StringVar(value="All Event Types")
+        type_cb = ttk.Combobox(toolbar, textvariable=self._type_filter_var, state='readonly',
+                                font=app.SANSS, width=14,
+                                values=[lbl for lbl, _ in self.TYPE_FILTER_OPTIONS])
+        type_cb.pack(side='right', padx=(0, 8))
+        type_cb.bind('<<ComboboxSelected>>', lambda e: self._apply_filters())
 
-        for tag, col in [
-            ('quest_completed', '#88ffbb'),
-            ('task',           app.ACC),
-            ('break',          app.FG2),
-            ('error',          app.RED),
-            ('drop',           '#00ff88'),
-            ('slayer_complete', '#88ffbb'),
-            ('slayer_skip',    app.RED),
-            ('death',          app.RED),
-            ('levelup',        '#00ff88'),
-            ('script_event',   '#ff8888'),
-            ('summary',        app.FG2),
-            ('account',        app.ACC),
-        ]:
-            kw = {}
-            if tag == 'account':
-                kw = {'font': app.MONOB, 'background': app.BG4}
-            self._tree.tag_configure(tag, foreground=col, **kw)
+        self._search_var = tk.StringVar(value="")
+        search_entry = tk.Entry(toolbar, textvariable=self._search_var, font=app.SANSS,
+                                 bg=app.BG4, fg=app.FG, relief='flat', insertbackground=app.ACC,
+                                 width=24)
+        search_entry.pack(side='right', padx=(0, 8), ipady=3)
+        self._search_placeholder(search_entry)
+        self._search_var.trace_add('write', lambda *_: self._debounce_search())
 
-        scr  = ttk.Scrollbar(f, orient='vertical',   command=self._tree.yview)
-        self._tree.configure(yscrollcommand=scr.set)
-        scr.pack(side='right', fill='y')
-        self._tree.pack(fill='both', expand=True)
+        outer = tk.Frame(root, bg=app.BG2)
+        outer.pack(fill='both', expand=True)
+        canvas = tk.Canvas(outer, bg=app.BG2, highlightthickness=0)
+        canvas.pack(side='left', fill='both', expand=True)
+        self._scroll_canvas = canvas
+        sb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        self._scrollbar = sb
+        self._accounts_frame = tk.Frame(canvas, bg=app.BG2)
+        win = canvas.create_window((0, 0), window=self._accounts_frame, anchor='nw')
 
-        self._tree.bind('<ButtonRelease-1>', self._on_col_resize)
-        self._tree.bind('<<TreeviewOpen>>',  self._on_expand)
-        self._tree.bind('<<TreeviewClose>>', self._on_collapse)
-        self._tree.bind('<Double-1>',        self._on_double_click)
-        self._tree.bind('<Button-1>',        self._on_click)
-        self._tree.bind('<Motion>',          self._on_motion)
-        self._tree.bind('<Leave>',           self._hide_tooltip)
-        self._tooltip_win  = None
-        self._tooltip_item = None
-        self._tooltip_col  = None
+        def _sync_scroll(_e=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            content_h = self._accounts_frame.winfo_reqheight()
+            visible_h = canvas.winfo_height()
+            needs_scroll = content_h > visible_h > 1
+            if needs_scroll and not sb.winfo_ismapped():
+                sb.pack(side='right', fill='y')
+            elif not needs_scroll and sb.winfo_ismapped():
+                sb.pack_forget()
+                canvas.yview_moveto(0)
+        self._accounts_frame.bind('<Configure>', _sync_scroll)
+        canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
 
-    # ── Public API (called by App) ─────────────────────────────────────────────
+        def _on_enter(_):
+            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+        def _on_leave(_):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+        canvas.bind('<Enter>', _on_enter)
+        canvas.bind('<Leave>', _on_leave)
+
+        self._empty_lbl = tk.Label(self._accounts_frame,
+            text="No history yet — events will appear here once the monitor starts logging.",
+            font=app.SANS, bg=app.BG2, fg=app.FG2)
+
+        footer = tk.Frame(root, bg=app.BG2, pady=6)
+        footer.pack(fill='x', side='bottom')
+        tk.Label(footer,
+            text="ⓘ  Click an account row to expand/collapse  •  Double-click an event for full details",
+            font=app.SANSS, bg=app.BG2, fg=app.FG2).pack()
+
+    def _search_placeholder(self, entry):
+        app = self.app
+        entry.configure(fg=app.FG2)
+        entry.insert(0, "Search accounts, tasks, activities...")
+        def _on_focus_in(_e):
+            if entry.get() == "Search accounts, tasks, activities...":
+                entry.delete(0, 'end')
+                entry.configure(fg=app.FG)
+        def _on_focus_out(_e):
+            if not entry.get():
+                entry.configure(fg=app.FG2)
+                entry.insert(0, "Search accounts, tasks, activities...")
+        entry.bind('<FocusIn>', _on_focus_in)
+        entry.bind('<FocusOut>', _on_focus_out)
+
+    def _debounce_search(self):
+        if self._search_debounce_id:
+            self.app.after_cancel(self._search_debounce_id)
+        self._search_debounce_id = self.app.after(250, self._apply_filters)
+
+    # ── Public API (called by App / Status tab) — unchanged signatures ─────────
     def load(self, force_full=False):
-        """Reload cache from disk and rebuild tree."""
+        """Reload cache from disk and rebuild the display."""
         self._debounce_id = None
         if self._filter_date:
             ds_from, ds_to = self._filter_date
@@ -118,12 +198,12 @@ class HistoryTab:
             cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
             for acc in load_history_accounts():
                 self._cache[acc] = load_history_tail(acc, cutoff)
-        self._rebuild_tree()
+        self._rebuild_accounts()
         if self._initial_load:
             self._initial_load = False
 
     def append_entry(self, account, entry):
-        """Append a new live entry and schedule a debounced tree rebuild."""
+        """Append a new live entry and schedule a debounced rebuild."""
         cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
         if account not in self._cache:
             self._cache[account] = []
@@ -133,266 +213,398 @@ class HistoryTab:
         if not self._filter_date:
             if self._debounce_id:
                 self.app.after_cancel(self._debounce_id)
-            self._debounce_id = self.app.after(5000, self._rebuild_tree)
+            self._debounce_id = self.app.after(5000, self._rebuild_accounts)
 
     def focus_account(self, account):
-        """Collapse all accounts, expand the target account — called from Status tab double-click."""
-        for item in self._tree.get_children():
-            self._tree.item(item, open=False)
-        for item in self._tree.get_children():
-            label = self._tree.item(item, 'text') or ''
-            if account.lower() in label.lower():
-                self._tree.item(item, open=True)
-                self._tree.see(item)
-                break
+        """Collapse all accounts, expand+scroll to the target — called from
+        Status tab's double-click-account-name action."""
+        self._open_accounts = set()
+        for acc in self._cache:
+            if account.lower() in acc.lower():
+                self._open_accounts.add(acc)
+        self._rebuild_accounts()
+        w = self._account_widgets.get(account) or next(
+            (v for k, v in self._account_widgets.items() if account.lower() in k.lower()), None)
+        if w:
+            self.app.after(50, lambda: self._scroll_to(w['header']))
+
+    def _scroll_to(self, widget):
+        try:
+            self._scroll_canvas.update_idletasks()
+            y = widget.winfo_y()
+            total = max(self._accounts_frame.winfo_height(), 1)
+            self._scroll_canvas.yview_moveto(y / total)
+        except Exception:
+            pass
 
     def on_tab_shown(self):
         """Called when the History tab is selected — reload from disk."""
         self.load()
 
-    # ── Tree rebuild ───────────────────────────────────────────────────────────
-    def _rebuild_tree(self):
-        self._debounce_id = None
+    # ── Filtering helpers (pure in-memory — no disk reads) ──────────────────────
+    def _get_search_text(self):
+        s = self._search_var.get().strip().lower()
+        return '' if s == "search accounts, tasks, activities..." else s
+
+    @staticmethod
+    def _row_matches_search(r, search):
+        return (search in str(r.get('value', '')).lower()
+                or search in str(r.get('activity', '')).lower()
+                or search in str(r.get('type', '')).lower())
+
+    def _apply_filters(self):
+        self._rebuild_accounts()
+
+    def _severity(self, etype):
+        if etype in ('error', 'death'):
+            return 'Error'
+        if etype in ('levelup', 'quest_completed', 'drop', 'slayer_complete'):
+            return 'Success'
+        return 'Info'
+
+    def _type_color(self, etype):
         app = self.app
-        for item in self._tree.get_children():
-            self._tree.delete(item)
-        self._raw_times = {}
-        self._summary   = {}
-        was_open = set(self._open_accounts)
-        self._open_accounts = set()
+        return {
+            'task':            app.ACC,
+            'quest_completed': app.PUR,
+            'chat':            app.YEL,
+            'error':           app.RED,
+            'drop':            app.GREEN,
+            'death':           app.RED,
+            'levelup':         app.ACC2,
+            'script_event':    app.FG2,
+            'slayer_task':     app.PUR,
+            'slayer_complete': app.GREEN,
+            'slayer_skip':     app.RED,
+            'break':           app.FG2,
+        }.get(etype, app.FG2)
 
+    # ── Rebuild ──────────────────────────────────────────────────────────────────
+    def _rebuild_accounts(self):
+        """Always a full rebuild of the (few) account header cards — simplest
+        correctness guarantee against duplicate widgets, and cheap since
+        this only runs on load()/on_tab_shown()/a 5s-debounced live append,
+        never on every single event. Event ROWS within an account are only
+        populated into that account's Treeview if it's actually expanded —
+        a collapsed account with thousands of events costs nothing."""
+        self._debounce_id = None
+        for w in self._accounts_frame.winfo_children():
+            if w is not self._empty_lbl:
+                w.destroy()
+        self._account_widgets = {}
+
+        search = self._get_search_text()
+        type_label = self._type_filter_var.get()
+        type_filter = dict(self.TYPE_FILTER_OPTIONS).get(type_label)
+        any_filter_active = bool(search) or bool(type_filter)
+
+        visible = []
         for acc in sorted(self._cache.keys()):
-            entries = sorted(
-                enumerate(self._cache[acc]),
-                key=lambda x: (x[1].get('time', ''), x[0]),
-                reverse=True)
-            entries = [r for _, r in entries]
-            counts  = {}
-            for r in entries:
-                t = r.get('type', '')
-                if t and t != 'scan':
-                    counts[t] = counts.get(t, 0) + 1
+            entries = [r for r in self._cache[acc] if r.get('type') != 'scan']
+            if type_filter:
+                entries = [r for r in entries if r.get('type') == type_filter]
+            account_name_matches = bool(search) and search in acc.lower()
+            if search and not account_name_matches:
+                entries = [r for r in entries if self._row_matches_search(r, search)]
+            if any_filter_active and not entries and not account_name_matches:
+                continue  # this account has nothing matching the active filter(s)
+            visible.append((acc, entries))
 
-            if self._filter_date:
-                ds_from, ds_to = self._filter_date
-                from datetime import datetime as _dt
-                try:
-                    disp_from = _dt.strptime(ds_from, '%Y-%m-%d').strftime('%m/%d/%y')
-                    disp_to   = _dt.strptime(ds_to,   '%Y-%m-%d').strftime('%m/%d/%y')
-                    lbl = disp_from if ds_from == ds_to else f"{disp_from} → {disp_to}"
-                except Exception:
-                    lbl = ds_from if ds_from == ds_to else f"{ds_from} → {ds_to}"
-                count_label = f"{len(entries)} entries ({lbl})"
-            else:
-                count_label = f"{len(entries)} entries (24h)"
+        self._empty_lbl.pack_forget()
+        if not visible:
+            self._empty_lbl.pack(pady=30)
+            return
 
-            parent = self._tree.insert('', 'end',
-                text=f"  {acc}",
-                values=(count_label, '', '', '📊 Summary   📈 Runtime Stats'),
-                tags=('account',), open=(acc in was_open))
+        for acc, entries in visible:
+            self._account_widgets[acc] = self._build_account_card(acc, entries)
 
-            parts = []
-            for label, keys in [
-                ('Quests', ['quest_completed', 'quest_started']), ('Tasks', ['task']),   ('Chats', ['chat']),
-                ('Errors', ['error']), ('Drops', ['drop']),   ('Deaths', ['death']),
-                ('Levels', ['levelup']),
-            ]:
-                n = sum(counts.get(k, 0) for k in keys)
-                parts.append(f"{label}: {n}")
-            self._summary[parent] = '  │  '.join(parts)
+    def _build_account_card(self, acc, entries):
+        app = self.app
+        card = tk.Frame(self._accounts_frame, bg=app.BG3)
+        card.pack(fill='x', pady=(0, 8))
 
-            for r in entries:
-                etype = r.get('type', '')
-                if etype == 'scan':
-                    continue
-                raw_time = r.get('time', '')
-                tag = etype if etype in (
-                    'quest_completed', 'task', 'slayer_task', 'error', 'drop',
-                    'slayer_complete', 'slayer_skip', 'break',
-                    'death', 'levelup', 'script_event') else 'info'
-                iid = self._tree.insert(parent, 'end',
-                    values=(fmt_ts(raw_time), etype, r.get('value', ''), r.get('activity', '')),
-                    tags=(tag,))
-                self._raw_times[iid] = raw_time
+        is_open = acc in self._open_accounts
+        period_lbl = self._period_label()
+        count_lbl = f"{len(entries)} events ({period_lbl})"
+        last_event_ts = fmt_ts(entries[0]['time']) if entries else '—'
 
-            if acc in was_open:
-                self._open_accounts.add(acc)
+        header = tk.Frame(card, bg=app.BG3, padx=12, pady=10, cursor='hand2')
+        header.pack(fill='x')
 
-    # ── Sort ───────────────────────────────────────────────────────────────────
-    def _sort(self, col):
+        avatar = tk.Canvas(header, width=30, height=30, bg=app.BG3, highlightthickness=0)
+        avatar.pack(side='left', padx=(0, 10))
+        avatar.create_oval(2, 2, 28, 28, fill=app.ACC, outline=app.ACC)
+        avatar.create_text(15, 15, text=(acc[:1] or '?').upper(), fill=app.BG, font=app.SANSB)
+
+        chevron = tk.Label(header, text=('▾' if is_open else '▸'), font=app.SANS,
+                            bg=app.BG3, fg=app.FG2)
+        chevron.pack(side='left', padx=(0, 8))
+
+        name_lbl = tk.Label(header, text=acc, font=app.SANSB, bg=app.BG3, fg=app.FG, anchor='w')
+        name_lbl.pack(side='left')
+
+        meta = tk.Frame(header, bg=app.BG3)
+        meta.pack(side='left', padx=(24, 0))
+        tk.Label(meta, text=count_lbl, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w'
+                 ).pack(anchor='w')
+        tk.Label(meta, text=f"Events ({period_lbl})", font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                 anchor='w').pack(anchor='w')
+
+        meta2 = tk.Frame(header, bg=app.BG3)
+        meta2.pack(side='left', padx=(24, 0))
+        tk.Label(meta2, text=last_event_ts, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w'
+                 ).pack(anchor='w')
+        tk.Label(meta2, text="Last event", font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                 anchor='w').pack(anchor='w')
+
+        btn_row = tk.Frame(header, bg=app.BG3)
+        btn_row.pack(side='right')
+        summary_btn = tk.Button(btn_row, text="📊 Summary", font=app.SANSS,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=8, pady=4, cursor='hand2',
+            command=lambda a=acc, e=entries: self._show_summary_popup(a, e))
+        summary_btn.pack(side='left', padx=(0, 6))
+        runtime_btn = tk.Button(btn_row, text="📈 Runtime Stats", font=app.SANSS,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=8, pady=4, cursor='hand2',
+            command=lambda a=acc: self._show_runtime_stats_popup(a))
+        runtime_btn.pack(side='left')
+
+        for w in (header, avatar, chevron, name_lbl, meta, meta2):
+            w.bind('<Button-1>', lambda e, a=acc: self._toggle_account(a))
+
+        body_outer = tk.Frame(card, bg=app.BG3, padx=12)
+        tree = None
+        if is_open:
+            body_outer.pack(fill='x', pady=(0, 10))
+            tree = self._build_event_tree(body_outer, acc, entries)
+
+        return {'card': card, 'header': header, 'chevron': chevron,
+                'body_outer': body_outer, 'tree': tree}
+
+    def _period_label(self):
+        if not self._filter_date:
+            return "24h"
+        ds_from, ds_to = self._filter_date
+        try:
+            disp_from = datetime.strptime(ds_from, '%Y-%m-%d').strftime('%m/%d/%y')
+            disp_to   = datetime.strptime(ds_to,   '%Y-%m-%d').strftime('%m/%d/%y')
+            return disp_from if ds_from == ds_to else f"{disp_from} → {disp_to}"
+        except Exception:
+            return ds_from if ds_from == ds_to else f"{ds_from} → {ds_to}"
+
+    def _toggle_account(self, acc):
+        if acc in self._open_accounts:
+            self._open_accounts.discard(acc)
+        else:
+            self._open_accounts.add(acc)
+        self._rebuild_accounts()
+
+    # ── Per-account event tree ───────────────────────────────────────────────────
+    COL_DEFAULTS = {'time': 110, 'type': 110, 'value': 220, 'activity': 420, 'severity': 90}
+
+    def _build_event_tree(self, parent, acc, entries):
+        app = self.app
+        saved_widths = app.cfg.get('hist_col_widths', {})
+        cols = ('time', 'type', 'value', 'activity', 'severity')
+        tree = ttk.Treeview(parent, columns=cols, show='headings',
+                             height=min(max(len(entries), 3), 18))
+        for col, lbl in [('time', 'Time'), ('type', 'Type'), ('value', 'Task'),
+                          ('activity', 'Activity / Details'), ('severity', 'Severity')]:
+            tree.heading(col, text=lbl, command=lambda c=col: self._on_sort(c))
+            tree.column(col, width=saved_widths.get(col, self.COL_DEFAULTS[col]),
+                        stretch=(col == 'activity'), anchor='w')
+
+        scr = ttk.Scrollbar(parent, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=scr.set)
+        scr.pack(side='right', fill='y')
+        tree.pack(fill='x', expand=True)
+
+        for etype in ('task', 'quest_completed', 'chat', 'error', 'drop', 'death',
+                      'levelup', 'script_event', 'slayer_task', 'slayer_complete',
+                      'slayer_skip', 'break', 'info'):
+            tree.tag_configure(etype, foreground=self._type_color(etype))
+
+        sorted_entries = self._sort_entries(entries)
+        raw_times = {}
+        sev_dot = {'Error': '🔴', 'Success': '🟢', 'Info': '⚪'}
+        for r in sorted_entries:
+            etype = r.get('type', '')
+            tag = etype if etype in (
+                'task', 'quest_completed', 'chat', 'error', 'drop', 'death',
+                'levelup', 'script_event', 'slayer_task', 'slayer_complete',
+                'slayer_skip', 'break') else 'info'
+            sev_label = self._severity(etype)
+            iid = tree.insert('', 'end', values=(
+                fmt_ts(r.get('time', '')), etype, r.get('value', ''),
+                r.get('activity', ''), f"{sev_dot[sev_label]} {sev_label}"), tags=(tag,))
+            raw_times[iid] = r.get('time', '')
+
+        tree.bind('<ButtonRelease-1>', lambda e, t=tree: self._on_col_resize(t))
+        tree.bind('<Double-1>', lambda e, t=tree, ac=acc: self._on_event_double_click(e, t, ac))
+        tree.bind('<Motion>', lambda e, t=tree: self._on_tree_motion(e, t))
+        tree.bind('<Leave>', self._hide_tooltip)
+        tree.raw_times = raw_times  # stashed for sort/tooltip lookups
+        return tree
+
+    def _sort_entries(self, entries):
+        idx_key = {
+            'time':     lambda r: r.get('time', ''),
+            'type':     lambda r: r.get('type', ''),
+            'value':    lambda r: str(r.get('value', '')),
+            'activity': lambda r: str(r.get('activity', '')),
+            'severity': lambda r: self._severity(r.get('type', '')),
+        }.get(self._sort_col, lambda r: r.get('time', ''))
+        return sorted(entries, key=idx_key, reverse=self._sort_rev)
+
+    def _on_sort(self, col):
         if self._sort_col == col:
             self._sort_rev = not self._sort_rev
         else:
             self._sort_col = col
             self._sort_rev = False
-        col_idx = {'time': 0, 'type': 1, 'value': 2, 'activity': 3}
-        idx = col_idx.get(col, 0)
-        for parent in self._tree.get_children():
-            items = []
-            for c in self._tree.get_children(parent):
-                vals = self._tree.item(c, 'values')
-                key  = self._raw_times.get(c, vals[idx]) if col == 'time' else vals[idx]
-                items.append((key, c))
-            items.sort(key=lambda x: x[0], reverse=self._sort_rev)
-            for i, (_, child) in enumerate(items):
-                self._tree.move(child, parent, i)
+        self._rebuild_accounts()
 
-    # ── Tree events ────────────────────────────────────────────────────────────
-    def _on_expand(self, event):
-        item = self._tree.focus()
-        if item and not self._tree.parent(item):
-            self._open_accounts.add(self._tree.item(item, 'text').strip())
-
-    def _on_collapse(self, event):
-        item = self._tree.focus()
-        if item and not self._tree.parent(item):
-            self._open_accounts.discard(self._tree.item(item, 'text').strip())
-
-    def _on_double_click(self, event):
-        item = self._tree.identify_row(event.y)
-        if not item or self._tree.parent(item):
-            return
-        self._tree.item(item, open=not self._tree.item(item, 'open'))
-
-    def _on_click(self, event):
-        region = self._tree.identify_region(event.x, event.y)
-        if region != 'cell':
-            # Click outside any row — deselect
-            self._tree.selection_remove(self._tree.selection())
-            return
-        col  = self._tree.identify_column(event.x)
-        item = self._tree.identify_row(event.y)
-        if not item or self._tree.parent(item):
-            self._tree.selection_remove(self._tree.selection())
-            return
-        if col != '#4':
-            return
-        vals = self._tree.item(item, 'values')
-        if not vals:
-            return
-        cell_text = str(vals[-1])
-        # Determine which pseudo-button was clicked by x position within cell
-        cell_x = self._tree.winfo_rootx()  # not used — detect by text position heuristic
-        if '📈 Runtime Stats' in cell_text and event.x > self._tree.column('activity', 'width') // 2 + 80:
-            acc = self._tree.item(item, 'text').strip()
-            self._show_runtime_stats_popup(acc, event.x, event.y)
-        elif '📊 Summary' in cell_text:
-            summary = self._summary.get(item, '')
-            if summary:
-                self._show_summary_popup(item, summary, event.x, event.y)
-
-    def _on_col_resize(self, event):
+    # ── Per-tree interactions ─────────────────────────────────────────────────────
+    def _on_col_resize(self, tree):
         app = self.app
-        widths = {col: self._tree.column(col, 'width')
-                  for col in ('#0', 'time', 'type', 'value', 'activity')}
+        widths = {col: tree.column(col, 'width')
+                  for col in ('time', 'type', 'value', 'activity', 'severity')}
         app.cfg['hist_col_widths'] = widths
         save_config(app.cfg)
 
-    def _on_motion(self, event):
-        """Show tooltip for truncated cell text on hover."""
-        app  = self.app
-        item = self._tree.identify_row(event.y)
-        col  = self._tree.identify_column(event.x)
+    def _on_event_double_click(self, event, tree, acc):
+        item = tree.identify_row(event.y)
+        if not item:
+            return
+        vals = tree.item(item, 'values')
+        if not vals:
+            return
+        self._show_event_detail_popup(acc, vals)
+
+    def _show_event_detail_popup(self, acc, vals):
+        app = self.app
+        time_s, etype, value, activity, severity = vals
+        popup = tk.Toplevel(app, bg=app.BG2)
+        popup.title(f"Event Details — {acc}")
+        popup.resizable(False, False)
+        popup.transient(app)
+        tk.Label(popup, text=f"  {acc}", font=app.SANSB, bg=app.BG2, fg=app.ACC,
+                 padx=12, pady=8).pack(fill='x')
+        tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x')
+        for label, val in [("Time", time_s), ("Type", etype), ("Task", value),
+                            ("Activity / Details", activity), ("Severity", severity)]:
+            row = tk.Frame(popup, bg=app.BG2)
+            row.pack(fill='x', padx=16, pady=4)
+            tk.Label(row, text=label, font=app.SANSS, bg=app.BG2, fg=app.FG2,
+                     width=16, anchor='w').pack(side='left')
+            tk.Label(row, text=val, font=app.SANS, bg=app.BG2, fg=app.FG, anchor='w',
+                     wraplength=360, justify='left').pack(side='left', fill='x', expand=True)
+        tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(4, 0))
+        tk.Button(popup, text="Close", font=app.SANS, bg=app.BG3, fg=app.FG2,
+                  relief='flat', padx=12, pady=4, cursor='hand2',
+                  command=popup.destroy).pack(pady=8)
+
+    def _on_tree_motion(self, event, tree):
+        """Show tooltip for truncated cell text on hover — same logic as
+        before, just rebound per-account-tree instead of one shared tree."""
+        app = self.app
+        item = tree.identify_row(event.y)
+        col = tree.identify_column(event.x)
         if not item or not col:
             self._hide_tooltip()
             return
-        # Same cell as before — no need to update
-        if item == self._tooltip_item and col == self._tooltip_col:
+        if (getattr(self, '_tooltip_item', None) == item and
+                getattr(self, '_tooltip_col', None) == col and
+                getattr(self, '_tooltip_tree', None) is tree):
             return
         self._tooltip_item = item
-        self._tooltip_col  = col
+        self._tooltip_col = col
+        self._tooltip_tree = tree
         self._hide_tooltip()
-        # Get cell text
-        if col == '#0':
-            text = self._tree.item(item, 'text') or ''
-        else:
-            col_names = {'#1': 0, '#2': 1, '#3': 2, '#4': 3, '#5': 4}
-            idx = col_names.get(col)
-            if idx is None:
-                return
-            vals = self._tree.item(item, 'values')
-            text = vals[idx] if vals and idx < len(vals) else ''
+        col_names = {'#1': 0, '#2': 1, '#3': 2, '#4': 3, '#5': 4}
+        idx = col_names.get(col)
+        if idx is None:
+            return
+        vals = tree.item(item, 'values')
+        text = vals[idx] if vals and idx < len(vals) else ''
         if not text:
             return
-        # Measure text width vs column width
         try:
             from tkinter.font import Font
-            font     = Font(font=app.MONO)
-            text_w   = font.measure(str(text))
-            col_w    = self._tree.column(col, 'width')
-            if text_w <= col_w - 8:  # 8px padding buffer
+            font = Font(font=app.SANS)
+            text_w = font.measure(str(text))
+            col_w = tree.column(col, 'width')
+            if text_w <= col_w - 8:
                 return
         except Exception:
             return
-        # Show tooltip
-        x = self._tree.winfo_rootx() + event.x + 12
-        y = self._tree.winfo_rooty() + event.y + 16
+        x = tree.winfo_rootx() + event.x + 12
+        y = tree.winfo_rooty() + event.y + 16
         self._tooltip_win = tw = tk.Toplevel(app)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
         tw.configure(bg=app.BG4)
-        tk.Label(tw, text=str(text), font=app.MONO, bg=app.BG4, fg=app.FG,
+        tk.Label(tw, text=str(text), font=app.SANS, bg=app.BG4, fg=app.FG,
                  padx=8, pady=4, wraplength=600, justify='left').pack()
 
     def _hide_tooltip(self, event=None):
-        if self._tooltip_win:
+        if getattr(self, '_tooltip_win', None):
             try:
                 self._tooltip_win.destroy()
             except Exception:
                 pass
-            self._tooltip_win  = None
+            self._tooltip_win = None
         self._tooltip_item = None
-        self._tooltip_col  = None
+        self._tooltip_col = None
+        self._tooltip_tree = None
 
     def _expand_all(self):
-        for item in self._tree.get_children():
-            self._tree.item(item, open=True)
+        self._open_accounts = set(self._cache.keys())
+        self._rebuild_accounts()
 
     def _collapse_all(self):
-        for item in self._tree.get_children():
-            self._tree.item(item, open=False)
+        self._open_accounts = set()
+        self._rebuild_accounts()
 
     # ── Summary popup ──────────────────────────────────────────────────────────
-    def _show_summary_popup(self, item, summary, ex, ey):
-        app    = self.app
-        acc    = self._tree.item(item, 'text').strip()
-        from datetime import datetime as _dt2
-        def _fmt(ds):
-            try: return _dt2.strptime(ds, '%Y-%m-%d').strftime('%m/%d/%y')
-            except Exception: return ds
-        period = ('Last 24h' if not self._filter_date else
-                  (_fmt(self._filter_date[0]) if self._filter_date[0] == self._filter_date[1]
-                   else f"{_fmt(self._filter_date[0])} → {_fmt(self._filter_date[1])}"))
+    def _show_summary_popup(self, acc, entries):
+        app = self.app
+        counts = {}
+        for r in entries:
+            t = r.get('type', '')
+            if t and t != 'scan':
+                counts[t] = counts.get(t, 0) + 1
+        parts = []
+        for label, keys in [
+            ('Quests', ['quest_completed', 'quest_started']), ('Tasks', ['task']),
+            ('Chats', ['chat']), ('Errors', ['error']), ('Drops', ['drop']),
+            ('Deaths', ['death']), ('Levels', ['levelup']),
+        ]:
+            n = sum(counts.get(k, 0) for k in keys)
+            parts.append((label, n))
+
         popup = tk.Toplevel(app, bg=app.BG2)
         popup.title(f"Summary — {acc}")
         popup.resizable(False, False)
         popup.transient(app)
-        try:
-            popup.geometry(f"+{self._tree.winfo_rootx()+ex}+{self._tree.winfo_rooty()+ey+20}")
-        except Exception:
-            pass
-        tk.Label(popup, text=f"  {acc}", font=app.MONOB, bg=app.BG2, fg=app.ACC,
+        tk.Label(popup, text=f"  {acc}", font=app.SANSB, bg=app.BG2, fg=app.ACC,
                  padx=12, pady=8).pack(fill='x')
-        tk.Label(popup, text=f"  Period: {period}", font=app.MONO, bg=app.BG2, fg=app.FG2,
-                 padx=12).pack(fill='x')
+        tk.Label(popup, text=f"  Period: {self._period_label()}", font=app.SANS,
+                 bg=app.BG2, fg=app.FG2, padx=12).pack(fill='x')
         tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(4, 0))
-        for part in summary.split('  │  '):
-            if ':' in part:
-                label, val = part.split(':', 1)
-                row = tk.Frame(popup, bg=app.BG2)
-                row.pack(fill='x', padx=16, pady=2)
-                tk.Label(row, text=label.strip(), font=app.MONO, bg=app.BG2, fg=app.FG2,
-                         width=10, anchor='w').pack(side='left')
-                tk.Label(row, text=val.strip(), font=app.MONOB, bg=app.BG2,
-                         fg=app.ACC).pack(side='left')
+        for label, n in parts:
+            row = tk.Frame(popup, bg=app.BG2)
+            row.pack(fill='x', padx=16, pady=2)
+            tk.Label(row, text=label, font=app.SANS, bg=app.BG2, fg=app.FG2,
+                     width=10, anchor='w').pack(side='left')
+            tk.Label(row, text=str(n), font=app.SANSB, bg=app.BG2, fg=app.ACC).pack(side='left')
         tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(4, 0))
-        tk.Button(popup, text="Close", font=app.MONO, bg=app.BG3, fg=app.FG2,
+        tk.Button(popup, text="Close", font=app.SANS, bg=app.BG3, fg=app.FG2,
                   relief='flat', padx=12, pady=4, cursor='hand2',
                   command=popup.destroy).pack(pady=8)
 
     # ── Runtime stats popup ────────────────────────────────────────────────────
-    def _show_runtime_stats_popup(self, acc, ex, ey):
-        from py.history import compute_runtime_stats, _fmt_secs, load_history_accounts
+    def _show_runtime_stats_popup(self, acc):
+        from py.history import compute_runtime_stats, _fmt_secs
         from datetime import date as _date, datetime as _dt, timedelta as _td
         app = self.app
 
@@ -400,20 +612,15 @@ class HistoryTab:
         popup.title(f"Runtime Stats — {acc}")
         popup.resizable(False, False)
         popup.transient(app)
-        try:
-            popup.geometry(f"+{self._tree.winfo_rootx()+ex+20}+{self._tree.winfo_rooty()+ey+20}")
-        except Exception:
-            pass
 
-        tk.Label(popup, text=f"  {acc}", font=app.MONOB, bg=app.BG2, fg=app.ACC,
+        tk.Label(popup, text=f"  {acc}", font=app.SANSB, bg=app.BG2, fg=app.ACC,
                  padx=12, pady=8).pack(fill='x')
         tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(0, 4))
 
-        # Range selector
         range_var = tk.StringVar(value='all')
         range_frame = tk.Frame(popup, bg=app.BG2)
         range_frame.pack(fill='x', padx=16, pady=(4, 2))
-        tk.Label(range_frame, text="Range:", font=app.MONO, bg=app.BG2, fg=app.FG2).pack(side='left')
+        tk.Label(range_frame, text="Range:", font=app.SANS, bg=app.BG2, fg=app.FG2).pack(side='left')
         stats_frame = tk.Frame(popup, bg=app.BG2)
         stats_frame.pack(fill='x', padx=16, pady=(2, 8))
 
@@ -430,53 +637,50 @@ class HistoryTab:
             for lbl, val in rows_data:
                 row = tk.Frame(stats_frame, bg=app.BG2)
                 row.pack(fill='x', pady=2)
-                tk.Label(row, text=lbl, font=app.MONO, bg=app.BG2, fg=app.FG2,
+                tk.Label(row, text=lbl, font=app.SANS, bg=app.BG2, fg=app.FG2,
                          width=20, anchor='w').pack(side='left')
-                tk.Label(row, text=val, font=app.MONOB, bg=app.BG2, fg=app.ACC).pack(side='left')
+                tk.Label(row, text=val, font=app.SANSB, bg=app.BG2, fg=app.ACC).pack(side='left')
 
         def _on_range(*_):
-            r     = range_var.get()
+            r = range_var.get()
             today = _date.today()
             if r == 'today':
-                since = _dt.combine(today, _dt.min.time()).timestamp()
-                _show_stats(since_ts=since)
+                _show_stats(since_ts=_dt.combine(today, _dt.min.time()).timestamp())
             elif r == '7d':
-                since = _dt.combine(today - _td(days=7), _dt.min.time()).timestamp()
-                _show_stats(since_ts=since)
+                _show_stats(since_ts=_dt.combine(today - _td(days=7), _dt.min.time()).timestamp())
             elif r == '30d':
-                since = _dt.combine(today - _td(days=30), _dt.min.time()).timestamp()
-                _show_stats(since_ts=since)
+                _show_stats(since_ts=_dt.combine(today - _td(days=30), _dt.min.time()).timestamp())
             else:
                 _show_stats()
 
         for text, val in [('All time', 'all'), ('Today', 'today'), ('7 days', '7d'), ('30 days', '30d')]:
             tk.Radiobutton(range_frame, text=text, value=val, variable=range_var,
-                font=app.MONO, bg=app.BG2, fg=app.FG, activebackground=app.BG2,
+                font=app.SANS, bg=app.BG2, fg=app.FG, activebackground=app.BG2,
                 selectcolor=app.BG2, relief='flat', cursor='hand2',
                 command=_on_range).pack(side='left', padx=(8, 0))
 
-        _show_stats()  # initial load — all time
+        _show_stats()
 
         tk.Frame(popup, bg=app.BG4, height=1).pack(fill='x', pady=(4, 0))
-        tk.Button(popup, text="Close", font=app.MONO, bg=app.BG3, fg=app.FG2,
+        tk.Button(popup, text="Close", font=app.SANS, bg=app.BG3, fg=app.FG2,
                   relief='flat', padx=12, pady=4, cursor='hand2',
                   command=popup.destroy).pack(pady=8)
+
+    # ── Date filter popup ────────────────────────────────────────────────────────
     def _toggle_date_picker(self):
-        # Guard: if popup already open, raise it
         if hasattr(self, '_date_popup') and self._date_popup and self._date_popup.winfo_exists():
             self._date_popup.lift()
             self._date_popup.focus_force()
             return
 
-        from datetime import date as _date, datetime as _dt
-        app   = self.app
+        from datetime import date as _date
+        app = self.app
         today = _date.today()
 
-        # Pre-populate with active filter or today
         if self._filter_date:
             try:
-                d_from = _dt.strptime(self._filter_date[0], '%Y-%m-%d').date()
-                d_to   = _dt.strptime(self._filter_date[1], '%Y-%m-%d').date()
+                d_from = datetime.strptime(self._filter_date[0], '%Y-%m-%d').date()
+                d_to   = datetime.strptime(self._filter_date[1], '%Y-%m-%d').date()
             except Exception:
                 d_from = d_to = today
         else:
@@ -488,7 +692,6 @@ class HistoryTab:
         popup.transient(app)
         self._date_popup = popup
 
-        # Position below the Filter Date button
         try:
             bx = self._date_btn.winfo_rootx()
             by = self._date_btn.winfo_rooty() + self._date_btn.winfo_height() + 4
@@ -496,26 +699,25 @@ class HistoryTab:
         except Exception:
             pass
 
-        tk.Label(popup, text="Select date range (max 7 days)", font=app.MONOB,
+        tk.Label(popup, text="Select date range (max 7 days)", font=app.SANSB,
                  bg=app.BG2, fg=app.ACC).pack(padx=14, pady=(10, 2))
-        tk.Label(popup, text="Format: MM/DD/YY", font=app.MONO,
+        tk.Label(popup, text="Format: MM/DD/YY", font=app.SANS,
                  bg=app.BG2, fg=app.FG2).pack(padx=14, pady=(0, 6))
 
         def _make_entry_row(parent, label, init_date):
             row = tk.Frame(parent, bg=app.BG2)
             row.pack(fill='x', padx=14, pady=3)
-            tk.Label(row, text=label, font=app.MONO, bg=app.BG2, fg=app.FG2,
+            tk.Label(row, text=label, font=app.SANS, bg=app.BG2, fg=app.FG2,
                      width=7, anchor='w').pack(side='left')
             var = tk.StringVar(value=init_date.strftime('%m/%d/%y'))
-            entry = tk.Entry(row, textvariable=var, font=app.MONO, bg=app.BG3,
+            entry = tk.Entry(row, textvariable=var, font=app.SANS, bg=app.BG3,
                              fg=app.FG, insertbackground=app.ACC, relief='flat', width=10)
             entry.pack(side='left', ipady=4, padx=(4, 0))
             return var, entry
 
         from_var, from_entry = _make_entry_row(popup, "From:", d_from)
-        to_var,   to_entry   = _make_entry_row(popup, "To:",   d_to)
+        to_var, to_entry = _make_entry_row(popup, "To:", d_to)
 
-        # Auto-sync To when From changes, until user edits To
         _syncing = [True]
         def _sync_to(*_):
             if _syncing[0]:
@@ -525,13 +727,13 @@ class HistoryTab:
         from_var.trace_add('write', _sync_to)
         to_entry.bind('<Key>', _unsync)
 
-        err_lbl = tk.Label(popup, text="", font=app.MONO, bg=app.BG2, fg=app.RED)
+        err_lbl = tk.Label(popup, text="", font=app.SANS, bg=app.BG2, fg=app.RED)
         err_lbl.pack(pady=(4, 0))
 
         def _parse(s):
             for fmt in ('%m/%d/%y', '%m/%d/%Y', '%m-%d-%y', '%m-%d-%Y'):
                 try:
-                    return _dt.strptime(s.strip(), fmt).date()
+                    return datetime.strptime(s.strip(), fmt).date()
                 except ValueError:
                     pass
             return None
@@ -554,7 +756,7 @@ class HistoryTab:
             disp_from = d1.strftime('%m/%d/%y')
             disp_to   = d2.strftime('%m/%d/%y')
             lbl = disp_from if ds_from == ds_to else f"{disp_from} → {disp_to}"
-            self._date_lbl.config(text=f"  \U0001f4c5 {lbl}")
+            self._date_lbl.config(text=f"📅 {lbl}")
             self._date_btn.config(fg=app.YEL)
             popup.destroy()
             self.load()
@@ -566,9 +768,10 @@ class HistoryTab:
             popup.destroy()
             self.load()
 
-        bf = tk.Frame(popup, bg=app.BG2); bf.pack(pady=(4, 12))
-        tk.Button(bf, text="Apply", font=app.MONO, bg=app.ACC, fg=app.BG,
+        bf = tk.Frame(popup, bg=app.BG2)
+        bf.pack(pady=(4, 12))
+        tk.Button(bf, text="Apply", font=app.SANS, bg=app.ACC, fg=app.BG,
             relief='flat', padx=12, pady=4, cursor='hand2', command=_apply).pack(side='left', padx=6)
-        tk.Button(bf, text="Clear / Show 24h", font=app.MONO, bg=app.BG4, fg=app.FG2,
+        tk.Button(bf, text="Clear / Show 24h", font=app.SANS, bg=app.BG4, fg=app.FG2,
             relief='flat', padx=12, pady=4, cursor='hand2', command=_clear).pack(side='left', padx=6)
         from_entry.focus_set()

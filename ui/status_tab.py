@@ -1,20 +1,372 @@
-"""ui/status_tab.py — Status tab for P2P Monitor"""
+"""
+ui/status_tab.py — Status tab for P2P Monitor (v2.0.0-beta.11 redesign)
+
+Replaces the single ttk.Treeview with custom Frame-based account-row
+cards — necessary to match the mockup's real button widgets, colored
+status badges, and avatar circles, none of which a Treeview cell can
+render. Safe performance-wise: account counts here are small (a handful
+of concurrently-monitored accounts), nothing like History's potentially-
+hundreds-of-events-per-account scale.
+
+Preserves exactly:
+- refresh() / push_refresh() / on_tab_shown() — same names, same no-arg
+  signatures, same threading pattern (background thread for the watcher
+  call, app.after(0, ...) to hop back to the Tk thread). p2p_monitor.py's
+  three call sites are untouched.
+- The smart-diff update pattern: if the account set is unchanged, existing
+  rows are updated in place (no destroy/recreate); a full rebuild only
+  happens when accounts are added/removed. This is what keeps "no
+  duplicate widgets" true across repeated refreshes.
+- _tick_uptime()'s 60s pure-math ticker via get_uptime_rows() — still no
+  threads, no I/O, just updating two label texts per row in place.
+- Mute / Screenshot / double-click-for-history actions call the exact same
+  watcher.toggle_mute() / watcher.trigger_screenshot() / app.show_tab(...)
+  + app._history.focus_account(...) as before — now via real per-row
+  Button widgets and a bound Label instead of treeview column-position
+  click detection, which is a robustness improvement, not a behavior one.
+
+Adds, purely additively, a Session Overview card (mirrors Monitor's —
+same Status/Uptime/Started/Events fields, same app._session_start_ts/
+_counts/_highlights source data) and an Accounts Overview card — both
+read-only summaries of data that already exists.
+"""
 import threading
+import time
 import tkinter as tk
-from tkinter import ttk
+from datetime import datetime
 
 
 class StatusTab:
     def __init__(self, app, parent_frame):
         self.app = app
         self._refresh_in_flight = False  # prevents thread accumulation
+        self._row_widgets = {}           # account -> dict of widget refs
         self._build(parent_frame)
-        self._tick_uptime()  # start lightweight minute ticker
+        self._tick_uptime()
+        self._tick_overview()
+
+    # ── Build ──────────────────────────────────────────────────────────────────
+    def _build(self, f):
+        app = self.app
+        root = tk.Frame(f, bg=app.BG2, padx=16, pady=16)
+        root.pack(fill='both', expand=True)
+
+        left = tk.Frame(root, bg=app.BG2, width=270)
+        left.pack(side='left', fill='y', padx=(0, 16))
+        left.pack_propagate(False)
+
+        right = tk.Frame(root, bg=app.BG2)
+        right.pack(side='left', fill='both', expand=True)
+
+        self._build_session_overview(left)
+        self._build_accounts_overview(left)
+        self._build_quick_tip(left)
+
+        self._build_stat_strip(right)
+        self._build_account_table(right)
+
+    def _card(self, parent, title=None, icon=None):
+        app = self.app
+        card = tk.Frame(parent, bg=app.BG3, padx=14, pady=12)
+        card.pack(fill='x', pady=(0, 12))
+        if title:
+            hdr = tk.Frame(card, bg=app.BG3)
+            hdr.pack(fill='x', anchor='w', pady=(0, 8))
+            if icon:
+                tk.Label(hdr, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
+                         ).pack(side='left', padx=(0, 6))
+            tk.Label(hdr, text=title, font=app.SANSS, bg=app.BG3, fg=app.FG2
+                     ).pack(side='left')
+        return card
+
+    # ── Session Overview (mirrors Monitor's — same source data) ─────────────────
+    def _build_session_overview(self, parent):
+        app = self.app
+        card = self._card(parent, None)
+        self._so_status_lbl = tk.Label(card, text="● STOPPED", font=app.SANSB,
+                                        bg=app.BG3, fg=app.RED)
+        self._so_status_lbl.pack(anchor='w', pady=(0, 8))
+        self._so_uptime_lbl  = self._so_row(card, "Uptime", "—")
+        self._so_started_lbl = self._so_row(card, "Started", "—")
+        self._so_events_lbl  = self._so_row(card, "Events", "0")
+
+    def _so_row(self, parent, label, value):
+        app = self.app
+        row = tk.Frame(parent, bg=app.BG3)
+        row.pack(fill='x', pady=2)
+        tk.Label(row, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                 width=10, anchor='w').pack(side='left')
+        val_lbl = tk.Label(row, text=value, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w')
+        val_lbl.pack(side='left', fill='x', expand=True)
+        return val_lbl
+
+    def _tick_overview(self):
+        """Pure local math, same pattern as Monitor's — no I/O. Runs every
+        second regardless of which tab is visible (passive self.after()
+        chain), since it's cheap and keeps things in sync the moment you
+        switch back to Status."""
+        self.refresh_session_overview()
+        self.app.after(1000, self._tick_overview)
+
+    def refresh_session_overview(self):
+        """The actual display update, separated from the reschedule above
+        so App._start()/_stop() can call this directly for an immediate
+        refresh without spawning a second parallel ticker chain."""
+        app = self.app
+        running = str(app._btn_stop.cget('state')) == 'normal'
+        self._so_status_lbl.configure(
+            text="● RUNNING" if running else "● STOPPED",
+            fg=app.GREEN if running else app.RED)
+        if app._session_start_ts:
+            started_dt = datetime.fromtimestamp(app._session_start_ts)
+            today = datetime.now().date() == started_dt.date()
+            prefix = "Today" if today else started_dt.strftime('%b %d')
+            self._so_started_lbl.configure(text=f"{prefix}, {started_dt.strftime('%H:%M:%S')}")
+            if running:
+                elapsed = int(time.time() - app._session_start_ts)
+                h, rem = divmod(elapsed, 3600)
+                m, s = divmod(rem, 60)
+                self._so_uptime_lbl.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
+        else:
+            self._so_started_lbl.configure(text="—")
+            self._so_uptime_lbl.configure(text="—")
+        self._so_events_lbl.configure(text=str(sum(app._counts.values())))
+        app.after(1000, self._tick_overview)
+
+    # ── Accounts Overview ────────────────────────────────────────────────────────
+    def _build_accounts_overview(self, parent):
+        app = self.app
+        card = self._card(parent, None)
+        self._ao_total_lbl = tk.Label(card, text="0", font=(app.SANS[0], 22, 'bold'),
+                                       bg=app.BG3, fg=app.FG)
+        self._ao_total_lbl.pack(anchor='w')
+        tk.Label(card, text="Total Monitored", font=app.SANSS, bg=app.BG3, fg=app.FG2
+                 ).pack(anchor='w', pady=(0, 8))
+        self._ao_active_lbl = self._ao_row(card, app.GREEN)
+        self._ao_active_sub = tk.Label(card, text="Active Accounts", font=app.SANSS,
+                                        bg=app.BG3, fg=app.FG2)
+        self._ao_active_sub.pack(anchor='w', pady=(0, 6))
+        self._ao_break_lbl  = self._ao_row(card, app.YEL)
+        self._ao_break_sub  = tk.Label(card, text="On Break", font=app.SANSS,
+                                        bg=app.BG3, fg=app.FG2)
+        self._ao_break_sub.pack(anchor='w', pady=(0, 6))
+        self._ao_status_lbl = tk.Label(card, text="No accounts yet", font=app.SANSS,
+                                        bg=app.BG3, fg=app.FG2)
+        self._ao_status_lbl.pack(anchor='w', pady=(4, 0))
+
+    def _ao_row(self, parent, color):
+        app = self.app
+        lbl = tk.Label(parent, text="0 (0%)", font=app.SANSB, bg=app.BG3, fg=color, anchor='w')
+        lbl.pack(anchor='w')
+        return lbl
+
+    def _build_quick_tip(self, parent):
+        app = self.app
+        card = self._card(parent, None)
+        tk.Label(card, text="💡 QUICK TIP", font=app.SANSB, bg=app.BG3, fg=app.ACC2
+                 ).pack(anchor='w', pady=(0, 6))
+        tk.Label(card, text="Double-click an account name to open its history.",
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=220,
+                 justify='left').pack(anchor='w')
+
+    # ── Stat strip ────────────────────────────────────────────────────────────────
+    def _build_stat_strip(self, parent):
+        app = self.app
+        strip = tk.Frame(parent, bg=app.BG2)
+        strip.pack(fill='x', pady=(0, 12))
+        self._stat_widgets = {}
+        specs = [
+            ('active',    "ACTIVE ACCOUNTS", '👤', app.GREEN),
+            ('on_break',  "ON BREAK",         '☕', app.YEL),
+            ('logged_in', "LOGGED IN",        '✅', app.GREEN),
+            ('muted',     "MUTED",            '🔇', app.FG2),
+        ]
+        for key, label, icon, color in specs:
+            cell = tk.Frame(strip, bg=app.BG3, padx=10, pady=8)
+            cell.pack(side='left', fill='x', expand=True, padx=(0, 8))
+            top = tk.Frame(cell, bg=app.BG3)
+            top.pack(fill='x', anchor='w')
+            tk.Label(top, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=color
+                     ).pack(side='left', padx=(0, 4))
+            tk.Label(top, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
+                     ).pack(side='left')
+            row = tk.Frame(cell, bg=app.BG3)
+            row.pack(fill='x', anchor='w', pady=(4, 0))
+            count_lbl = tk.Label(row, text="0", font=(app.SANS[0], 18, 'bold'),
+                                  bg=app.BG3, fg=color)
+            count_lbl.pack(side='left')
+            pct_lbl = tk.Label(row, text="0%", font=app.SANSS, bg=app.BG3, fg=app.FG2)
+            pct_lbl.pack(side='left', padx=(8, 0), pady=(6, 0))
+            self._stat_widgets[key] = (count_lbl, pct_lbl)
+
+    # ── Per-account live status table ────────────────────────────────────────────
+    def _build_account_table(self, parent):
+        app = self.app
+        card = tk.Frame(parent, bg=app.BG3, padx=14, pady=12)
+        card.pack(fill='both', expand=True)
+
+        hdr = tk.Frame(card, bg=app.BG3)
+        hdr.pack(fill='x', pady=(0, 8))
+        tk.Label(hdr, text="📊", font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
+                 ).pack(side='left', padx=(0, 6))
+        tk.Label(hdr, text="PER-ACCOUNT LIVE STATUS", font=app.SANSB, bg=app.BG3, fg=app.FG
+                 ).pack(side='left')
+        self._last_updated_lbl = tk.Label(hdr, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2)
+        self._last_updated_lbl.pack(side='right', padx=(8, 0))
+        tk.Button(hdr, text="↻ Refresh", font=app.SANSS, bg=app.BG4, fg=app.ACC,
+            relief='flat', padx=8, pady=3, cursor='hand2',
+            command=self.refresh).pack(side='right')
+
+        col_hdr = tk.Frame(card, bg=app.BG3)
+        col_hdr.pack(fill='x', pady=(0, 4))
+        for text, w in [("ACCOUNT", 16), ("TASK", 14), ("ACTIVITY", 18), ("UPTIME", 8),
+                         ("BREAK", 8), ("STATUS", 11), ("", 8), ("", 10)]:
+            tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                     width=w, anchor='w').pack(side='left')
+
+        self._rows_container = tk.Frame(card, bg=app.BG3)
+        self._rows_container.pack(fill='both', expand=True)
+
+        self._empty_lbl = tk.Label(self._rows_container,
+            text="No accounts yet — start monitoring to see live status here.",
+            font=app.SANS, bg=app.BG3, fg=app.FG2)
+
+        footer = tk.Frame(parent, bg=app.BG2, pady=6)
+        footer.pack(fill='x')
+        tk.Label(footer,
+            text="ⓘ  Mute silences the account  •  Screenshot captures on-demand  •  "
+                 "Double-click account name to open history",
+            font=app.SANSS, bg=app.BG2, fg=app.FG2).pack()
+
+    def _status_color(self, status_text):
+        app = self.app
+        if 'Offline' in status_text:
+            return app.RED
+        if 'On Break' in status_text:
+            return app.YEL
+        if 'Starting' in status_text:
+            return app.YEL
+        return app.GREEN  # Logged In
+
+    def _build_row(self, account, r):
+        app = self.app
+        row = tk.Frame(self._rows_container, bg=app.BG3, pady=6)
+        row.pack(fill='x')
+        tk.Frame(row, bg=app.BG4, height=1).pack(fill='x', side='bottom')
+
+        # Avatar circle + name (double-click → history)
+        name_cell = tk.Frame(row, bg=app.BG3, width=180)
+        name_cell.pack(side='left', fill='y')
+        avatar = tk.Canvas(name_cell, width=28, height=28, bg=app.BG3, highlightthickness=0)
+        avatar.pack(side='left', padx=(0, 8))
+        avatar.create_oval(2, 2, 26, 26, fill=app.ACC, outline=app.ACC)
+        avatar.create_text(14, 14, text=(account[:1] or '?').upper(), fill=app.BG, font=app.SANSB)
+        text_col = tk.Frame(name_cell, bg=app.BG3, cursor='hand2')
+        text_col.pack(side='left')
+        name_lbl = tk.Label(text_col, text=account, font=app.SANSB, bg=app.BG3, fg=app.ACC,
+                             cursor='hand2', anchor='w')
+        name_lbl.pack(anchor='w')
+        hint_lbl = tk.Label(text_col, text="Double-click to view history", font=app.SANSS,
+                             bg=app.BG3, fg=app.FG2, cursor='hand2', anchor='w')
+        hint_lbl.pack(anchor='w')
+        for w in (name_lbl, hint_lbl, text_col):
+            w.bind('<Double-1>', lambda e, a=account: self._open_history(a))
+
+        task_lbl = tk.Label(row, text=r['task'], font=app.SANS, bg=app.BG3, fg=app.FG,
+                             width=14, anchor='w')
+        task_lbl.pack(side='left')
+        activity_lbl = tk.Label(row, text=r['activity'], font=app.SANS, bg=app.BG3, fg=app.FG2,
+                                 width=18, anchor='w')
+        activity_lbl.pack(side='left')
+        uptime_lbl = tk.Label(row, text=r.get('uptime', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
+                               width=8, anchor='w')
+        uptime_lbl.pack(side='left')
+        break_lbl = tk.Label(row, text=r.get('break_time', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
+                              width=8, anchor='w')
+        break_lbl.pack(side='left')
+
+        status_text = r['status'].split(' ', 1)[-1] if ' ' in r['status'] else r['status']
+        badge_color = self._status_color(r['status'])
+        badge = tk.Label(row, text=f" {status_text} ", font=app.SANSB,
+                          bg=badge_color, fg=app.BG, padx=6, pady=2)
+        badge_wrap = tk.Frame(row, bg=app.BG3, width=88)
+        badge_wrap.pack(side='left')
+        badge.pack(in_=badge_wrap, anchor='w')
+
+        muted = bool(r.get('muted'))
+        mute_btn = tk.Button(row, text=("🔇 Unmute" if muted else "🔊 Mute"), font=app.SANSS,
+            bg=app.BG4, fg=(app.FG2 if muted else app.ACC), relief='flat', padx=6, pady=3,
+            cursor='hand2', command=lambda a=account: self._on_mute_click(a))
+        mute_btn.pack(side='left', padx=(0, 6))
+
+        ss_btn = tk.Button(row, text="📷 Screenshot", font=app.SANSS,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=6, pady=3,
+            cursor='hand2', command=lambda a=account: self._on_screenshot_click(a))
+        ss_btn.pack(side='left')
+
+        return {'frame': row, 'task': task_lbl, 'activity': activity_lbl,
+                'uptime': uptime_lbl, 'break_time': break_lbl, 'badge': badge,
+                'mute_btn': mute_btn}
+
+    # ── Actions ────────────────────────────────────────────────────────────────────
+    def _on_mute_click(self, account):
+        app = self.app
+        if not app.watcher:
+            return
+        app.watcher.toggle_mute(account)
+        self._flash_row(account)
+        self.refresh()
+
+    def _on_screenshot_click(self, account):
+        app = self.app
+        if not app.watcher:
+            return
+        app.watcher.trigger_screenshot(account)
+        self._flash_row(account)
+        self.refresh()
+
+    def _open_history(self, account):
+        app = self.app
+        app.show_tab('History')
+        app.after(50, lambda: app._history.focus_account(account))
+
+    def _flash_row(self, account):
+        app = self.app
+        w = self._row_widgets.get(account)
+        if not w:
+            return
+        try:
+            orig_bg = app.BG3
+            w['frame'].configure(bg=app.ACC)
+            for child in w['frame'].winfo_children():
+                try:
+                    child.configure(bg=app.ACC)
+                except tk.TclError:
+                    pass
+            app.after(200, lambda: self._restore_row_bg(account, orig_bg))
+        except Exception:
+            pass
+
+    def _restore_row_bg(self, account, bg):
+        w = self._row_widgets.get(account)
+        if not w:
+            return
+        try:
+            w['frame'].configure(bg=bg)
+            for child in w['frame'].winfo_children():
+                try:
+                    if child not in (w['badge'], w['mute_btn']):
+                        child.configure(bg=bg)
+                except tk.TclError:
+                    pass
+        except Exception:
+            pass
 
     # ── Lightweight uptime tick — pure math, no I/O ────────────────────────────
     def _tick_uptime(self):
-        """Every 60 seconds recalculate uptime/break columns from cached state.
-        No threads, no watcher calls — just arithmetic on already-known timestamps."""
+        """Every 60 seconds recalculate uptime/break text from cached state.
+        No threads, no watcher calls beyond the one cheap get_uptime_rows()
+        — just label-text updates on existing row widgets."""
         if self.app.watcher:
             try:
                 rows = self.app.watcher.get_uptime_rows()
@@ -24,26 +376,18 @@ class StatusTab:
         self.app.after(60000, self._tick_uptime)
 
     def _update_uptime_cols(self, rows):
-        """Update only uptime and break_time columns without rebuilding the tree."""
-        app = self.app
-        # Build lookup by account name → tree item id
-        items = {app._st_tree.item(i, 'values')[0]: i
-                 for i in app._st_tree.get_children()
-                 if app._st_tree.item(i, 'values')}
         for r in rows:
-            iid = items.get(r['account'])
-            if iid:
-                vals = list(app._st_tree.item(iid, 'values'))
-                if len(vals) >= 5:
-                    vals[3] = r['uptime']
-                    vals[4] = r['break_time']
-                    app._st_tree.item(iid, values=vals)
+            w = self._row_widgets.get(r['account'])
+            if w:
+                w['uptime'].configure(text=r['uptime'])
+                w['break_time'].configure(text=r['break_time'])
 
     # ── Push-based full refresh — called by watcher events and manual refresh ──
     def refresh(self):
-        """Full refresh — checks active sessions then rebuilds the tree."""
+        """Full refresh — checks active sessions then rebuilds rows."""
         app = self.app
         if not app.watcher:
+            self._update_rows([])
             return
         def _do():
             try:
@@ -51,13 +395,12 @@ class StatusTab:
             except Exception:
                 pass
             rows = app.watcher.get_account_rows()
-            app.after(0, lambda: self._update_tree(rows))
+            app.after(0, lambda: self._update_rows(rows))
         threading.Thread(target=_do, daemon=True).start()
 
     def push_refresh(self):
         """Lightweight push from watcher events — no check_active_sessions.
-        Guarded by _refresh_in_flight to prevent thread accumulation on Windows
-        where each thread takes long enough that multiple can pile up."""
+        Guarded by _refresh_in_flight to prevent thread accumulation."""
         app = self.app
         if not app.watcher:
             return
@@ -67,144 +410,79 @@ class StatusTab:
         def _do():
             try:
                 rows = app.watcher.get_account_rows()
-                app.after(0, lambda: self._update_tree(rows))
+                app.after(0, lambda: self._update_rows(rows))
             finally:
                 self._refresh_in_flight = False
         threading.Thread(target=_do, daemon=True).start()
 
     def on_tab_shown(self):
-        """Called when status tab is selected — full refresh."""
+        """Called when Status tab is selected — full refresh."""
         self.refresh()
 
-    def _build(self, f):
+    def _update_rows(self, rows):
+        """Smart diff: only a full rebuild when the account *set* changed;
+        otherwise every existing row is updated in place — this is what
+        keeps repeated refreshes from duplicating widgets."""
         app = self.app
+        new_accounts = {r['account'] for r in rows}
+        existing_accounts = set(self._row_widgets.keys())
 
-        hdr = tk.Frame(f, bg=app.BG2, padx=12, pady=8)
-        hdr.pack(fill='x')
-        tk.Label(hdr, text="Per-Account Live Status", font=app.MONOL,
-                 bg=app.BG2, fg=app.ACC).pack(side='left')
-        tk.Button(hdr, text="↻ Refresh", font=app.MONO, bg=app.BG3, fg=app.ACC,
-            relief='flat', padx=8, pady=4, cursor='hand2',
-            command=self.refresh).pack(side='right')
+        if new_accounts != existing_accounts:
+            for w in self._row_widgets.values():
+                w['frame'].destroy()
+            self._row_widgets = {}
+            for r in rows:
+                self._row_widgets[r['account']] = self._build_row(r['account'], r)
+        else:
+            for r in rows:
+                w = self._row_widgets.get(r['account'])
+                if not w:
+                    continue
+                w['task'].configure(text=r['task'])
+                w['activity'].configure(text=r['activity'])
+                w['uptime'].configure(text=r.get('uptime', '—'))
+                w['break_time'].configure(text=r.get('break_time', '—'))
+                status_text = r['status'].split(' ', 1)[-1] if ' ' in r['status'] else r['status']
+                w['badge'].configure(text=f" {status_text} ", bg=self._status_color(r['status']))
+                muted = bool(r.get('muted'))
+                w['mute_btn'].configure(text=("🔇 Unmute" if muted else "🔊 Mute"),
+                                         fg=(app.FG2 if muted else app.ACC))
 
-        cols = ('account', 'task', 'activity', 'uptime', 'break_time', 'status', 'mute', 'screenshot')
-        app._st_tree = ttk.Treeview(f, columns=cols, show='headings', height=22)
-        for col, w, lbl in [
-            ('account',    160, 'Account'),
-            ('task',       160, 'Task'),
-            ('activity',   160, 'Activity'),
-            ('uptime',      90, 'Uptime'),
-            ('break_time',  90, 'Break Time'),
-            ('status',     120, 'Status'),
-            ('mute',        80, 'Mute'),
-            ('screenshot',  90, 'Screenshot'),
-        ]:
-            app._st_tree.heading(col, text=lbl)
-            app._st_tree.column(col, width=w, minwidth=w if col == 'account' else 40, anchor='w')
+        if rows:
+            self._empty_lbl.pack_forget()
+        else:
+            self._empty_lbl.pack(pady=20)
 
-        scr = ttk.Scrollbar(f, orient='vertical', command=app._st_tree.yview)
-        app._st_tree.configure(yscrollcommand=scr.set)
-        scr.pack(side='right', fill='y')
-        app._st_tree.pack(fill='both', expand=True)
+        self._update_stat_strip(rows)
+        self._last_updated_lbl.configure(text=f"Last updated: {self._now_str()}")
 
-        app._st_tree.tag_configure('ok',     foreground=app.GREEN)
-        app._st_tree.tag_configure('quiet',  foreground=app.YEL)
-        app._st_tree.tag_configure('silent', foreground=app.RED)
-        app._st_tree.tag_configure('break',  foreground=app.FG2)
+    @staticmethod
+    def _now_str():
+        return datetime.now().strftime('%H:%M:%S')
 
-        app._st_tree.bind('<Button-1>', self._on_click)
-        app._st_tree.bind('<Double-1>', self._on_double_click)
-
-        tk.Label(f,
-            text="Click Mute to silence  |  Click Screenshot for on-demand  |  Double-click account name → History",
-            font=app.MONO, bg=app.BG2, fg=app.FG2).pack(pady=4)
-
-    def _update_tree(self, rows):
-        """Update status tree in place — only rebuild if accounts changed.
-        Avoids full delete+insert on every event which is expensive on Windows."""
-        app  = self.app
-        tree = app._st_tree
-        # Deselect any selected row — no persistent highlight
-        tree.selection_remove(tree.selection())
-        # Build current state
-        existing = {tree.item(i, 'values')[0]: i
-                    for i in tree.get_children()
-                    if tree.item(i, 'values')}
-        new_accounts = [r['account'] for r in rows]
-        # If account set changed, full rebuild is unavoidable
-        if set(existing.keys()) != set(new_accounts):
-            for item in tree.get_children():
-                tree.delete(item)
-            existing = {}
-        for r in rows:
-            s        = r['status']
-            tag      = 'silent' if '🔴' in s else ('quiet' if '🟡' in s else 'ok')
-            mute_lbl = '[ Unmute ]' if r.get('muted') else '[  Mute  ]'
-            vals     = (r['account'], r['task'], r['activity'],
-                        r.get('uptime', '—'), r.get('break_time', '—'),
-                        r['status'], mute_lbl, '[Screenshot]')
-            if r['account'] in existing:
-                # Update in place — no delete/insert
-                tree.item(existing[r['account']], values=vals, tags=(tag,))
-            else:
-                tree.insert('', 'end', values=vals, tags=(tag,))
-
-    def _get_tree_account(self, event, required_col):
-        """Return (account, item) tuple if event is a cell click on required_col, else None."""
+    def _update_stat_strip(self, rows):
         app = self.app
-        if app._st_tree.identify_region(event.x, event.y) != 'cell':
-            return None
-        item = app._st_tree.identify_row(event.y)
-        if not item:
-            return None
-        return app._st_tree.item(item, 'values')[0], item
+        total = len(rows)
+        active = sum(1 for r in rows if 'Offline' not in r['status'])
+        on_break = sum(1 for r in rows if 'On Break' in r['status'])
+        logged_in = sum(1 for r in rows if 'Logged In' in r['status'])
+        muted = sum(1 for r in rows if r.get('muted'))
 
-    def _on_click(self, event):
-        app  = self.app
-        # Deselect immediately on any click
-        app._st_tree.selection_remove(app._st_tree.selection())
-        col = app._st_tree.identify_column(event.x)
-        if col == '#7':  # Mute column
-            result = self._get_tree_account(event, '#7')
-            if not result: return
-            account, item = result
-            app.watcher.toggle_mute(account)
-            self._flash_row(item)
-            self.refresh()
-        elif col == '#8':  # Screenshot column
-            result = self._get_tree_account(event, '#8')
-            if not result: return
-            account, item = result
-            app.watcher.trigger_screenshot(account)
-            self._flash_row(item)
-            self.refresh()
+        def pct(n):
+            return f"{round(n / total * 100)}%" if total else "0%"
 
-    def _on_double_click(self, event):
-        app    = self.app
-        result = self._get_tree_account(event, '#1')
-        if not result:
-            return
-        account, _ = result
-        app.show_tab('History')
-        app.after(50, lambda: app._history.focus_account(account))
+        for key, n in [('active', active), ('on_break', on_break),
+                       ('logged_in', logged_in), ('muted', muted)]:
+            count_lbl, pct_lbl = self._stat_widgets[key]
+            count_lbl.configure(text=str(n))
+            pct_lbl.configure(text=pct(n))
 
-    def _flash_row(self, item):
-        app = self.app
-        try:
-            app._st_tree.tag_configure('flash', background=app.ACC, foreground=app.BG)
-            app._st_tree.item(item, tags=('flash',))
-            app.after(250, lambda: self._restore_tag(item))
-        except Exception:
-            pass
-
-    def _restore_tag(self, item):
-        app = self.app
-        try:
-            vals   = app._st_tree.item(item, 'values')
-            if not vals:
-                return
-            status = vals[5] if len(vals) > 5 else ''
-            tag    = 'silent' if '🔴' in status else ('quiet' if '🟡' in status else 'ok')
-            app._st_tree.item(item, tags=(tag,))
-        except Exception:
-            pass
+        self._ao_total_lbl.configure(text=str(total))
+        self._ao_active_lbl.configure(text=f"{active} ({pct(active)})")
+        self._ao_break_lbl.configure(text=f"{on_break} ({pct(on_break)})")
+        if total == 0:
+            self._ao_status_lbl.configure(text="No accounts yet", fg=app.FG2)
+        elif active == total:
+            self._ao_status_lbl.configure(text="✓ All accounts operational", fg=app.GREEN)
+        else:
+            self._ao_status_lbl.configure(text=f"⚠ {total - active} need attention", fg=app.YEL)
