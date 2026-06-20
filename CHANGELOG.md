@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.0-beta.12
+### Fix: Monitor freeze on Start (Linux) — Active Accounts refresh was blocking the main thread
+
+**The bug, exactly as reported:** opening Monitor and pressing Start made the whole app completely unresponsive. Root cause: beta.11 added a "Highlights" row and an Active Accounts summary to Monitor, refreshed via `MonitorTab.refresh_highlights()`. That method calls `watcher.get_account_rows()` — which does real filesystem work (checking every monitored account's log directory for rotation) — directly, with no background thread. `StatusTab.refresh()`/`push_refresh()` already wrap that exact same call in a background thread; `refresh_highlights()` didn't.
+
+That wouldn't matter if it only ran at safe moments, but it's also the target of `App._debounced_refresh_tick()` — the same 2-second debounce that's existed for a while (collapses a burst of events into one refresh, rather than refreshing once per event) — and that tick fires on the main/Tk thread, same as every `self.after(...)` callback. So every time the debounce settled — and it settles almost immediately after the startup catchup scan, which can replay a burst of historical events the moment you press Start — `get_account_rows()` ran synchronously on the main thread, freezing the entire UI (Tkinter is single-threaded; nothing else can happen while one call is running) for however long that disk check took.
+
+**Fix:** `refresh_highlights()` now follows the exact same shape as `StatusTab.refresh()`: a background thread does the actual `get_account_rows()` call, then hands the result back to a new `_apply_highlights_data()` method via `app.after(0, ...)` for the actual widget updates (Tkinter widgets aren't thread-safe, so that part has to stay on the main thread). Added the same in-flight guard Status already has (`_accounts_refresh_in_flight`), so a fast burst of events can't spawn a pile of overlapping background checks — only one fetch runs at a time; extra calls while one's in flight are just skipped, since the in-flight one will land soon anyway.
+
+Nothing about *what* gets checked, *how often* the debounce fires, or any other behavior changed — this is purely moving one disk-reading line off the main thread, the same pattern already proven correct elsewhere in this same file.
+
+**Validated:** `compileall`/`pyflakes` clean. Tuple-padding scan: zero. Added 6 new targeted regression checks directly proving the fix: a simulated slow disk read (300ms) confirmed `refresh_highlights()` itself still returns near-instantly; a heartbeat timer confirmed the main thread keeps servicing other `after()` callbacks throughout that slow read (this is exactly what was frozen before); confirmed the slow background fetch still correctly updates the UI once it completes; confirmed the in-flight guard allows only one background fetch at a time under a rapid 5-call burst, and that it correctly resets and allows a fresh fetch afterward. All 43 pre-existing Monitor checks plus all 207 checks across the other six suites re-run clean. Separately reproduced the exact real-world scenario end-to-end — real `App`, real `_start()`, a deliberately slow fake watcher, a 20-event burst, and a heartbeat ticking every 20ms — confirmed the heartbeat fired continuously throughout (149 times in 3 seconds, no stall) where before the fix it would have stopped dead for the duration of every slow disk check.
+
+**Files changed:** `ui/monitor_tab.py` (the fix), `p2p_monitor.py` (version bump only), `CHANGELOG.md`. `update_manifest.txt` unchanged — no new files.
+
+---
+
 ## v2.0.0-beta.11
 ### Monitor, Status, and History brought into the v2.0 warm dark design — full UI rebuild on all three, all existing behavior preserved
 
