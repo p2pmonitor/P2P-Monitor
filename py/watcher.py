@@ -30,6 +30,7 @@ except ImportError:
     _psutil = None
     _PSUTIL_AVAILABLE = False
 from py.discord import (post_discord, bot_api, bot_setup_discord, bot_ensure_thread,
+                        verify_bot_channels,
                         GatewayRunner, DiscordRouter, DROP_ICONS,
                         quest_started_payload, quest_payload,
                         slayer_task_payload, slayer_complete_payload, slayer_skipped_payload,
@@ -305,6 +306,7 @@ class LogWatcher:
             runner.bot_ready = self._bot_ready  # share the same event
             self._bot_thread = threading.Thread(target=runner.run, daemon=True)
             self._bot_thread.start()
+            threading.Thread(target=self._verify_discord_channels_startup, daemon=True).start()
 
     def stop(self):
         self._running = False
@@ -1832,7 +1834,7 @@ class LogWatcher:
     #     _raw              tuple       — (key, threshold, window_sec, dedupe_sec, detail)
     #                                     (error events only — used for threshold/dedup)
     #     _detail           str         — human-readable error detail (error events only)
-    #     _task_ctx         str         — task context string for error embed enrichment
+    #     _task_ctx         str         — task context string for error/death embed enrichment
     #     _lock_name        str         — locked task/quest name (lock error events only)
     #     _is_farm_skip     bool        — True for farming patch skip errors
     #     _line_idx         int         — source line index in the parsed batch
@@ -1929,8 +1931,9 @@ class LogWatcher:
                 elif etype == 'death':
                     url = self._router.resolve_url(account, 'death')
                     if url:
+                        task_ctx = ev.get('_task_ctx', '')
                         self._router.post_event(account, 'death',
-                            _ping(death_payload(mention, account), 'death'), url=url)
+                            _ping(death_payload(mention, account, task_context=task_ctx), 'death'), url=url)
                 elif etype == 'levelup':
                     level     = int(activity) if activity.isdigit() else 0
                     total_lvl = ev.get('_total_level')
@@ -2329,7 +2332,13 @@ class LogWatcher:
 
             elif etype == 'death':
                 self.log(f"💀 [{folder}] Character died!")
-                ev = dict(ev, value='Oh dear, you are dead!', activity='')
+                last_t = state.last_task     or ''
+                last_a = state.last_activity or ''
+                if last_t.lower() in ('break', ''):
+                    last_t = ''
+                    last_a = ''
+                task_ctx = f"{last_t} — {last_a}" if last_a else last_t
+                ev = dict(ev, value='Oh dear, you are dead!', activity='', _task_ctx=task_ctx)
 
             elif etype == 'levelup':
                 skill = value
@@ -2543,6 +2552,48 @@ class LogWatcher:
         return events
 
     # ── Bot wiring ─────────────────────────────────────────────────────────────
+    def _verify_discord_channels_startup(self):
+        """
+        Proactive startup check (runs once per LogWatcher.start() call, on
+        its own background thread — see the call site in start()). Confirms
+        every configured Discord channel still exists via one cheap GET per
+        channel; if any are missing, reuses the existing, already-idempotent
+        _run_bot_setup() to repair them (recreates only what's actually
+        missing — never duplicates a channel that's still valid).
+
+        This complements, rather than replaces, the existing reactive 404
+        recovery in DiscordRouter._handle_post_error (which fires from an
+        actual failed post). That reactive path already correctly recovers
+        and retries — this just covers the case where a channel was deleted
+        while the app was otherwise idle, so it's already fixed by the time
+        anything needs to post to it, instead of only fixing itself on the
+        next post attempt.
+
+        Never touches the Tk main thread, never blocks watcher startup —
+        start() only spawns this thread and returns immediately.
+        """
+        token     = self.cfg.get('bot_token', '').strip()
+        server_id = self.cfg.get('bot_server_id', '').strip()
+        channel_ids = self.cfg.get('bot_channel_ids', {})
+        if not token or not server_id or not channel_ids:
+            return  # nothing configured yet, or bot setup was never completed
+
+        try:
+            missing = verify_bot_channels(token, channel_ids, log_fn=self.log)
+        except Exception as e:
+            self.log(f"🔧 Startup Discord channel check failed: {e}")
+            return
+
+        if not missing:
+            return  # everything still exists — no API calls beyond the cheap check above
+
+        self.log(f"🔧 {len(missing)} configured Discord channel(s) missing — "
+                 f"running bot setup to repair...")
+        ok, msg = self._run_bot_setup(log_fn=self.log)
+        if not ok:
+            self.log(f"🔧 Discord channel repair failed: {msg} — "
+                     f"fix manually via Settings > Discord > Run Bot Setup")
+
     def _run_bot_setup(self, log_fn=None):
         token     = self.cfg.get('bot_token', '').strip()
         server_id = self.cfg.get('bot_server_id', '').strip()

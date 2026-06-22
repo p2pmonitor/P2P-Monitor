@@ -26,6 +26,12 @@ PET_PATTERNS = [
 ]
 
 DEATH_RE        = re.compile(r'\[GAME\] Oh dear, you are dead!', re.I)
+
+# Intentional Wine of Zamorak death suppression — exact rule: check ONLY
+# the previous 2 raw log lines for either marker (substring match, case-
+# insensitive); no time window, no fuzzy matching beyond these two exact
+# phrases. See _is_suppressed_wine_death() below.
+_WINE_DEATH_MARKERS = ('STOP STEALING MY WINE', 'Interacting Wine of zamorak')
 SKILL_LVL_RE    = re.compile(r"Congratulations, you've just advanced your (.+?) level\. You are now level (\d+)", re.I)
 SKILL_99_RE     = re.compile(r"Congratulations, you've reached the highest possible (.+?) level of 99", re.I)
 TOTAL_LVL_RE    = re.compile(r"Congratulations, you've reached a total level of (\d+)", re.I)
@@ -48,6 +54,17 @@ _FARM_BUCKET_RE = re.compile(r"If you don't like this, get a bottomless bucket",
 _QUEST_ITEMS_START_RE = re.compile(r'If any of these items are needed, make sure you have them', re.IGNORECASE)
 _QUEST_ITEMS_END_RE   = re.compile(r'It is up to the human to manually re-obtain', re.IGNORECASE)
 
+# Farming-specific lock-reason patterns — see GitHub issue #2
+# ("wrong message for failing farming?"). Kept separate from the generic
+# lock_reason_patterns (error_rules.json) because those only scan back 5
+# lines and take the first match, which on a real Farming lock often
+# lands on an early tool/teleport line while the true seed/consumable
+# shortage sits further back — see _extract_farming_lock_reason().
+_FARMING_RESOURCE_FAIL_RE = re.compile(
+    r'(?:\(virtual\)\s+)?Resource check failed:\s*(Many|\d+)\s*\[(.+?)\]', re.IGNORECASE)
+_FARMING_AFFORD_RE = re.compile(r"Can't reasonably afford\s*\[([^\]]+?)\]", re.IGNORECASE)
+_FARMING_BANK_HAVE_RE = re.compile(r'\(bank\)\s+Have\s+0/Many\s+(.+)', re.IGNORECASE)
+
 # ── String helpers ─────────────────────────────────────────────────────────────
 def strip_prefix(line):
     return STRIP_PREFIX_RE.sub('', line)
@@ -62,6 +79,142 @@ def parse_log_ts(lines):
         if m:
             return m.group(1)
     return None
+
+def _extract_farming_lock_reason(arr, lock_idx, lock_ts_str):
+    """
+    Dedicated Farming-specific failure-reason extraction — see GitHub
+    issue #2 ("wrong message for failing farming?"). The generic
+    lock_reason_patterns scan (error_rules.json, applied to every locked
+    task) only looks back 5 lines and stops at the first pattern match.
+    On a real Farming lock that often lands on an early tool/teleport
+    "Resource check failed: 1 [...]" line, while the true blocker — a
+    missing seed reported as "Resource check failed: Many [...]" several
+    lines further back — falls outside that 5-line window entirely, or
+    would have been checked later and never reached.
+
+    Looks back up to 20 lines (comfortably covers every example in the
+    issue, which had at most 8 resource-check lines before the lock)
+    within the same timestamp, collects every matching line, then prefers
+    stronger consumable/seed signals over generic tool/teleport noise:
+        1. Can't reasonably afford [...]      (explicit affordability failure)
+        2. (bank) Have 0/Many <item>            (explicit bank-shortage line)
+        3. (virtual) Resource check failed: Many [...]
+        4. Resource check failed: Many [...]    (any count, real or virtual)
+        5. Resource check failed: 1 [...]       (tools/teleports — only used
+           if nothing above matched anything at all)
+    Item names are deduplicated (case-insensitive), preserving first-seen
+    order and casing. Returns '' if nothing matched, so the caller falls
+    back to the existing generic logic's behavior unchanged.
+
+    Only ever called when the locked task name is 'farming' — every other
+    locked task keeps the exact existing behavior, untouched.
+    """
+    afford_items, bank_items, virtual_many_items, many_items, single_items = [], [], [], [], []
+    seen_afford, seen_bank, seen_v_many, seen_many, seen_single = set(), set(), set(), set(), set()
+
+    def _split_items(raw):
+        # "Construct. cape, Construct. cape(t), Teleport to house" -> list
+        return [x.strip() for x in raw.split(',') if x.strip()]
+
+    for j in range(max(0, lock_idx - 20), lock_idx):
+        raw = arr[j]
+        ts = LOG_TS_RE.match(raw)
+        if ts and lock_ts_str and ts.group(1) != lock_ts_str:
+            continue
+        body = strip_prefix(raw).strip()
+
+        m = _FARMING_AFFORD_RE.search(body)
+        if m:
+            # "Snapdragon seed false true" -> strip trailing true/false flags
+            item = re.sub(r'\s+(?:true|false)\b.*$', '', m.group(1).strip(), flags=re.IGNORECASE).strip()
+            key = item.lower()
+            if item and key not in seen_afford:
+                seen_afford.add(key)
+                afford_items.append(item)
+            continue
+
+        m = _FARMING_BANK_HAVE_RE.search(body)
+        if m:
+            item = m.group(1).strip()
+            key = item.lower()
+            if item and key not in seen_bank:
+                seen_bank.add(key)
+                bank_items.append(item)
+            continue
+
+        m = _FARMING_RESOURCE_FAIL_RE.search(body)
+        if m:
+            is_many = m.group(1).lower() == 'many'
+            is_virtual = body.lower().startswith('(virtual)')
+            for item in _split_items(m.group(2)):
+                key = item.lower()
+                if is_many and is_virtual:
+                    if key not in seen_v_many:
+                        seen_v_many.add(key)
+                        virtual_many_items.append(item)
+                elif is_many:
+                    if key not in seen_many:
+                        seen_many.add(key)
+                        many_items.append(item)
+                else:
+                    if key not in seen_single:
+                        seen_single.add(key)
+                        single_items.append(item)
+
+    def _merge(*lists):
+        """Combine item lists in priority order, deduplicating
+        case-insensitively while preserving first-seen casing — used so a
+        higher-priority signal (e.g. affordability) doesn't silently drop
+        a genuinely different missing item that only showed up in a
+        lower-priority signal (e.g. a second seed reported only via a
+        'Resource check failed: Many [...]' line, not its own bank-have
+        or affordability line)."""
+        out, seen = [], set()
+        for lst in lists:
+            for item in lst:
+                key = item.lower()
+                if key not in seen:
+                    seen.add(key)
+                    out.append(item)
+        return out
+
+    if afford_items:
+        combined = _merge(afford_items, bank_items, virtual_many_items, many_items)
+        return f"Farming locked: could not afford {', '.join(combined)}"
+    combined = _merge(bank_items, virtual_many_items, many_items)
+    if combined:
+        return f"Farming locked: missing {', '.join(combined)}"
+    if single_items:
+        return f"Farming locked: missing {', '.join(single_items)}"
+    return ''
+
+def _is_suppressed_wine_death(arr, death_idx):
+    """
+    Intentional-death suppression for the Wine of Zamorak task. Exact
+    rule, deliberately narrow: check ONLY the previous 2 raw log lines
+    (not a time window, not any other context size) for either marker as
+    a plain case-insensitive substring — no fuzzy matching beyond these
+    two exact phrases:
+        - 'STOP STEALING MY WINE'
+        - 'Interacting Wine of zamorak'
+    If either is present in either of those 2 lines, this death should be
+    treated as if it never happened: returning True here means the caller
+    never appends a 'death' event for it at all, which is sufficient to
+    suppress every downstream effect (Discord ping, death counter,
+    history entry, status/highlight update) — all of those are driven
+    purely by the event's existence in the events list this module
+    produces; nothing else in the watcher independently re-scans raw
+    lines for this same death line.
+
+    Does not affect Inferno's own, unrelated death handling (Inferno
+    tracks death via wave/KC state in py/inferno.py, not this generic
+    DEATH_RE-based path at all).
+    """
+    for j in range(max(0, death_idx - 2), death_idx):
+        line = arr[j]
+        if any(marker.lower() in line.lower() for marker in _WINE_DEATH_MARKERS):
+            return True
+    return False
 
 # ── Individual slice functions ─────────────────────────────────────────────────
 
@@ -788,6 +941,17 @@ def parse_lines(lines):
             if reason:
                 break
 
+        # Farming-specific override — see GitHub issue #2. The generic scan
+        # above can land on an early tool/teleport line while a true seed
+        # shortage sits further back; this dedicated pass looks further
+        # back and prioritizes seed/consumable signals over tool/teleport
+        # noise. Only ever applied to Farming — every other locked task
+        # keeps the exact reason computed above, untouched.
+        if locked_name.lower() == 'farming':
+            farming_reason = _extract_farming_lock_reason(arr, i, lock_ts_str)
+            if farming_reason:
+                reason = farming_reason
+
         # Collect quest missing items block if present nearby (up to 15 lines back)
         quest_items = []
         in_items_block = False
@@ -871,6 +1035,8 @@ def parse_lines(lines):
     # Deaths
     for i, line in enumerate(arr):
         if DEATH_RE.search(line):
+            if _is_suppressed_wine_death(arr, i):
+                continue  # intentional Wine of Zamorak death — fully ignored, see issue
             events.append({'type': 'death', 'value': 'Oh dear, you are dead!', 'activity': '',
                            'ts': _ts_for_line(i), '_line_idx': i})
             break

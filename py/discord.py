@@ -144,10 +144,11 @@ def script_event_payload(mention, folder, event, detail=''):
         fields.append({"name": "Detail", "value": detail, "inline": True})
     return _embed(f"{icon} Script Event", _desc(mention, folder), fields, color)
 
-def death_payload(mention, folder, context=''):
-    return _embed("💀 Character Died", _desc(mention, folder),
-                  [{"name": "Detail", "value": context or "Oh dear, you are dead!", "inline": False}],
-                  0xff0000)
+def death_payload(mention, folder, context='', task_context=''):
+    fields = [{"name": "Detail", "value": context or "Oh dear, you are dead!", "inline": False}]
+    if task_context:
+        fields.append({"name": "Task", "value": task_context, "inline": False})
+    return _embed("💀 Character Died", _desc(mention, folder), fields, 0xff0000)
 
 def levelup_payload(mention, folder, skill, level, total_level=None, is_99=False):
     title = "🎆 Level 99! 🎆" if is_99 else "🎉 Level Up!"
@@ -415,6 +416,38 @@ def bot_setup_discord(token, server_id, log_fn=None):
             log(f"🤖 Created webhook for #{name}")
 
     return {'bot_channel_ids': channel_ids, 'bot_webhook_urls': webhook_urls, 'bot_setup_done': True}
+
+def verify_bot_channels(token, channel_ids, log_fn=None):
+    """
+    Lightweight proactive check: confirms each configured channel ID in
+    channel_ids (dict of ch_name -> channel_id) still exists on Discord.
+    One cheap GET /channels/{id} per configured channel — much lighter
+    than bot_setup_discord()'s full guild-channel-list pass, intentionally
+    so this is cheap enough to run unconditionally on every app startup.
+
+    Does NOT create, modify, or delete anything itself — purely a check.
+    Returns the set of ch_names whose channel is missing (HTTP 404 /
+    Unknown Channel 10003), so the caller can decide whether to run the
+    existing bot_setup_discord()-based repair. The reactive 404 recovery
+    in DiscordRouter._handle_post_error already covers "a channel was
+    deleted and something just tried to post to it" — this covers the
+    complementary case of a channel deleted while the app was otherwise
+    idle, catching it before anything needs to post.
+    """
+    def log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    missing = set()
+    for ch_name, ch_id in (channel_ids or {}).items():
+        if not ch_id:
+            continue
+        data, err = bot_api(token, 'GET', f'/channels/{ch_id}')
+        if data is None and _is_discord_404(err):
+            missing.add(ch_name)
+            log(f"🔧 Configured channel #{ch_name} no longer exists (deleted)")
+    return missing
+
 
 def bot_ensure_thread(token, channel_id, account_name, log_fn=None):
     """Find or create a thread for account_name in channel_id. Returns thread_id or None."""

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.14
+P2P Monitor v2.0.0-beta.15
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -28,6 +28,7 @@ File structure:
 
 import os
 import platform as _plat
+import shutil
 import sys
 import threading
 import time
@@ -61,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.14"
+VERSION      = "2.0.0-beta.15"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -354,6 +355,7 @@ class App(tk.Tk):
         migrate_history()
         self._status_debounce_id = None
         self.after(100, self._history.load)
+        self.after(1500, self._cleanup_stale_update_temp_dirs)
         self.after(3000, self._silent_update_check)
         self.after(3500, self._startup_dependency_check)
         self.after(4000, self._prewarm_stats)
@@ -725,6 +727,59 @@ class App(tk.Tk):
                 threading.Thread(target=self._do_apply_update,
                                  args=(remote_ver, asset_url), daemon=True).start()
         self.after(0, _prompt)
+
+    def _cleanup_stale_update_temp_dirs(self):
+        """
+        Startup-only cleanup for orphaned '.update_tmp_*' staging folders
+        left behind by a Linux source update that was interrupted (app
+        crashed, force-killed, machine lost power) before reaching this
+        same function's normal in-process cleanup in _do_apply_update()'s
+        finally: block — that cleanup already handles every ordinary
+        completion/failure path correctly; this only covers the case
+        where the whole process never got a chance to run it at all.
+
+        Linux-only: the Windows frozen-build updater uses a differently
+        named, fixed '.update_tmp' folder (no trailing underscore), which
+        this pattern intentionally does not match and which is already
+        cleaned up by its own batch-file mechanism — left untouched here.
+
+        Runs the actual directory scan/delete on a background thread —
+        cheap in practice (a handful of small leftover folders at most),
+        but there's no reason to risk the main thread on file I/O at all.
+        """
+        if not sys.platform.startswith('linux'):
+            return
+
+        def _do():
+            removed = []
+            try:
+                install_dir = Path(SCRIPT_PATH).parent.resolve()
+                for entry in list(install_dir.glob('.update_tmp_*')):
+                    try:
+                        if entry.is_symlink():
+                                   continue
+                        if not entry.is_dir():
+                            continue
+                        resolved = entry.resolve()
+                        # Safety: glob() already only yields direct children
+                        # of install_dir matching the exact prefix, but
+                        # re-verify after resolving in case of a symlinked
+                        # entry pointing somewhere unexpected — never delete
+                        # anything whose real parent isn't install_dir.
+                        if resolved.parent != install_dir:
+                            continue
+                        shutil.rmtree(resolved, ignore_errors=True)
+                        removed.append(resolved.name)
+                    except Exception:
+                        continue  # one bad entry should never stop the rest
+            except Exception:
+                pass  # cleanup must never be able to break startup
+            if removed:
+                # One summary line, not one per folder — and called exactly
+                # once, after all file I/O for this pass is already done.
+                self._log(f'🧹 Removed {len(removed)} stale update temp folder(s): '
+                          f'{", ".join(removed)}')
+        threading.Thread(target=_do, daemon=True).start()
 
     def _do_apply_update(self, new_ver, asset_url):
         """
