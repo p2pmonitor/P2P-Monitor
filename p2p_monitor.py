@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.13
+P2P Monitor v2.0.0-beta.14
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -61,7 +61,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.13"
+VERSION      = "2.0.0-beta.14"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -453,6 +453,8 @@ class App(tk.Tk):
             self._status_tab.on_tab_shown()
         elif name == 'Stats' and getattr(self, '_stats_tab', None):
             self._stats_tab.on_tab_shown()
+        elif name == 'Launcher' and getattr(self, '_launcher', None):
+            self._launcher.on_tab_shown()
 
     # ── Start / Stop ───────────────────────────────────────────────────────────
     def _start(self):

@@ -36,6 +36,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - `/launch all` starts all configured presets that are currently closed and skips already-open clients
 - `/relaunch <account>` force-restarts that account’s DreamBot client even if it is already open
 - `/relaunch all` force-restarts all configured launcher presets with a small stagger
+- When relaunching an account whose client is already open (Discord or the Launcher tab), its window position/size is captured before closing and restored after the new client window appears, where the OS/window manager supports it — best-effort, never blocks the relaunch if it fails
 - Launcher command preview shows the exact Java/DreamBot command that will be used
 
 ### Auto restart after Script Stopped

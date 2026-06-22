@@ -733,6 +733,66 @@ def _get_window_geometry_windows(wid):
         return None
 
 
+def set_window_geometry(wid, x, y, w, h):
+    """
+    Move/resize the given window to (x, y, w, h).
+
+    Used by launcher.py's relaunch window-position-restore — best-effort
+    only. Callers should already have sanity-checked the geometry; this
+    function does not validate bounds itself, it just applies whatever
+    it's given.
+
+    Returns: bool — True if the underlying command/API call ran without
+    raising. This does NOT independently re-verify the window actually
+    moved (window managers can refuse/clamp); callers that care should
+    treat this as "we asked," not "we confirmed."
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            return _set_window_geometry_linux(wid, x, y, w, h)
+        elif sys.platform == 'win32':
+            return _set_window_geometry_windows(wid, x, y, w, h)
+        return False
+    except Exception:
+        return False
+
+
+def _set_window_geometry_linux(wid, x, y, w, h):
+    from py.util import xdotool, get_display_env
+    env = get_display_env()
+    try:
+        xdotool(['windowmove', '--sync', str(wid), str(int(x)), str(int(y))], env, timeout=3)
+        xdotool(['windowsize', '--sync', str(wid), str(int(w)), str(int(h))], env, timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _set_window_geometry_windows(wid, x, y, w, h):
+    """Same coordinate space as _get_window_geometry_windows (DWM extended
+    frame bounds), applied directly to SetWindowPos. SetWindowPos itself
+    operates on the raw window rect, not the DWM-adjusted one, so the
+    restored position can be off by the (small, invisible) DWM shadow
+    inset — acceptable for "put the window roughly back where it was,"
+    the same tolerance capture_window_image already accepts for paint
+    detection on this same geometry source."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = int(str(wid), 0)
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        ok = user32.SetWindowPos(hwnd, None, int(x), int(y), int(w), int(h),
+                                  SWP_NOZORDER | SWP_NOACTIVATE)
+        return bool(ok)
+    except Exception:
+        return False
+
+
 def is_window_minimized(wid):
     """
     Return True if the window is currently minimized/iconic.

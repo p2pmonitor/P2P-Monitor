@@ -321,13 +321,45 @@ def _validate_jar(cfg: dict) -> Optional[str]:
 
 # ── Background PID discovery and cache ────────────────────────────────────────
 
-def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict = None) -> None:
+# ── Window-position restore (relaunch only — see relaunch_account) ─────────────
+
+def _geometry_is_sane(geom) -> bool:
+    """
+    Conservative sanity check for a captured (x, y, w, h) tuple before ever
+    trying to restore it. Deliberately simple rather than precisely
+    multi-monitor-aware (e.g. exact virtual-desktop bounds) — the goal is
+    only to catch clearly-broken values (a minimized window, a stale/bogus
+    read, etc.), not to perfectly validate against every real monitor
+    layout. When in doubt this returns False, and the caller's contract
+    is to skip the restore and log why rather than guess a "clamped"
+    position — see relaunch_account's docstring.
+    """
+    if not geom or len(geom) != 4:
+        return False
+    x, y, w, h = geom
+    if w <= 0 or h <= 0 or w > 10000 or h > 10000:
+        return False
+    if x < -500 or y < -500 or x > 10000 or y > 10000:
+        return False
+    return True
+
+
+def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict = None,
+                        restore_geometry: Optional[tuple] = None) -> None:
     """
     Run in a daemon thread after Popen. Polls for the real DreamBot client PID
     via window title, caches it in launcher_state.json.
 
     If the window is not found within 30 seconds, caches the immediate Popen PID
     as a best-effort fallback, and logs a warning.
+
+    restore_geometry: optional (x, y, w, h) captured from the previous
+    client window before it was closed (relaunch_account only — fresh
+    launches via launch_account have nothing to restore from, so they
+    never pass this). If the new window is found in time and the geometry
+    passes _geometry_is_sane(), best-effort move/resize it back into
+    place. Any failure here is logged and swallowed — a missed position
+    restore is never worth crashing the launch over.
     """
     def _log(msg):
         if log_fn:
@@ -341,9 +373,35 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                            'msg': f'Client PID confirmed: {real_pid}'})
         if cfg and cfg.get('debug', False):
             _log(f'✅ [{account}] Client PID confirmed: {real_pid}')
+
+        if restore_geometry is not None:
+            new_wid = result.get('window_id')
+            if not new_wid:
+                _log(f'⚠️ [{account}] New window found but no window_id to restore position to — skipping.')
+            elif not _geometry_is_sane(restore_geometry):
+                _log(f'⚠️ [{account}] Saved window position looked invalid '
+                     f'({restore_geometry}) — skipping restore rather than guessing.')
+            else:
+                try:
+                    from py.platform_ops import set_window_geometry
+                    x, y, w, h = restore_geometry
+                    ok = set_window_geometry(new_wid, x, y, w, h)
+                    if ok:
+                        write_debug_entry('launcher', {'account': account,
+                                           'msg': f'Restored window position {restore_geometry}'})
+                        if cfg and cfg.get('debug', False):
+                            _log(f'↩️ [{account}] Restored window position.')
+                    else:
+                        _log(f'⚠️ [{account}] Could not restore window position — '
+                             f'client is open at its default position instead.')
+                except Exception as exc:
+                    _log(f'⚠️ [{account}] Window position restore failed: {exc} — '
+                         f'client is open at its default position instead.')
     else:
         _set_pid(account, immediate_pid)
         _log(f'⚠️ [{account}] Client window not found within 30s — caching launcher PID {immediate_pid}.')
+        if restore_geometry is not None:
+            _log(f'⚠️ [{account}] Window position restore skipped — new client window never confirmed.')
 
 
 # ── Public launcher API ────────────────────────────────────────────────────────
@@ -420,6 +478,16 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
 
     If no client is found running at all, falls back to a fresh launch.
     Never kills by generic process name.
+
+    Window-position restore: if an existing window is found, its geometry
+    (x, y, w, h) is captured via platform_ops.get_window_geometry() before
+    closing anything. After the relaunch, once the new client window is
+    confirmed (same background poll that already discovers/caches its
+    PID — see _discover_and_cache), that geometry is best-effort restored
+    via platform_ops.set_window_geometry(). Any failure at any step here
+    (capture, close, relaunch, re-discovery, or restore) is logged and
+    swallowed — losing the window's on-screen position is never worth
+    failing the relaunch over.
     """
     def _log(msg):
         if log_fn:
@@ -448,6 +516,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     # ── Step 1: discover running client ───────────────────────────────────────
     target_pid = None
     discovery_method = None
+    captured_geometry = None  # (x, y, w, h) of the existing window, if found — see docstring
 
     try:
         window_result = discover_account_process(account)
@@ -470,6 +539,29 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
             )
         target_pid = pid
         discovery_method = 'window'
+
+        # Best-effort geometry capture — never blocks or fails the relaunch.
+        # A minimized window, multi-monitor edge case, or any platform_ops
+        # failure just means captured_geometry stays None, and the restore
+        # step later is skipped with a clear log line — see _discover_and_cache.
+        try:
+            existing_wid = window_result.get('window_id')
+            if existing_wid:
+                from py.platform_ops import get_window_geometry, is_window_minimized
+                if is_window_minimized(existing_wid):
+                    _dbg_log(f'ℹ️ [{account}] Existing window is minimized — '
+                             f'skipping position capture (nothing meaningful to restore).')
+                else:
+                    captured_geometry = get_window_geometry(existing_wid)
+                    if captured_geometry:
+                        _dbg_log(f'📐 [{account}] Captured window position {captured_geometry} '
+                                 f'before closing.', extra={'geometry': captured_geometry})
+                    else:
+                        _dbg_log(f'⚠️ [{account}] Could not read window geometry before closing — '
+                                 f'position restore will be skipped after relaunch.')
+        except Exception as exc:
+            _dbg_log(f'⚠️ [{account}] Geometry capture failed: {exc} — '
+                     f'position restore will be skipped after relaunch.')
     else:
         # Fallback: saved PID
         from py.platform_ops import is_pid_running
@@ -532,6 +624,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     threading.Thread(
         target=_discover_and_cache,
         args=(account, immediate_pid, log_fn, cfg),
+        kwargs={'restore_geometry': captured_geometry},
         daemon=True,
     ).start()
 
