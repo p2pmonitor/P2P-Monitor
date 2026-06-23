@@ -152,11 +152,34 @@ def _skills_from_player_details(details):
     return out, None
 
 
+def build_user_agent(username: str) -> str:
+    """Build a safe anonymous WOM User-Agent from the WOM username.
+
+    Use the same username we are refreshing. This avoids grouping all users
+    under one shared fake User-Agent while not exposing app/repo details.
+    """
+    value = str(username or "").replace("\r", " ").replace("\n", " ").strip()
+
+    # Remove other control characters while preserving normal OSRS spaces.
+    value = "".join(ch for ch in value if ord(ch) >= 32 and ord(ch) != 127)
+
+    # Keep it small and header-safe.
+    value = value[:80].strip()
+
+    return value or "OSRS Player"
+
+
 def fetch_player(username, timeout=10):
     """
     POST /players/{username} — updates the player on WOM then returns their
     latest snapshot in the same call (the "update then fetch" behavior the
     spec asks for, in a single request).
+
+    Sends the WOM username being requested as the User-Agent header too
+    (see build_user_agent()) — WOM asks for a User-Agent that lets abusive
+    traffic be identified, and the username is already the one piece of
+    per-request identifying info this app has that isn't tied to the app/
+    repo/DreamBot itself, and isn't shared across every installation.
 
     Returns a WomResult. Every failure mode is caught here:
       - HTTP 404                  -> error="Player not found on Wise Old Man"
@@ -173,8 +196,11 @@ def fetch_player(username, timeout=10):
         return WomResult(error="No WOM username configured for this account")
 
     url = f"{WOM_API_BASE}/players/{urllib.request.quote(username)}"
-    req = urllib.request.Request(url, method='POST',
-                                  headers={'Content-Type': 'application/json'})
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": build_user_agent(username),
+    }
+    req = urllib.request.Request(url, method='POST', headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
