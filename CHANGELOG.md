@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0.0-beta.17
+### Fix: WOM API requests rejected with HTTP 403 — missing User-Agent header
+
+**The bug, exactly as reported:** "Refresh WOM" failing for every account with `WOM API error (HTTP 403)`, despite valid accounts and a correct request shape.
+
+**Root cause:** `fetch_player()` never set a `User-Agent` header, so every request fell back to urllib's default (`Python-urllib/3.x`). Confirmed directly against WOM's own API documentation (`docs.wiseoldman.net`) — the intro page states plainly that a request with no identifiable User-Agent gets the client IP banned, which is exactly the 403 being hit. This was missed originally because the player-endpoints page (the one actually consulted while building `py/wom.py`) doesn't mention this requirement at all — it's stated only on the docs site's front page.
+
+**Fix:** every request now sends a real, non-default User-Agent. Deliberately generic and unconnected to this project, any script, or DreamBot — this app runs independently on many separate end-user machines, and a shared, project-identifying value would make every installation collectively traceable as one entity to WOM, which isn't something to opt every user into.
+
+**Refined: WOM requests now use the refreshed WOM username as the anonymous User-Agent instead of a shared label.** The first version of this fix used one fixed placeholder value for every request, from every account, on every installation — which still satisfies WOM's "must be identifiable" requirement technically, but groups all activity under one indistinguishable label rather than the more genuinely useful signal WOM actually asks for. Since the WOM username is already right there in the request URL, using that exact same value as the User-Agent (via a new `build_user_agent()` helper) gives a real per-account signal without exposing anything about this app, its repository, or DreamBot — and without grouping unrelated users together under one shared identity. Sanitized against header-injection (CR/LF and other control characters stripped) and length-capped; falls back to a generic placeholder only if a username is somehow empty, which `fetch_player()`'s existing early-return already prevents from being reachable in practice.
+
+**Why none of the existing tests caught this:** every WOM test mocks `urllib.request.urlopen` directly, which is correct for testing response-handling logic but means none of them ever exercised what headers a *real* request would actually carry — this could only surface against the live API, which is exactly how it was found.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean, re-run after the refinement too. Tests rewritten to confirm the exact specified behavior precisely: a simple single-word username sends a User-Agent identical to that username and the unchanged URL; a username containing spaces sends a User-Agent with spaces preserved exactly (not URL-encoded, not underscored) alongside the correctly percent-encoded URL; CR/LF and other control characters are stripped so header injection is impossible; very long or blank usernames are handled safely. All 479 checks across all fourteen suites re-run clean, both in the working copy and on a fresh beta.16 checkout with just this patch applied.
+
+**Files changed:** `py/wom.py` (the fix, then refined to use the per-username User-Agent), `p2p_monitor.py` (version bump only), `CHANGELOG.md`. `update_manifest.txt` unchanged — no new files.
+
+---
+
 ## v2.0.0-beta.16
 ### WOM Goals & Maxing — Wise Old Man integration, Monitor summary cards, Highlight persistence fix
 
