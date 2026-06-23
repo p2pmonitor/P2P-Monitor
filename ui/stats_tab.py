@@ -201,7 +201,47 @@ class StatsTab:
     # ── Build ─────────────────────────────────────────────────────────────────
     def _build_real_content(self):
         app = self.app
-        root = tk.Frame(self._frame, bg=app.BG2)
+
+        outer = tk.Frame(self._frame, bg=app.BG2)
+        outer.pack(fill='both', expand=True)
+
+        sidebar = tk.Frame(outer, bg=app.BG2, width=170)
+        sidebar.pack(side='left', fill='y')
+        sidebar.pack_propagate(False)
+        tk.Label(sidebar, text="STATS", font=app.SANSS, bg=app.BG2, fg=app.FG2
+                 ).pack(anchor='w', padx=14, pady=(14, 8))
+
+        pages = tk.Frame(outer, bg=app.BG2)
+        pages.pack(side='left', fill='both', expand=True)
+        pages.grid_rowconfigure(0, weight=1)
+        pages.grid_columnconfigure(0, weight=1)
+
+        self._overview_page = tk.Frame(pages, bg=app.BG2)
+        self._goals_maxing_page = tk.Frame(pages, bg=app.BG2)
+        for p in (self._overview_page, self._goals_maxing_page):
+            p.grid(row=0, column=0, sticky='nsew')
+
+        self._section_btns = {}
+        self._active_section = 'overview'
+        for key, label, icon in (('overview', 'Overview', '▦'),
+                                  ('goals_maxing', 'Goals & Maxing', '◎')):
+            row = tk.Frame(sidebar, bg=app.BG2, cursor='hand2')
+            row.pack(fill='x', padx=8, pady=2)
+            ind = tk.Frame(row, bg=app.BG2, width=3)
+            ind.pack(side='left', fill='y')
+            lbl = tk.Label(row, text=f"{icon}  {label}", font=app.SANS, bg=app.BG2,
+                            fg=app.FG2, anchor='w', cursor='hand2', padx=8, pady=6)
+            lbl.pack(side='left', fill='x', expand=True)
+            for w in (row, lbl, ind):
+                w.bind('<Button-1>', lambda e, k=key: self._switch_section(k))
+            self._section_btns[key] = (lbl, ind)
+
+        # ── Overview page: the existing Stats content, structurally
+        # unchanged — only its packing parent moved from self._frame
+        # directly to self._overview_page. Same fill='both', expand=True
+        # all the way down, so the chart canvas still gets correctly-
+        # mapped real dimensions the moment it's built, exactly as before.
+        root = tk.Frame(self._overview_page, bg=app.BG2)
         root.pack(fill='both', expand=True)
         self._root = root
 
@@ -215,6 +255,45 @@ class StatsTab:
         self._build_kpis(self._content)
         self._build_chart(self._content)
         self._build_panels(self._content)
+
+        # Goals & Maxing is deliberately NOT built here — only on first
+        # click (see _ensure_goals_maxing_built), mirroring this file's own
+        # prewarm()/lazy-build philosophy for the exact same reason: never
+        # build real widget content into a page before it's actually about
+        # to be shown.
+        self._goals_maxing_built = False
+        self._wom_goals_page = None
+
+        self._switch_section('overview')
+
+    def _switch_section(self, section):
+        app = self.app
+        self._active_section = section
+        for key, (lbl, ind) in self._section_btns.items():
+            active = (key == section)
+            lbl.configure(fg=app.ACC if active else app.FG2)
+            ind.configure(bg=app.ACC if active else app.BG2)
+        if section == 'overview':
+            self._overview_page.tkraise()
+        elif section == 'goals_maxing':
+            self._ensure_goals_maxing_built()
+            self._goals_maxing_page.tkraise()
+
+    def _ensure_goals_maxing_built(self):
+        if self._goals_maxing_built:
+            return
+        self._goals_maxing_built = True
+        from ui.wom_goals import WomGoalsPage
+        self._wom_goals_page = WomGoalsPage(self.app, self._goals_maxing_page)
+
+    def show_goals_maxing(self):
+        """Public method — called by Monitor's Max Progress card click
+        handler to jump straight to this section. App.show_tab('Stats')
+        is responsible for making the Stats tab itself visible first;
+        this only handles the internal sidebar switch."""
+        if not self._built:
+            self._ensure_built()
+        self._switch_section('goals_maxing')
 
     def _build_empty_state(self, f):
         app = self.app

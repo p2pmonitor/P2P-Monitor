@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.15
+P2P Monitor v2.0.0-beta.16
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -62,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.15"
+VERSION      = "2.0.0-beta.16"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -120,6 +120,9 @@ DEFAULT_CFG = {
     "ui_section_discord_open": True,
     "ui_section_notifications_open": True,
     "ui_section_auto_restart_open": True,
+    "wom_username_map": {},
+    "wom_global_rate_overrides": {},
+    "wom_account_rate_overrides": {},
 }
 
 def _send_startup_ping(cfg, log_fn=None):
@@ -217,9 +220,14 @@ class App(tk.Tk):
         # routing. _session_start_ts is set fresh on every _start() call.
         # _highlights tracks only the most recent occurrence of each type,
         # fed directly from the same real _on_event() calls that already
-        # drive the counters — never fabricated.
+        # drive the counters — never fabricated. Starts as None here; the
+        # real values are restored from history on a background thread
+        # shortly after startup (see _restore_highlights_from_history) so
+        # a freshly-launched app doesn't show "None yet" for things that
+        # genuinely happened in a previous session.
         self._session_start_ts = None
-        self._highlights = {'task': None, 'levelup': None, 'error': None, 'drop': None}
+        self._highlights = {'task': None, 'levelup': None, 'error': None,
+                             'drop': None, 'last99': None}
         self._style()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -356,6 +364,7 @@ class App(tk.Tk):
         self._status_debounce_id = None
         self.after(100, self._history.load)
         self.after(1500, self._cleanup_stale_update_temp_dirs)
+        self.after(200, self._restore_highlights_from_history)
         self.after(3000, self._silent_update_check)
         self.after(3500, self._startup_dependency_check)
         self.after(4000, self._prewarm_stats)
@@ -416,6 +425,10 @@ class App(tk.Tk):
                 self._highlights[highlight_key] = {
                     'account': folder, 'value': v1, 'activity': v2, 'ts': time.time(),
                 }
+            if etype == 'levelup' and v2 == '99':
+                self._highlights['last99'] = {
+                    'account': folder, 'value': v1, 'activity': v2, 'ts': time.time(),
+                }
             if self._status_debounce_id:
                 self.after_cancel(self._status_debounce_id)
             self._status_debounce_id = self.after(2000, self._debounced_refresh_tick)
@@ -472,7 +485,11 @@ class App(tk.Tk):
         for v in self._sv.values():
             v.set('0')
         self._session_start_ts = time.time()
-        self._highlights = {'task': None, 'levelup': None, 'error': None, 'drop': None}
+        # _highlights is deliberately NOT reset here anymore — these are
+        # meant to persist across Start/Stop within a session (and across
+        # app restarts, via history restore), not just reflect "since the
+        # last time I clicked Start." Resetting them here would silently
+        # undo that the moment someone stops and restarts monitoring.
         if getattr(self, '_monitor_tab', None):
             self._monitor_tab.refresh_session_overview()
             self._monitor_tab.refresh_highlights()
@@ -780,6 +797,83 @@ class App(tk.Tk):
                 self._log(f'🧹 Removed {len(removed)} stale update temp folder(s): '
                           f'{", ".join(removed)}')
         threading.Thread(target=_do, daemon=True).start()
+
+    def _restore_highlights_from_history(self):
+        """
+        Runs once, on a background thread, shortly after startup. Scans
+        every account's history (the same files History tab reads, via
+        the same load_history_accounts()/load_history_for() loaders) to
+        find the most recent real occurrence of each Highlight type —
+        task, levelup, error, drop, and last99 (a levelup specifically
+        reaching level 99) — so a freshly-launched app doesn't show "None
+        yet" for things that genuinely happened in a previous session.
+
+        Never touches the Tk main thread for the actual file reads — only
+        the final UI update happens via app.after(0, ...). A bad/corrupt
+        history file for one account is skipped, not fatal to the whole
+        scan. If a live event arrives before this background scan
+        finishes, the live value always wins — see
+        _apply_restored_highlights()'s "only fill in if still None" check.
+
+        last99 specifically also falls back to WOM cache (reusing
+        py.wom.determine_last_99() per account — not a separate hand-
+        rolled check) if history found no level-99 anywhere at all. Cache
+        data has no timestamp (it only knows a skill IS at 99, never
+        when), so ts stays None for a cache-sourced result; the renderer
+        shows "from WOM cache" in that case instead of an age.
+        """
+        def _do():
+            from py.history import load_history_accounts, load_history_for, _parse_ts
+            best = {'task': None, 'levelup': None, 'error': None, 'drop': None, 'last99': None}
+            try:
+                accounts = load_history_accounts()
+            except Exception:
+                accounts = []
+            for account in accounts:
+                try:
+                    rows = load_history_for(account)
+                except Exception:
+                    continue
+                for r in rows:
+                    ts = _parse_ts(r.get('time', ''))
+                    if ts is None:
+                        continue
+                    rtype = r.get('type')
+                    if rtype in best:
+                        cur = best[rtype]
+                        if cur is None or ts > cur['ts']:
+                            best[rtype] = {'account': account, 'value': r.get('value', ''),
+                                           'activity': r.get('activity', ''), 'ts': ts}
+                    if rtype == 'levelup' and r.get('activity') == '99':
+                        cur99 = best['last99']
+                        if cur99 is None or ts > cur99['ts']:
+                            best['last99'] = {'account': account, 'value': r.get('value', ''),
+                                               'activity': r.get('activity', ''), 'ts': ts}
+            if best['last99'] is None:
+                try:
+                    from py.wom import load_wom_cache, determine_last_99
+                    cache = load_wom_cache()
+                    for account, entry in cache.get('accounts', {}).items():
+                        result = determine_last_99([], entry.get('skills') or {})
+                        if result:
+                            best['last99'] = {'account': account, 'value': result['skill'],
+                                               'activity': '99', 'ts': None}
+                            break  # no real timestamp to compare across accounts from cache alone
+                except Exception:
+                    pass
+            self.after(0, lambda: self._apply_restored_highlights(best))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_restored_highlights(self, restored):
+        """Main-thread callback for the background scan above. Only ever
+        fills in a highlight that's still None — a live event arriving
+        before or during the scan is always more current than anything
+        history could show, and must never be clobbered by this."""
+        for key, val in restored.items():
+            if val is not None and self._highlights.get(key) is None:
+                self._highlights[key] = val
+        if getattr(self, '_monitor_tab', None):
+            self._monitor_tab._render_highlight_values()
 
     def _do_apply_update(self, new_ver, asset_url):
         """

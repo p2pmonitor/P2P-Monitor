@@ -25,6 +25,7 @@ py/paint.py
 py/watcher.py
 py/launcher.py
 py/inferno.py
+py/wom.py
 ui/__init__.py
 ui/monitor_tab.py
 ui/status_tab.py
@@ -32,3 +33,4 @@ ui/stats_tab.py
 ui/history_tab.py
 ui/launcher_tab.py
 ui/settings_tab.py
+ui/wom_goals.py

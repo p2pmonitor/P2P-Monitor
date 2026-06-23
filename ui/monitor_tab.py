@@ -42,6 +42,7 @@ class MonitorTab:
         self._build(parent_frame)
         self.refresh_session_overview()
         self.refresh_highlights()
+        self.refresh_max_progress()
         self._tick()
 
     # ── Build ──────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ class MonitorTab:
         self._build_session_control(left)
         self._build_session_overview(left)
         self._build_active_accounts_card(left)
+        self._build_max_progress_card(left)
 
         self._build_stat_strip(right)
         self._build_highlights(right)
@@ -170,6 +172,121 @@ class MonitorTab:
         else:
             self._aa_sub_lbl.configure(text=f"⚠ {total - active} need attention", fg=app.YEL)
 
+    # ── Max Progress (sidebar) ──────────────────────────────────────────────────
+    def _build_max_progress_card(self, parent):
+        app = self.app
+        card = self._card(parent, "MAX PROGRESS", '🏆')
+        tk.Label(card, text="Closest to max", font=app.SANSS, bg=app.BG3, fg=app.FG2
+                 ).pack(anchor='w')
+        self._mp_account_lbl = tk.Label(card, text="No WOM data yet", font=(app.SANS[0], 14, 'bold'),
+                                         bg=app.BG3, fg=app.FG, cursor='hand2', anchor='w')
+        self._mp_account_lbl.pack(anchor='w', pady=(2, 4), fill='x')
+        self._mp_99_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
+        self._mp_99_lbl.pack(anchor='w', fill='x')
+        self._mp_time_lbl = tk.Label(card, text="", font=app.SANSB, bg=app.BG3, fg=app.ACC, anchor='w')
+        self._mp_time_lbl.pack(anchor='w', pady=(0, 4), fill='x')
+        self._mp_bar_bg = tk.Frame(card, bg=app.BG4, height=6)
+        self._mp_bar_bg.pack(fill='x', pady=(0, 6))
+        self._mp_bar_fill = tk.Frame(self._mp_bar_bg, bg=app.GREEN, height=6, width=0)
+        self._mp_bar_fill.place(x=0, y=0)
+        self._mp_note_lbl = tk.Label(card, text="No WOM data yet", font=app.SANSS,
+                                      bg=app.BG3, fg=app.FG2, anchor='w')
+        self._mp_note_lbl.pack(anchor='w', fill='x')
+
+        # Clicking the card switches to Stats -> Goals & Maxing, per spec.
+        for w in (card, self._mp_account_lbl):
+            w.configure(cursor='hand2')
+            w.bind('<Button-1>', lambda e: self._open_goals_maxing())
+
+    def _open_goals_maxing(self):
+        app = self.app
+        app.show_tab('Stats')
+        if getattr(app, '_stats_tab', None) and hasattr(app._stats_tab, 'show_goals_maxing'):
+            app.after(50, app._stats_tab.show_goals_maxing)
+
+    def refresh_max_progress(self):
+        """
+        Reads ONLY the on-disk WOM cache — never calls the WOM API. The
+        actual file read + computation runs on a background thread (cheap
+        in practice, but file I/O has no business on the Tk main thread
+        regardless). "Closest to max" = the cached account with the
+        lowest nonzero computed time-to-max; an account with no usable
+        rate data anywhere just isn't a candidate.
+
+        For the winning account's "Last 99", uses
+        py.wom.determine_last_99() the same way Goals & Maxing does:
+        a real history levelup event wins if one exists, falling back to
+        WOM cache data (labeled "from WOM cache", since cache only knows
+        a skill IS at 99, never when) — never the bare "any cached skill
+        at/above the 99 XP threshold" check this used before. The history
+        read for just this one account happens inside this same
+        already-backgrounded thread, so it adds no new main-thread risk.
+        """
+        app = self.app
+        def _do():
+            from py.wom import load_wom_cache, compute_account_summary, determine_last_99
+            try:
+                cache = load_wom_cache()
+            except Exception:
+                cache = {'accounts': {}}
+            best = None
+            for account, entry in cache.get('accounts', {}).items():
+                skills = entry.get('skills') or {}
+                if not skills:
+                    continue
+                summary = compute_account_summary(account, app.cfg, skills)
+                ttm = summary.get('time_to_max_hours')
+                if not ttm or ttm <= 0:
+                    continue
+                if best is None or ttm < best['time_to_max_hours']:
+                    best = summary
+
+            last99 = None
+            if best:
+                account = best['account']
+                try:
+                    from py.stats import load_levelup_rows
+                    from py.history import _parse_ts
+                    rows99 = [{'value': r['skill'], 'activity': '99', '_ts_epoch': _parse_ts(r['time'])}
+                              for r in load_levelup_rows(accounts=[account]) if r['level'] == 99]
+                except Exception:
+                    rows99 = []
+                acc_skills = cache.get('accounts', {}).get(account, {}).get('skills') or {}
+                last99 = determine_last_99(rows99, acc_skills)
+
+            app.after(0, lambda: self._apply_max_progress(best, last99))
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _apply_max_progress(self, best, last99=None):
+        app = self.app
+        if not best:
+            self._mp_account_lbl.configure(text="No WOM data yet", fg=app.FG2)
+            self._mp_99_lbl.configure(text="")
+            self._mp_time_lbl.configure(text="")
+            self._mp_bar_fill.place_configure(width=0)
+            self._mp_note_lbl.configure(text="Open Stats → Goals & Maxing")
+            return
+        from py.wom import format_hours_compact
+        self._mp_account_lbl.configure(text=best['account'], fg=app.ACC)
+        if last99:
+            source_text = self._ago(last99['ts']) if last99['ts'] else 'from WOM cache'
+            self._mp_99_lbl.configure(text=f"Last 99: {last99['skill']}  •  {source_text}")
+        else:
+            self._mp_99_lbl.configure(text="Last 99: —")
+        ttm = best['time_to_max_hours']
+        self._mp_time_lbl.configure(text=f"Time left: {format_hours_compact(ttm)}")
+        # Progress bar: rough share of total levels already at 99, just a
+        # quick visual cue, not a precise XP-weighted progress metric.
+        achieved = sum(1 for e in best['per_skill'] if e['status'] == 'achieved')
+        eligible = sum(1 for e in best['per_skill'] if e['status'] in ('achieved', 'active'))
+        frac = (achieved / eligible) if eligible else 0
+        try:
+            bar_w = self._mp_bar_bg.winfo_width() or 200
+        except Exception:
+            bar_w = 200
+        self._mp_bar_fill.place_configure(width=max(2, int(bar_w * frac)))
+        self._mp_note_lbl.configure(text="WOM cached")
+
     # ── Stat strip ────────────────────────────────────────────────────────────────
     def _build_stat_strip(self, parent):
         app = self.app
@@ -232,21 +349,24 @@ class MonitorTab:
             sub_lbl.pack(fill='x', anchor='w')
             self._hl_widgets[key] = (val_lbl, sub_lbl)
 
-        # Active Accounts highlight card mirrors the sidebar card's numbers —
-        # same source data (_last_account_rows), no extra fetch.
+        # Last 99 Achieved — replaces the old duplicate Active Accounts card
+        # (that data is already shown in the Active Accounts sidebar card;
+        # showing it twice was redundant). Uses the same val/sub pattern as
+        # the other highlight cards: val = "Skill → 99", sub = "account • ago".
         cell = tk.Frame(strip, bg=app.BG3, padx=10, pady=8)
         cell.pack(side='left', fill='both', expand=True)
         top = tk.Frame(cell, bg=app.BG3)
         top.pack(fill='x', anchor='w')
-        tk.Label(top, text='👥', font=(app.SANS[0], 11), bg=app.BG3, fg=app.ACC
+        tk.Label(top, text='🏆', font=(app.SANS[0], 11), bg=app.BG3, fg=app.YEL
                  ).pack(side='left', padx=(0, 4))
-        tk.Label(top, text="ACTIVE ACCOUNTS", font=app.SANSS, bg=app.BG3, fg=app.FG2
+        tk.Label(top, text="LAST 99 ACHIEVED", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
-        self._hl_accounts_val = tk.Label(cell, text="—", font=app.SANSB, bg=app.BG3, fg=app.FG, anchor='w')
-        self._hl_accounts_val.pack(fill='x', anchor='w', pady=(4, 0))
-        self._hl_accounts_sub = tk.Label(cell, text="No accounts yet", font=app.SANSS,
-                                          bg=app.BG3, fg=app.FG2, anchor='w')
-        self._hl_accounts_sub.pack(fill='x', anchor='w')
+        val_lbl = tk.Label(cell, text="None yet", font=app.SANSB, bg=app.BG3, fg=app.FG,
+                            anchor='w', justify='left', wraplength=160)
+        val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
+        sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
+        sub_lbl.pack(fill='x', anchor='w')
+        self._hl_widgets['last99'] = (val_lbl, sub_lbl)
 
     def refresh_highlights(self):
         """app._highlights is a pure dict read (no I/O) — but
@@ -284,17 +404,10 @@ class MonitorTab:
 
     def _apply_highlights_data(self, rows):
         """Main-thread-only: applies already-fetched account rows to the
-        Active Accounts / Highlights widgets. Never does I/O itself —
-        rows are always handed in by refresh_highlights()'s background
-        thread."""
+        Active Accounts sidebar card. Never does I/O itself — rows are
+        always handed in by refresh_highlights()'s background thread."""
         self._last_account_rows = rows
         self._render_active_accounts(rows)
-        self._hl_accounts_val.configure(
-            text=f"{sum(1 for r in rows if '🟢' in r['status'] or '🟡' in r['status'])}/{len(rows)}"
-            if rows else "—")
-        self._hl_accounts_sub.configure(
-            text="All operational" if rows and all('🟢' in r['status'] or '🟡' in r['status'] for r in rows)
-            else ("No accounts yet" if not rows else "Needs attention"))
         self._render_highlight_values()
 
     def _render_highlight_values(self):
@@ -317,6 +430,10 @@ class MonitorTab:
             elif key == 'drop':
                 val_lbl.configure(text=h['value'])
                 sub_lbl.configure(text=self._ago(h['ts']))
+            elif key == 'last99':
+                val_lbl.configure(text=f"{h['value']} → 99")
+                age_or_source = self._ago(h['ts']) if h['ts'] is not None else 'from WOM cache'
+                sub_lbl.configure(text=f"{h['account']} • {age_or_source}")
 
     @staticmethod
     def _ago(ts):
