@@ -302,7 +302,8 @@ class StatsTab:
         tk.Label(f, text="No level-up data found yet.", font=app.SANSL,
                  bg=app.BG2, fg=app.FG).pack()
         tk.Label(f, text="Level-up stats will appear here once the monitor records some.",
-                 font=app.SANS, bg=app.BG2, fg=app.FG2).pack(pady=(6, 0))
+                 font=app.SANS, bg=app.BG2, fg=app.FG2, wraplength=420, justify='center'
+                 ).pack(pady=(6, 0))
         tk.Frame(f, bg=app.BG2).pack(expand=True)
 
     def _build_filters(self, parent):
@@ -313,15 +314,15 @@ class StatsTab:
         tk.Label(row, text="Account", font=app.SANS, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(0, 6))
         self._account_var = tk.StringVar(value=self.ALL_ACCOUNTS)
         self._account_cb = ttk.Combobox(row, textvariable=self._account_var, state='readonly',
-                                         font=app.SANS, width=18, values=[self.ALL_ACCOUNTS])
-        self._account_cb.pack(side='left', padx=(0, 16))
+                                         font=app.SANS, width=13, values=[self.ALL_ACCOUNTS])
+        self._account_cb.pack(side='left', padx=(0, 12))
         self._account_cb.bind('<<ComboboxSelected>>', lambda e: self._on_filter_changed())
 
         tk.Label(row, text="Skill", font=app.SANS, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(0, 6))
         self._skill_var = tk.StringVar(value=self.ALL_SKILLS)
         self._skill_cb = ttk.Combobox(row, textvariable=self._skill_var, state='readonly',
-                                       font=app.SANS, width=16, values=[self.ALL_SKILLS])
-        self._skill_cb.pack(side='left', padx=(0, 16))
+                                       font=app.SANS, width=11, values=[self.ALL_SKILLS])
+        self._skill_cb.pack(side='left', padx=(0, 12))
         self._skill_cb.bind('<<ComboboxSelected>>', lambda e: self._on_filter_changed())
 
         # Date-range pill buttons
@@ -330,15 +331,15 @@ class StatsTab:
         pills.pack(side='left')
         for preset in DATE_PRESETS:
             b = tk.Button(pills, text=preset, font=app.SANSB, relief='flat',
-                          padx=10, pady=4, cursor='hand2',
+                          padx=6, pady=4, cursor='hand2',
                           command=lambda p=preset: self._set_date_preset(p))
-            b.pack(side='left', padx=2)
+            b.pack(side='left', padx=1)
             self._date_btns[preset] = b
         self._refresh_preset_buttons()
 
         self._refresh_btn = tk.Button(row, text="↻  Refresh", font=app.SANSB,
                                        bg=app.BG3, fg=app.FG2, relief='flat',
-                                       padx=12, pady=4, cursor='hand2',
+                                       padx=8, pady=4, cursor='hand2',
                                        command=self._on_refresh_click)
         self._refresh_btn.pack(side='right')
 
@@ -373,7 +374,8 @@ class StatsTab:
                  bg=app.BG3, fg=app.FG).pack(anchor='w', padx=4, pady=(0, 4))
         self._chart_frame = frame
 
-        canvas = tk.Canvas(frame, bg=app.BG3, highlightthickness=0, bd=0)
+        canvas = tk.Canvas(frame, bg=app.BG3, highlightthickness=0, bd=0,
+                            width=300, height=130)
         canvas.pack(fill='both', expand=True)
         self._chart_canvas = canvas
 

@@ -323,6 +323,14 @@ def _validate_jar(cfg: dict) -> Optional[str]:
 
 # ── Window-position restore (relaunch only — see relaunch_account) ─────────────
 
+# DreamBot's own client cannot render smaller than this — confirmed real
+# floor, not a guess. A captured size below this is known-impossible data
+# (e.g. a bad read mid-minimize), not a legitimately small real window —
+# see _size_is_plausible().
+DREAMBOT_MIN_W = 765
+DREAMBOT_MIN_H = 503
+
+
 def _geometry_is_sane(geom) -> bool:
     """
     Conservative sanity check for a captured (x, y, w, h) tuple before ever
@@ -344,6 +352,24 @@ def _geometry_is_sane(geom) -> bool:
     return True
 
 
+def _size_is_plausible(geom) -> bool:
+    """
+    True if the captured size could plausibly be a real DreamBot window.
+    DreamBot cannot render below DREAMBOT_MIN_W x DREAMBOT_MIN_H, so
+    anything smaller is known-bad data, not a legitimately small window —
+    e.g. a geometry read taken mid-minimize/mid-animation. This is checked
+    separately from _geometry_is_sane(): a geometry can pass the generic
+    sanity check (not wildly out of range) while still being below this
+    real, known floor. Only gates whether to trust the *size* — the
+    *position* from the same read is restored regardless (the user's
+    window was exactly there; we don't second-guess where they put it).
+    """
+    if not geom or len(geom) != 4:
+        return False
+    _, _, w, h = geom
+    return w >= DREAMBOT_MIN_W and h >= DREAMBOT_MIN_H
+
+
 def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict = None,
                         restore_geometry: Optional[tuple] = None) -> None:
     """
@@ -357,8 +383,12 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
     client window before it was closed (relaunch_account only — fresh
     launches via launch_account have nothing to restore from, so they
     never pass this). If the new window is found in time and the geometry
-    passes _geometry_is_sane(), best-effort move/resize it back into
-    place. Any failure here is logged and swallowed — a missed position
+    passes _geometry_is_sane(), best-effort move it back into place.
+    Resize is applied too unless the captured size fails
+    _size_is_plausible() (below DreamBot's real minimum render size) —
+    in that case the position is still restored exactly as captured
+    (never clamped or guessed), just without reapplying a size known to
+    be bad. Any failure here is logged and swallowed — a missed position
     restore is never worth crashing the launch over.
     """
     def _log(msg):
@@ -382,15 +412,22 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                 _log(f'⚠️ [{account}] Saved window position looked invalid '
                      f'({restore_geometry}) — skipping restore rather than guessing.')
             else:
+                resize_ok = _size_is_plausible(restore_geometry)
                 try:
                     from py.platform_ops import set_window_geometry
                     x, y, w, h = restore_geometry
-                    ok = set_window_geometry(new_wid, x, y, w, h)
+                    ok = set_window_geometry(new_wid, x, y, w, h, resize=resize_ok)
                     if ok:
+                        action = 'Restored window position' if resize_ok else \
+                                 'Restored window position only — captured size was below DreamBot\'s minimum, not reapplied'
                         write_debug_entry('launcher', {'account': account,
-                                           'msg': f'Restored window position {restore_geometry}'})
+                                           'msg': f'{action} {restore_geometry}'})
                         if cfg and cfg.get('debug', False):
-                            _log(f'↩️ [{account}] Restored window position.')
+                            _log(f'↩️ [{account}] {action}.')
+                        if not resize_ok:
+                            _log(f'⚠️ [{account}] Captured size {restore_geometry[2]}x{restore_geometry[3]} '
+                                 f'is below DreamBot\'s minimum ({DREAMBOT_MIN_W}x{DREAMBOT_MIN_H}) — '
+                                 f'position restored, size left as-is.')
                     else:
                         _log(f'⚠️ [{account}] Could not restore window position — '
                              f'client is open at its default position instead.')
@@ -680,7 +717,7 @@ def launch_all(cfg: dict, log_fn=None) -> list:
         if not account:
             continue
         if i > 0:
-            _log(f'⏳ [launch_all] Stagger: waiting 5s before next account...')
+            _log('⏳ [launch_all] Stagger: waiting 5s before next account...')
             time.sleep(5)
         _log(f'🚀 [launch_all] Processing: {account}')
         results.append(launch_account(cfg, account, log_fn=log_fn))
@@ -713,7 +750,7 @@ def relaunch_all(cfg: dict, log_fn=None) -> list:
         if not account:
             continue
         if i > 0:
-            _log(f'⏳ [relaunch_all] Stagger: waiting 5s before next account...')
+            _log('⏳ [relaunch_all] Stagger: waiting 5s before next account...')
             time.sleep(5)
         _log(f'🔄 [relaunch_all] Processing: {account}')
         results.append(smart_launch(cfg, account, log_fn=log_fn))

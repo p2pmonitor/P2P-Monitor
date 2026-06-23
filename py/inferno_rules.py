@@ -227,7 +227,6 @@ def fetch_and_apply_patterns(log_fn=None, debug=False):
     Called once at app startup in a background thread. Never blocks the UI.
     Never raises.
     """
-    global _patterns
 
     def _log(msg):
         if log_fn:

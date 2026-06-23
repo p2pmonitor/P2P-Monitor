@@ -42,7 +42,7 @@ def _get_linux_env():
     return get_display_env()
 
 from py.platform_ops import (find_window_ids_by_name, capture_window_image,
-                             get_focused_window, get_window_geometry,
+                             get_focused_window,
                              is_window_minimized, restore_window,
                              raise_and_focus_window, minimize_window,
                              click_at, supports_paint_detection,
@@ -491,7 +491,7 @@ def snap_paint_reference(log=None):
     Returns (ok: bool, msg: str).
     """
     import sys
-    from py.platform_ops import find_window_ids_by_name, get_focused_window
+    from py.platform_ops import get_focused_window
     from py.platform_ops import raise_and_focus_window
 
     # Find any DreamBot window

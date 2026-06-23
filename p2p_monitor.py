@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.17
+P2P Monitor v2.0.0-beta.18
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -62,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.17"
+VERSION      = "2.0.0-beta.18"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -434,6 +434,38 @@ class App(tk.Tk):
             self._status_debounce_id = self.after(2000, self._debounced_refresh_tick)
             if etype == 'levelup' and getattr(self, '_stats_tab', None):
                 self._stats_tab.mark_dirty()
+
+            # History tab — live in-memory append, separate from the disk
+            # write watcher.py already does via append_history(). Best-
+            # effort: History must never be the thing that breaks live
+            # event handling for everything else, so this is deliberately
+            # last and wrapped on its own.
+            history = getattr(self, '_history', None)
+            if history:
+                try:
+                    # value/activity get remapped for a few types between
+                    # disk and this UI callback (see watcher.py's
+                    # handle_event Leg 2 vs Leg 1) — mirror what disk
+                    # actually has for death/script_event exactly; drop's
+                    # exact sub-type isn't available here (only watcher.py
+                    # has the parser's _drop_types), so it gets a close
+                    # approximation that self-corrects on the next real
+                    # disk reload (filter change, manual refresh, backfill).
+                    if etype == 'death':
+                        hist_value, hist_activity = 'Oh dear, you are dead!', ''
+                    elif etype == 'script_event':
+                        hist_value, hist_activity = v2, ''
+                    else:
+                        hist_value, hist_activity = v1, v2
+                    history.append_entry(folder, {
+                        'time':     datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'account':  folder,
+                        'type':     etype,
+                        'value':    hist_value,
+                        'activity': hist_activity,
+                    })
+                except Exception as e:
+                    self._log(f'⚠ History live-append failed for {folder}/{etype}: {e}')
         self.after(0, _do)
 
     def _debounced_refresh_tick(self):
@@ -704,10 +736,12 @@ class App(tk.Tk):
         try:
             tag, asset_url = self._fetch_release_info(include_prerelease=include_pre)
         except urllib.error.HTTPError as e:
-            self.after(0, lambda: messagebox.showerror('Auto-Update', f'GitHub error: {e.code} {e.reason}'))
+            err_code, err_reason = e.code, e.reason
+            self.after(0, lambda: messagebox.showerror('Auto-Update', f'GitHub error: {err_code} {err_reason}'))
             return
         except Exception as e:
-            self.after(0, lambda: messagebox.showerror('Auto-Update', f'Update check failed: {e}'))
+            err_msg = str(e)
+            self.after(0, lambda: messagebox.showerror('Auto-Update', f'Update check failed: {err_msg}'))
             return
         if not tag:
             self.after(0, lambda: messagebox.showwarning('Auto-Update', 'No releases found.'))
@@ -903,16 +937,18 @@ class App(tk.Tk):
             with urllib.request.urlopen(req, timeout=60) as r:
                 zip_bytes = r.read()
         except Exception as e:
-            self._log(f'❌ Download failed: {e}')
-            self.after(0, lambda: messagebox.showerror('Update Failed', f'Download failed: {e}'))
+            err_msg = str(e)
+            self._log(f'❌ Download failed: {err_msg}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', f'Download failed: {err_msg}'))
             return
 
         # Stage in a temp dir on the same filesystem as install_dir
         try:
             stage_dir = Path(tempfile.mkdtemp(dir=install_dir, prefix='.update_tmp_'))
         except Exception as e:
-            self._log(f'❌ Could not create staging dir: {e}')
-            self.after(0, lambda: messagebox.showerror('Update Failed', f'Staging failed: {e}'))
+            err_msg = str(e)
+            self._log(f'❌ Could not create staging dir: {err_msg}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', f'Staging failed: {err_msg}'))
             return
 
         self._log(f'📦 Staging {new_ver}...')
@@ -948,7 +984,7 @@ class App(tk.Tk):
             if missing:
                 self._log(f'❌ Staging verification failed — missing: {missing}')
                 self.after(0, lambda: messagebox.showerror('Update Failed',
-                    f'Zip is missing expected files:\n' + '\n'.join(missing)))
+                    'Zip is missing expected files:\n' + '\n'.join(missing)))
                 return
 
             # Back up entry point before any writes
@@ -980,8 +1016,9 @@ class App(tk.Tk):
             self._log(f'📦 {applied} file(s) updated, {skipped} unchanged')
 
         except Exception as e:
-            self._log(f'❌ Update failed: {e}\n{traceback.format_exc()}')
-            self.after(0, lambda: messagebox.showerror('Update Failed', str(e)))
+            err_msg = str(e)
+            self._log(f'❌ Update failed: {err_msg}\n{traceback.format_exc()}')
+            self.after(0, lambda: messagebox.showerror('Update Failed', err_msg))
             return
         finally:
             # Always clean up staging dir
@@ -1183,7 +1220,7 @@ class App(tk.Tk):
         Launches the batch detached then exits the app cleanly.
         Does not require admin rights. Does not use taskkill /f.
         """
-        import urllib.request, tempfile, subprocess, traceback
+        import urllib.request, subprocess
 
         old_exe  = Path(sys.executable)
         tmp_dir  = old_exe.parent / '.update_tmp'
@@ -1206,9 +1243,10 @@ class App(tk.Tk):
             self._log(f'✅ Downloaded {new_ver} ({len(data) // 1024} KB)')
 
         except Exception as e:
-            self._log(f'❌ Download failed: {e}')
+            err_msg = str(e)
+            self._log(f'❌ Download failed: {err_msg}')
             self.after(0, lambda: messagebox.showerror(
-                'Update Failed', f'Could not download {new_ver}:\n{e}'))
+                'Update Failed', f'Could not download {new_ver}:\n{err_msg}'))
             try:
                 import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1284,9 +1322,10 @@ class App(tk.Tk):
         try:
             bat_path.write_text('\r\n'.join(bat_lines), encoding='utf-8-sig')
         except Exception as e:
-            self._log(f'❌ Could not write update batch: {e}')
+            err_msg = str(e)
+            self._log(f'❌ Could not write update batch: {err_msg}')
             self.after(0, lambda: messagebox.showerror(
-                'Update Failed', f'Could not write update script:\n{e}'))
+                'Update Failed', f'Could not write update script:\n{err_msg}'))
             return
 
         self._log(f'🔄 Launching updater - app will close and restart as {new_ver}')
@@ -1302,9 +1341,10 @@ class App(tk.Tk):
             self._log(f'🔄 Batch launched (pid {proc.pid}) — closing app for update...')
             self.after(500, self._do_quit)
         except Exception as e:
-            self._log(f'❌ Could not launch update batch: {e}')
+            err_msg = str(e)
+            self._log(f'❌ Could not launch update batch: {err_msg}')
             self.after(0, lambda: messagebox.showerror(
-                'Update Failed', f'Could not launch update script:\n{e}'))
+                'Update Failed', f'Could not launch update script:\n{err_msg}'))
 
     # ── Tray ───────────────────────────────────────────────────────────────────
     def _make_tray_icon(self):

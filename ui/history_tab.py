@@ -32,6 +32,7 @@ per-event Severity classification derived from the existing `etype` field
 written to disk.
 """
 import tkinter as tk
+from collections import deque
 from datetime import datetime, timedelta
 from tkinter import ttk
 
@@ -69,6 +70,11 @@ class HistoryTab:
         self._debounce_id      = None
         self._initial_load     = True
         self._search_debounce_id = None
+        # Bounded recency guard against double-appending the exact same
+        # live event twice (see append_entry) — small and cheap; this tab
+        # never needs to remember more than a couple hundred recent keys
+        # to make duplicates effectively impossible in practice.
+        self._recent_event_keys = deque(maxlen=200)
         self._build(parent_frame)
 
     # ── Build ──────────────────────────────────────────────────────────────────
@@ -203,17 +209,65 @@ class HistoryTab:
             self._initial_load = False
 
     def append_entry(self, account, entry):
-        """Append a new live entry and schedule a debounced rebuild."""
-        cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
-        if account not in self._cache:
+        """Incrementally apply one live event to the in-memory cache and,
+        where possible, the on-screen display — without a full
+        destroy/rebuild of every account card. See the class docstring
+        for the full contract; summary:
+          - always cache (subject to the same 24h trim load() uses)
+          - skip entirely if this exact event was already applied (dedup
+            guard — see _recent_event_keys)
+          - if a date filter is active, cache only — a live event is
+            always "now", which by definition isn't inside an explicit
+            past date range someone is currently viewing
+          - if this is a brand-new account (no card yet), do one real
+            rebuild — rare (once per account, ever), and inserting a new
+            card at the correct sorted position isn't worth the risk of
+            getting pack-ordering wrong by hand
+          - if the account has a card but the event doesn't match the
+            active type/search filter, cache only
+          - otherwise: update that account's count/last-event labels in
+            place, and if its tree is currently built (account expanded),
+            insert exactly one new row at the correct sorted position
+        Never calls _rebuild_accounts() for the normal case this exists
+        for. A full rebuild remains the fallback for the cases that
+        genuinely need one (see on_tab_shown/load/_apply_filters/_on_sort
+        and the explicit rebuild calls elsewhere in this file).
+        """
+        key = (entry.get('time', ''), account, entry.get('type', ''),
+               entry.get('value', ''), entry.get('activity', ''))
+        if key in self._recent_event_keys:
+            return
+        self._recent_event_keys.append(key)
+
+        is_new_account = account not in self._cache
+        if is_new_account:
             self._cache[account] = []
         self._cache[account].append(entry)
-        self._cache[account] = [r for r in self._cache[account]
-                                 if r.get('time', '') >= cutoff]
-        if not self._filter_date:
-            if self._debounce_id:
-                self.app.after_cancel(self._debounce_id)
-            self._debounce_id = self.app.after(5000, self._rebuild_accounts)
+        cutoff = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+        self._cache[account] = [r for r in self._cache[account] if r.get('time', '') >= cutoff]
+
+        if self._filter_date:
+            return  # viewing an explicit past range — cache only, see docstring
+
+        if is_new_account:
+            self._rebuild_accounts()
+            return
+
+        widgets = self._account_widgets.get(account)
+        if widgets is None:
+            return  # account exists but its card is filtered out of view right now
+
+        if not self._entry_matches_filters(entry, account):
+            return  # cached, but doesn't belong in the current filtered view
+
+        filtered = self._filtered_entries_for(account)
+        period_lbl = self._period_label()
+        widgets['count_lbl'].configure(text=f"{len(filtered)} events ({period_lbl})")
+        if filtered:
+            widgets['last_ts_lbl'].configure(text=fmt_ts(filtered[0]['time']))
+
+        if widgets.get('tree') is not None:
+            self._insert_row_sorted(widgets['tree'], entry)
 
     def focus_account(self, account):
         """Collapse all accounts, expand+scroll to the target — called from
@@ -238,8 +292,20 @@ class HistoryTab:
             pass
 
     def on_tab_shown(self):
-        """Called when the History tab is selected — reload from disk."""
-        self.load()
+        """Called when the History tab is selected. Used to unconditionally
+        reload from disk every time, which meant every click into History —
+        even a redundant click while already on it — did a full disk read
+        for every account plus a full destroy/rebuild of every account card.
+        Now: only the very first show does that. After that, the in-memory
+        cache is kept current via append_entry() as live events arrive (see
+        App._on_event's History forwarding), and a full reload only happens
+        for the cases that genuinely need one: an explicit date-filter
+        change, manual refresh, or backfill completing — see load()'s other
+        callers in p2p_monitor.py. Switching away and back must never blank
+        or rebuild the tab on its own.
+        """
+        if self._initial_load:
+            self.load()
 
     # ── Filtering helpers (pure in-memory — no disk reads) ──────────────────────
     def _get_search_text(self):
@@ -279,14 +345,52 @@ class HistoryTab:
             'break':           app.FG2,
         }.get(etype, app.FG2)
 
+    # ── Filter helpers (shared by full rebuild and incremental append) ─────────
+    def _active_type_filter(self):
+        type_label = self._type_filter_var.get()
+        return dict(self.TYPE_FILTER_OPTIONS).get(type_label)
+
+    def _filtered_entries_for(self, acc):
+        """Apply the currently-active type/search filters to one account's
+        cached entries. Used by both _rebuild_accounts (all accounts) and
+        the incremental append path (one account, on a live event) so the
+        two never drift apart on what counts as 'matching'."""
+        search = self._get_search_text()
+        type_filter = self._active_type_filter()
+        entries = [r for r in self._cache.get(acc, []) if r.get('type') != 'scan']
+        if type_filter:
+            entries = [r for r in entries if r.get('type') == type_filter]
+        account_name_matches = bool(search) and search in acc.lower()
+        if search and not account_name_matches:
+            entries = [r for r in entries if self._row_matches_search(r, search)]
+        return entries
+
+    def _entry_matches_filters(self, entry, acc):
+        """True if a single new entry would currently be visible for this
+        account under the active type/search filters — i.e. whether a live
+        append should be inserted into the Treeview, or just cached. An
+        account-name search match makes every entry for that account count
+        (matches _filtered_entries_for's account_name_matches behavior)."""
+        if entry.get('type') == 'scan':
+            return False
+        type_filter = self._active_type_filter()
+        if type_filter and entry.get('type') != type_filter:
+            return False
+        search = self._get_search_text()
+        if search and not (search in acc.lower()) and not self._row_matches_search(entry, search):
+            return False
+        return True
+
     # ── Rebuild ──────────────────────────────────────────────────────────────────
     def _rebuild_accounts(self):
-        """Always a full rebuild of the (few) account header cards — simplest
-        correctness guarantee against duplicate widgets, and cheap since
-        this only runs on load()/on_tab_shown()/a 5s-debounced live append,
-        never on every single event. Event ROWS within an account are only
-        populated into that account's Treeview if it's actually expanded —
-        a collapsed account with thousands of events costs nothing."""
+        """Full rebuild of every account header card. Reserved for cases
+        that genuinely need one — first load, a filter/sort change, manual
+        refresh, backfill completing, or a brand-new account appearing —
+        never for a normal live event on an account that already has a
+        card; see append_entry() for that path. Event ROWS within an
+        account are only populated into that account's Treeview if it's
+        actually expanded — a collapsed account with thousands of events
+        costs nothing."""
         self._debounce_id = None
         for w in self._accounts_frame.winfo_children():
             if w is not self._empty_lbl:
@@ -294,18 +398,13 @@ class HistoryTab:
         self._account_widgets = {}
 
         search = self._get_search_text()
-        type_label = self._type_filter_var.get()
-        type_filter = dict(self.TYPE_FILTER_OPTIONS).get(type_label)
+        type_filter = self._active_type_filter()
         any_filter_active = bool(search) or bool(type_filter)
 
         visible = []
         for acc in sorted(self._cache.keys()):
-            entries = [r for r in self._cache[acc] if r.get('type') != 'scan']
-            if type_filter:
-                entries = [r for r in entries if r.get('type') == type_filter]
+            entries = self._filtered_entries_for(acc)
             account_name_matches = bool(search) and search in acc.lower()
-            if search and not account_name_matches:
-                entries = [r for r in entries if self._row_matches_search(r, search)]
             if any_filter_active and not entries and not account_name_matches:
                 continue  # this account has nothing matching the active filter(s)
             visible.append((acc, entries))
@@ -345,15 +444,15 @@ class HistoryTab:
 
         meta = tk.Frame(header, bg=app.BG3)
         meta.pack(side='left', padx=(24, 0))
-        tk.Label(meta, text=count_lbl, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w'
-                 ).pack(anchor='w')
+        count_var_lbl = tk.Label(meta, text=count_lbl, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w')
+        count_var_lbl.pack(anchor='w')
         tk.Label(meta, text=f"Events ({period_lbl})", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                  anchor='w').pack(anchor='w')
 
         meta2 = tk.Frame(header, bg=app.BG3)
         meta2.pack(side='left', padx=(24, 0))
-        tk.Label(meta2, text=last_event_ts, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w'
-                 ).pack(anchor='w')
+        last_ts_var_lbl = tk.Label(meta2, text=last_event_ts, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w')
+        last_ts_var_lbl.pack(anchor='w')
         tk.Label(meta2, text="Last event", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                  anchor='w').pack(anchor='w')
 
@@ -361,7 +460,11 @@ class HistoryTab:
         btn_row.pack(side='right')
         summary_btn = tk.Button(btn_row, text="📊 Summary", font=app.SANSS,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=8, pady=4, cursor='hand2',
-            command=lambda a=acc, e=entries: self._show_summary_popup(a, e))
+            # Recomputed fresh at click time rather than closing over this
+            # build's `entries` snapshot — that snapshot would go stale the
+            # moment a live event incrementally updates the cache without a
+            # full rebuild (see append_entry()).
+            command=lambda a=acc: self._show_summary_popup(a, self._filtered_entries_for(a)))
         summary_btn.pack(side='left', padx=(0, 6))
         runtime_btn = tk.Button(btn_row, text="📈 Runtime Stats", font=app.SANSS,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=8, pady=4, cursor='hand2',
@@ -378,7 +481,8 @@ class HistoryTab:
             tree = self._build_event_tree(body_outer, acc, entries)
 
         return {'card': card, 'header': header, 'chevron': chevron,
-                'body_outer': body_outer, 'tree': tree}
+                'body_outer': body_outer, 'tree': tree,
+                'count_lbl': count_var_lbl, 'last_ts_lbl': last_ts_var_lbl}
 
     def _period_label(self):
         if not self._filter_date:
@@ -454,6 +558,53 @@ class HistoryTab:
             'severity': lambda r: self._severity(r.get('type', '')),
         }.get(self._sort_col, lambda r: r.get('time', ''))
         return sorted(entries, key=idx_key, reverse=self._sort_rev)
+
+    def _sort_key_for(self, entry):
+        """Same key derivation as _sort_entries, for a single entry — used
+        by _insert_row_sorted to find where one new row belongs without
+        re-sorting/rebuilding the whole tree."""
+        return {
+            'time':     lambda r: r.get('time', ''),
+            'type':     lambda r: r.get('type', ''),
+            'value':    lambda r: str(r.get('value', '')),
+            'activity': lambda r: str(r.get('activity', '')),
+            'severity': lambda r: self._severity(r.get('type', '')),
+        }.get(self._sort_col, lambda r: r.get('time', ''))(entry)
+
+    def _insert_row_sorted(self, tree, entry):
+        """Insert exactly one new row into an already-built, already-open
+        account's Treeview, at the position the current sort column/
+        direction says it belongs — instead of destroying and rebuilding
+        the whole tree for a single live event. Linear scan rather than
+        bisect: account event trees are bounded by the same 24h/filtered
+        window the rest of this tab already works with, never the
+        thousands-of-rows scale a global bisect would matter for."""
+        new_key = self._sort_key_for(entry)
+        children = tree.get_children()
+        insert_at = 'end'
+        for idx, iid in enumerate(children):
+            if self._sort_col == 'time':
+                existing_key = tree.raw_times.get(iid, '')
+            else:
+                vals = tree.item(iid, 'values')
+                col_idx = {'time': 0, 'type': 1, 'value': 2, 'activity': 3, 'severity': 4}[self._sort_col]
+                existing_key = vals[col_idx] if vals else ''
+            is_before = (new_key < existing_key) if not self._sort_rev else (new_key > existing_key)
+            if is_before:
+                insert_at = idx
+                break
+
+        etype = entry.get('type', '')
+        tag = etype if etype in (
+            'task', 'quest_completed', 'chat', 'error', 'drop', 'death',
+            'levelup', 'script_event', 'slayer_task', 'slayer_complete',
+            'slayer_skip', 'break') else 'info'
+        sev_dot = {'Error': '🔴', 'Success': '🟢', 'Info': '⚪'}
+        sev_label = self._severity(etype)
+        iid = tree.insert('', insert_at, values=(
+            fmt_ts(entry.get('time', '')), etype, entry.get('value', ''),
+            entry.get('activity', ''), f"{sev_dot[sev_label]} {sev_label}"), tags=(tag,))
+        tree.raw_times[iid] = entry.get('time', '')
 
     def _on_sort(self, col):
         if self._sort_col == col:

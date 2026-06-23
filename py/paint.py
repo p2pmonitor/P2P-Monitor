@@ -10,8 +10,7 @@ import time
 from py.platform_ops import (find_window_ids_by_name, get_focused_window,
                              get_window_geometry, raise_and_focus_window, click_at,
                              is_window_minimized, restore_window,
-                             get_window_dpi_scale,
-                             PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET)
+                             get_window_dpi_scale)
 
 # ── Paint button (hide/show toggle) ───────────────────────────────────────────
 

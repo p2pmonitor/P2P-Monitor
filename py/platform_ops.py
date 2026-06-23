@@ -14,7 +14,6 @@ Adding a new platform:
 
 import os
 import time
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -607,14 +606,14 @@ def _capture_window_image_windows(window_id, out_path, debug_log=None):
         # ── Secondary: retry with alternate rect if primary failed ────────────
         if img is None and bounds.method == 'dwm' and bounds.winrect_rect:
             if debug_log:
-                debug_log(f'BitBlt DWM failed — retrying with GetWindowRect')
+                debug_log('BitBlt DWM failed — retrying with GetWindowRect')
             sx, sy, w, h = bounds.winrect_rect
             img = _do_bitblt(sx, sy, w, h, 'winrect-fallback')
 
         # ── Last resort: PrintWindow ──────────────────────────────────────────
         if img is None:
             if debug_log:
-                debug_log(f'BitBlt failed — trying PrintWindow fallback')
+                debug_log('BitBlt failed — trying PrintWindow fallback')
             w, h = bounds.w, bounds.h
             hdc_screen = user32.GetDC(None)
             hdc_mem    = gdi32.CreateCompatibleDC(hdc_screen)
@@ -638,7 +637,7 @@ def _capture_window_image_windows(window_id, out_path, debug_log=None):
                 gdi32.GetDIBits(hdc_mem, hbmp, 0, h, buf, ctypes.byref(bmi), 0)
                 img = Image.frombuffer('RGBA',(w,h),buf,'raw','BGRA',0,1).convert('RGB')
                 if debug_log:
-                    debug_log(f'PrintWindow fallback succeeded')
+                    debug_log('PrintWindow fallback succeeded')
             finally:
                 gdi32.SelectObject(hdc_mem, old_obj)
                 user32.ReleaseDC(None, hdc_screen)
@@ -733,7 +732,7 @@ def _get_window_geometry_windows(wid):
         return None
 
 
-def set_window_geometry(wid, x, y, w, h):
+def set_window_geometry(wid, x, y, w, h, resize=True):
     """
     Move/resize the given window to (x, y, w, h).
 
@@ -742,6 +741,9 @@ def set_window_geometry(wid, x, y, w, h):
     function does not validate bounds itself, it just applies whatever
     it's given.
 
+    resize: when False, only moves the window — the size is left as-is.
+    Used when the caller has a position it trusts but a w/h it doesn't.
+
     Returns: bool — True if the underlying command/API call ran without
     raising. This does NOT independently re-verify the window actually
     moved (window managers can refuse/clamp); callers that care should
@@ -749,45 +751,83 @@ def set_window_geometry(wid, x, y, w, h):
     """
     try:
         if sys.platform.startswith('linux'):
-            return _set_window_geometry_linux(wid, x, y, w, h)
+            return _set_window_geometry_linux(wid, x, y, w, h, resize=resize)
         elif sys.platform == 'win32':
-            return _set_window_geometry_windows(wid, x, y, w, h)
+            return _set_window_geometry_windows(wid, x, y, w, h, resize=resize)
         return False
     except Exception:
         return False
 
 
-def _set_window_geometry_linux(wid, x, y, w, h):
+def _set_window_geometry_linux(wid, x, y, w, h, resize=True):
     from py.util import xdotool, get_display_env
     env = get_display_env()
     try:
         xdotool(['windowmove', '--sync', str(wid), str(int(x)), str(int(y))], env, timeout=3)
-        xdotool(['windowsize', '--sync', str(wid), str(int(w)), str(int(h))], env, timeout=3)
+        if resize:
+            xdotool(['windowsize', '--sync', str(wid), str(int(w)), str(int(h))], env, timeout=3)
         return True
     except Exception:
         return False
 
 
-def _set_window_geometry_windows(wid, x, y, w, h):
+def _set_window_geometry_windows(wid, x, y, w, h, resize=True):
     """Same coordinate space as _get_window_geometry_windows (DWM extended
     frame bounds), applied directly to SetWindowPos. SetWindowPos itself
     operates on the raw window rect, not the DWM-adjusted one, so the
     restored position can be off by the (small, invisible) DWM shadow
     inset — acceptable for "put the window roughly back where it was,"
     the same tolerance capture_window_image already accepts for paint
-    detection on this same geometry source."""
+    detection on this same geometry source.
+
+    DPI awareness: this thread must be PER_MONITOR_AWARE_V2 for the
+    duration of the SetWindowPos call, exactly like the read side
+    (_get_window_bounds) and every other Win32 geometry call in this
+    module (_click_at_windows, etc). Without it, the OS DPI-virtualizes
+    the call — coordinates captured in physical-pixel space (DWM-aware)
+    get silently rescaled against the process's actual (unaware) DPI
+    context, which is what caused the client to resize incorrectly on
+    restore on scaled displays. The process itself is never declared
+    DPI-aware anywhere in this app, so this per-thread context is the
+    only thing that made the read side correct — the write side needs
+    the identical treatment.
+
+    resize: when False, only moves the window (SWP_NOSIZE) — used when
+    the caller has decided the captured w/h isn't trustworthy enough to
+    reapply, but the position still is.
+    """
     try:
         import ctypes
         from ctypes import wintypes
-        hwnd = int(str(wid), 0)
-        user32 = ctypes.WinDLL('user32', use_last_error=True)
-        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
-                                         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-        user32.SetWindowPos.restype = wintypes.BOOL
-        SWP_NOZORDER = 0x0004
-        SWP_NOACTIVATE = 0x0010
-        ok = user32.SetWindowPos(hwnd, None, int(x), int(y), int(w), int(h),
-                                  SWP_NOZORDER | SWP_NOACTIVATE)
+
+        old_ctx = None
+        try:
+            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+        except Exception:
+            pass
+
+        try:
+            hwnd = int(str(wid), 0)
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_NOSIZE = 0x0001
+            flags = SWP_NOZORDER | SWP_NOACTIVATE | (SWP_NOSIZE if not resize else 0)
+            ok = user32.SetWindowPos(hwnd, None, int(x), int(y), int(w), int(h), flags)
+        finally:
+            # Must run even if SetWindowPos (or anything above) raises —
+            # leaving the thread stuck in PER_MONITOR_AWARE_V2 would affect
+            # every later Win32 call made on this same thread, not just
+            # this one.
+            if old_ctx is not None:
+                try:
+                    ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
+                except Exception:
+                    pass
+
         return bool(ok)
     except Exception:
         return False
@@ -1128,7 +1168,6 @@ def get_window_title(window_id):
             return r.stdout.strip() if r.returncode == 0 else ''
         elif sys.platform == 'win32':
             import ctypes
-            from ctypes import wintypes
             hwnd   = int(str(window_id), 0)
             user32 = ctypes.WinDLL('user32', use_last_error=True)
             length = user32.GetWindowTextLengthW(hwnd)

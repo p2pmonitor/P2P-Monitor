@@ -33,6 +33,7 @@ read-only summaries of data that already exists.
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 from datetime import datetime
 
 
@@ -237,13 +238,50 @@ class StatusTab:
 
         col_hdr = tk.Frame(card, bg=app.BG3)
         col_hdr.pack(fill='x', pady=(0, 4))
-        for text, w in [("ACCOUNT", 16), ("TASK", 14), ("ACTIVITY", 18), ("UPTIME", 8),
-                         ("BREAK", 8), ("STATUS", 11), ("", 8), ("", 10)]:
+        for text, w in [("ACCOUNT", 9), ("TASK", 6), ("ACTIVITY", 7), ("UPTIME", 5),
+                         ("BREAK", 5), ("STATUS", 9), ("", 7), ("", 8)]:
             tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                     width=w, anchor='w').pack(side='left')
+                     width=w, anchor='w').pack(side='left', padx=(0, 6))
 
-        self._rows_container = tk.Frame(card, bg=app.BG3)
-        self._rows_container.pack(fill='both', expand=True)
+        # Canvas+Scrollbar wrap — same pattern as History/Launcher/Settings.
+        # Without this, the row list (one row per monitored account, no
+        # upper bound) forces the whole app window taller as accounts are
+        # added, exactly like the Goals & Maxing table did before its own
+        # fix — this was the one tab that had never gotten this treatment.
+        outer = tk.Frame(card, bg=app.BG3)
+        outer.pack(fill='both', expand=True)
+        canvas = tk.Canvas(outer, bg=app.BG3, highlightthickness=0)
+        canvas.pack(side='left', fill='both', expand=True)
+        self._scroll_canvas = canvas
+        sb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        self._scrollbar = sb
+        self._rows_container = tk.Frame(canvas, bg=app.BG3)
+        win = canvas.create_window((0, 0), window=self._rows_container, anchor='nw')
+
+        def _sync_scroll(_e=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            content_h = self._rows_container.winfo_reqheight()
+            visible_h = canvas.winfo_height()
+            needs_scroll = content_h > visible_h > 1
+            if needs_scroll and not sb.winfo_ismapped():
+                sb.pack(side='right', fill='y')
+            elif not needs_scroll and sb.winfo_ismapped():
+                sb.pack_forget()
+                canvas.yview_moveto(0)
+        self._rows_container.bind('<Configure>', _sync_scroll)
+        canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
+
+        def _on_enter(_):
+            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+        def _on_leave(_):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+        canvas.bind('<Enter>', _on_enter)
+        canvas.bind('<Leave>', _on_leave)
 
         self._empty_lbl = tk.Label(self._rows_container,
             text="No accounts yet — start monitoring to see live status here.",
@@ -251,10 +289,12 @@ class StatusTab:
 
         footer = tk.Frame(parent, bg=app.BG2, pady=6)
         footer.pack(fill='x')
-        tk.Label(footer,
+        footer_lbl = tk.Label(footer,
             text="ⓘ  Mute silences the account  •  Screenshot captures on-demand  •  "
                  "Double-click account name to open history",
-            font=app.SANSS, bg=app.BG2, fg=app.FG2).pack()
+            font=app.SANSS, bg=app.BG2, fg=app.FG2, justify='center')
+        footer_lbl.pack(fill='x')
+        footer.bind('<Configure>', lambda e: footer_lbl.configure(wraplength=max(e.width - 8, 100)))
 
     def _status_color(self, status_text):
         app = self.app
@@ -266,6 +306,19 @@ class StatusTab:
             return app.YEL
         return app.GREEN  # Logged In
 
+    @staticmethod
+    def _clip(text, n):
+        """Hard-cap text to n characters with an ellipsis. Without this, a
+        long task/activity name has nothing stopping it from growing past
+        its label's nominal width — which used to just make the whole
+        window wider (the original bug), but now that this row lives
+        inside a fixed-width Canvas, an overlong label would instead push
+        Mute/Screenshot off the visible edge with no horizontal scroll to
+        recover them. Capping the text itself keeps the row's total width
+        bounded and predictable regardless of what the data contains."""
+        text = str(text)
+        return text if len(text) <= n else text[:max(0, n - 1)] + '…'
+
     def _build_row(self, account, r):
         app = self.app
         row = tk.Frame(self._rows_container, bg=app.BG3, pady=6)
@@ -273,52 +326,53 @@ class StatusTab:
         tk.Frame(row, bg=app.BG4, height=1).pack(fill='x', side='bottom')
 
         # Avatar circle + name (double-click → history)
-        name_cell = tk.Frame(row, bg=app.BG3, width=180)
-        name_cell.pack(side='left', fill='y')
-        avatar = tk.Canvas(name_cell, width=28, height=28, bg=app.BG3, highlightthickness=0)
-        avatar.pack(side='left', padx=(0, 8))
-        avatar.create_oval(2, 2, 26, 26, fill=app.ACC, outline=app.ACC)
-        avatar.create_text(14, 14, text=(account[:1] or '?').upper(), fill=app.BG, font=app.SANSB)
+        name_cell = tk.Frame(row, bg=app.BG3, width=100)
+        name_cell.pack(side='left', fill='y', padx=(0, 4))
+        name_cell.pack_propagate(False)
+        avatar = tk.Canvas(name_cell, width=24, height=24, bg=app.BG3, highlightthickness=0)
+        avatar.pack(side='left', padx=(0, 6))
+        avatar.create_oval(2, 2, 22, 22, fill=app.ACC, outline=app.ACC)
+        avatar.create_text(12, 12, text=(account[:1] or '?').upper(), fill=app.BG, font=app.SANSB)
         text_col = tk.Frame(name_cell, bg=app.BG3, cursor='hand2')
-        text_col.pack(side='left')
-        name_lbl = tk.Label(text_col, text=account, font=app.SANSB, bg=app.BG3, fg=app.ACC,
+        text_col.pack(side='left', fill='both', expand=True)
+        name_lbl = tk.Label(text_col, text=self._clip(account, 11), font=app.SANSB, bg=app.BG3, fg=app.ACC,
                              cursor='hand2', anchor='w')
-        name_lbl.pack(anchor='w')
-        hint_lbl = tk.Label(text_col, text="Double-click to view history", font=app.SANSS,
+        name_lbl.pack(anchor='w', fill='x')
+        hint_lbl = tk.Label(text_col, text="View history", font=app.SANSS,
                              bg=app.BG3, fg=app.FG2, cursor='hand2', anchor='w')
-        hint_lbl.pack(anchor='w')
+        hint_lbl.pack(anchor='w', fill='x')
         for w in (name_lbl, hint_lbl, text_col):
             w.bind('<Double-1>', lambda e, a=account: self._open_history(a))
 
-        task_lbl = tk.Label(row, text=r['task'], font=app.SANS, bg=app.BG3, fg=app.FG,
-                             width=14, anchor='w')
-        task_lbl.pack(side='left')
-        activity_lbl = tk.Label(row, text=r['activity'], font=app.SANS, bg=app.BG3, fg=app.FG2,
-                                 width=18, anchor='w')
-        activity_lbl.pack(side='left')
+        task_lbl = tk.Label(row, text=self._clip(r['task'], 6), font=app.SANS, bg=app.BG3, fg=app.FG,
+                             width=6, anchor='w')
+        task_lbl.pack(side='left', padx=(0, 3))
+        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 7), font=app.SANS, bg=app.BG3, fg=app.FG2,
+                                 width=7, anchor='w')
+        activity_lbl.pack(side='left', padx=(0, 3))
         uptime_lbl = tk.Label(row, text=r.get('uptime', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                               width=8, anchor='w')
-        uptime_lbl.pack(side='left')
+                               width=5, anchor='w')
+        uptime_lbl.pack(side='left', padx=(0, 3))
         break_lbl = tk.Label(row, text=r.get('break_time', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                              width=8, anchor='w')
-        break_lbl.pack(side='left')
+                              width=5, anchor='w')
+        break_lbl.pack(side='left', padx=(0, 3))
 
         status_text = r['status'].split(' ', 1)[-1] if ' ' in r['status'] else r['status']
         badge_color = self._status_color(r['status'])
-        badge = tk.Label(row, text=f" {status_text} ", font=app.SANSB,
+        badge_wrap = tk.Frame(row, bg=app.BG3, width=102)
+        badge_wrap.pack(side='left', padx=(0, 4))
+        badge = tk.Label(badge_wrap, text=f" {status_text} ", font=app.SANSB,
                           bg=badge_color, fg=app.BG, padx=6, pady=2)
-        badge_wrap = tk.Frame(row, bg=app.BG3, width=88)
-        badge_wrap.pack(side='left')
-        badge.pack(in_=badge_wrap, anchor='w')
+        badge.pack(anchor='w')
 
         muted = bool(r.get('muted'))
         mute_btn = tk.Button(row, text=("🔇 Unmute" if muted else "🔊 Mute"), font=app.SANSS,
-            bg=app.BG4, fg=(app.FG2 if muted else app.ACC), relief='flat', padx=6, pady=3,
+            bg=app.BG4, fg=(app.FG2 if muted else app.ACC), relief='flat', padx=3, pady=3,
             cursor='hand2', command=lambda a=account: self._on_mute_click(a))
-        mute_btn.pack(side='left', padx=(0, 6))
+        mute_btn.pack(side='left', padx=(0, 3))
 
         ss_btn = tk.Button(row, text="📷 Screenshot", font=app.SANSS,
-            bg=app.BG4, fg=app.ACC, relief='flat', padx=6, pady=3,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=3, pady=3,
             cursor='hand2', command=lambda a=account: self._on_screenshot_click(a))
         ss_btn.pack(side='left')
 

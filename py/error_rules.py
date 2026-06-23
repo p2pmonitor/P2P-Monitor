@@ -233,7 +233,6 @@ def fetch_and_apply_rules(log_fn=None, debug=False):
     Called once at app startup in a background thread.
     Never blocks the UI. Never raises.
     """
-    global _compiled
 
     def _log(msg):
         if log_fn:

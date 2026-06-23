@@ -303,8 +303,8 @@ class MonitorTab:
             ("LEVELS",  "levelup", '📈', app.ACC2),
         ]
         for label, key, icon, color in specs:
-            cell = tk.Frame(strip, bg=app.BG3, padx=10, pady=8)
-            cell.pack(side='left', fill='x', expand=True, padx=(0, 8))
+            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
+            cell.pack(side='left', fill='x', expand=True, padx=(0, 3))
             top = tk.Frame(cell, bg=app.BG3)
             top.pack(fill='x', anchor='w')
             tk.Label(top, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=color
@@ -334,8 +334,8 @@ class MonitorTab:
             ('drop',     "LATEST DROP",     '💎', app.GREEN),
         ]
         for key, label, icon, color in specs:
-            cell = tk.Frame(strip, bg=app.BG3, padx=10, pady=8)
-            cell.pack(side='left', fill='both', expand=True, padx=(0, 8))
+            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
+            cell.pack(side='left', fill='both', expand=True, padx=(0, 1))
             top = tk.Frame(cell, bg=app.BG3)
             top.pack(fill='x', anchor='w')
             tk.Label(top, text=icon, font=(app.SANS[0], 11), bg=app.BG3, fg=color
@@ -343,7 +343,7 @@ class MonitorTab:
             tk.Label(top, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
                      ).pack(side='left')
             val_lbl = tk.Label(cell, text="None yet", font=app.SANSB, bg=app.BG3, fg=app.FG,
-                                anchor='w', justify='left', wraplength=160)
+                                anchor='w', justify='left', wraplength=72)
             val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
             sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
             sub_lbl.pack(fill='x', anchor='w')
@@ -353,7 +353,7 @@ class MonitorTab:
         # (that data is already shown in the Active Accounts sidebar card;
         # showing it twice was redundant). Uses the same val/sub pattern as
         # the other highlight cards: val = "Skill → 99", sub = "account • ago".
-        cell = tk.Frame(strip, bg=app.BG3, padx=10, pady=8)
+        cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
         cell.pack(side='left', fill='both', expand=True)
         top = tk.Frame(cell, bg=app.BG3)
         top.pack(fill='x', anchor='w')
@@ -362,7 +362,7 @@ class MonitorTab:
         tk.Label(top, text="LAST 99 ACHIEVED", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
         val_lbl = tk.Label(cell, text="None yet", font=app.SANSB, bg=app.BG3, fg=app.FG,
-                            anchor='w', justify='left', wraplength=160)
+                            anchor='w', justify='left', wraplength=72)
         val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
         sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
         sub_lbl.pack(fill='x', anchor='w')
@@ -489,7 +489,7 @@ class MonitorTab:
 
         self._filter_var = tk.StringVar(value="All Events")
         filter_cb = ttk.Combobox(hdr, textvariable=self._filter_var, state='readonly',
-                                  font=app.SANSS, width=12,
+                                  font=app.SANSS, width=10,
                                   values=[lbl for lbl, _ in self.FILTER_OPTIONS])
         filter_cb.pack(side='right')
         filter_cb.bind('<<ComboboxSelected>>', lambda e: self._apply_category_filter())
@@ -497,7 +497,7 @@ class MonitorTab:
         self._search_var = tk.StringVar(value="")
         search_entry = tk.Entry(hdr, textvariable=self._search_var, font=app.SANSS,
                                  bg=app.BG4, fg=app.FG, relief='flat', insertbackground=app.ACC,
-                                 width=20)
+                                 width=14)
         search_entry.pack(side='right', padx=(0, 8), ipady=3)
         self._search_placeholder(search_entry)
         self._search_var.trace_add('write', lambda *_: self._debounce_search())
@@ -509,7 +509,7 @@ class MonitorTab:
         lf = tk.Frame(card, bg=app.BG)
         lf.pack(fill='both', expand=True)
         app._log_text = tk.Text(lf, bg=app.BG, fg=app.FG, font=app.MONO, relief='flat',
-            wrap='word', state='disabled', insertbackground=app.ACC,
+            wrap='word', state='disabled', insertbackground=app.ACC, height=12, width=40,
             selectbackground=app.BG3, padx=12, pady=8, spacing1=2)
         scr = ttk.Scrollbar(lf, command=app._log_text.yview)
         scr.pack(side='right', fill='y')

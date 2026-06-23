@@ -429,7 +429,8 @@ class WomGoalsPage:
         tk.Button(row, text='Save', font=app.SANSB, bg=app.BG4, fg=app.ACC, relief='flat',
                   padx=10, pady=4, cursor='hand2', command=_save).pack(side='left')
         tk.Label(row, text="Used when the DreamBot account name differs from the WOM username.",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(12, 0))
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=280, justify='left'
+                 ).pack(side='left', padx=(12, 0))
 
     def _render_single_account_view(self, account):
         app = self.app
@@ -503,10 +504,10 @@ class WomGoalsPage:
         cols = ('skill', 'level', 'xp', 'xp_left', 'rate', 'time_to_99', 'source')
         per_skill = summary['per_skill']
         tree = ttk.Treeview(card, columns=cols, show='headings',
-                             height=min(max(len(per_skill), 3), 26))
-        headers = [('skill', 'Skill', 130), ('level', 'Level', 60), ('xp', 'Current XP', 110),
-                   ('xp_left', 'XP left', 100), ('rate', 'Rate/hr', 90),
-                   ('time_to_99', 'Time to 99', 110), ('source', 'Source', 110)]
+                             height=min(max(len(per_skill), 3), 10))
+        headers = [('skill', 'Skill', 100), ('level', 'Level', 50), ('xp', 'Current XP', 85),
+                   ('xp_left', 'XP left', 80), ('rate', 'Rate/hr', 70),
+                   ('time_to_99', 'Time to 99', 85), ('source', 'Source', 85)]
         for col, label, width in headers:
             tree.heading(col, text=label)
             tree.column(col, width=width, anchor='w')

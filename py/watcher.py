@@ -16,10 +16,10 @@ from py.config  import save_config
 from py.util    import now_str, write_debug_entry, reset_debug_log
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
-from py.history import (append_history, record_log_scanned, get_scanned_logs,
+from py.history import (append_history, record_log_scanned,
                         get_last_seen, set_last_seen,
                         load_history_for, load_offsets, save_offsets)
-from py.paint        import do_force, do_force_skill, do_force_panel, PANEL_ACTIONS, AMOUNT_ACTIONS
+from py.paint        import do_force, do_force_skill, do_force_panel
 from py.platform_ops import (get_open_log_handles, find_window_ids_by_name,
                              normalize_path, capture_window_image)
 
@@ -665,7 +665,7 @@ class LogWatcher:
           2.9    → (2, 900)   — very unlikely, but safe
         """
         try:
-            from decimal import Decimal, ROUND_DOWN
+            from decimal import Decimal
             d = Decimal(str(v)).normalize()
             parts = str(d).split('.')
             major = int(parts[0])
@@ -1207,7 +1207,7 @@ class LogWatcher:
                 self.log("⚠ No active sessions found after 10 minutes — stopping monitor.")
                 self._running = False
                 return
-            self.log(f"✅ Sessions found — starting monitor.")
+            self.log("✅ Sessions found — starting monitor.")
         for d in dirs:
             log_files = _get_log_files(d)
             active = _get_active_log_file(d)
@@ -1656,18 +1656,33 @@ class LogWatcher:
                 CHUNK = 500
                 chunk = []
                 entries_this_file = 0
+                # Tail of recent raw lines from the previous chunk *within
+                # this file*, carried forward purely for the Wine of
+                # Zamorak death-suppression check's cross-batch backward
+                # lookback (same purpose as _process_lines's
+                # _prior_context in the live path) — a Wine interaction
+                # and its death line could in principle straddle a
+                # 500-line chunk boundary in an old log just as they can
+                # straddle a live poll boundary. Deliberately reset for
+                # each new file (not carried across file boundaries) —
+                # separate log files are separate sessions, with no real
+                # continuity to preserve.
+                bf_recent_tail = []
 
                 def _process_chunk(chunk):
-                    nonlocal entries_this_file, bf_last_task, bf_last_activity, new_last_seen
+                    nonlocal entries_this_file, bf_last_task, bf_last_activity, bf_recent_tail
                     if not chunk:
                         return
                     try:
-                        events = parse_lines(chunk)
+                        events = parse_lines(chunk, context_lines=bf_recent_tail)
                     except Exception as pe:
                         self.log(f'  ⚠ [{account}] Backfill parse error: {pe}')
                         return
-
-                    new_task_lines = {i for i, l in enumerate(chunk) if 'NEW TASK' in l.upper()}
+                    finally:
+                        # Always refresh the tail, even on a parse error for this
+                        # chunk — the next chunk's lookback should still reflect
+                        # what was actually in the log, not stale earlier context.
+                        bf_recent_tail = chunk[-30:]
 
                     for idx, ev in enumerate(events):
                         if not ev or ev.get('type') == 'error':
@@ -2167,6 +2182,14 @@ class LogWatcher:
         state  = self._get_account(folder)
         events = []
 
+        # Snapshot recent lines from *before* this batch, for the Wine of
+        # Zamorak death-suppression check's cross-batch backward lookback
+        # (see py.reader.parse_lines's context_lines param). Must be taken
+        # before the loop below appends this batch's own lines into
+        # state._recent_lines, or this batch's lines would double up in
+        # both `lines` and the "prior" context passed alongside it.
+        _prior_context = list(state._recent_lines)
+
         # Update login/break state from this batch
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
@@ -2237,7 +2260,7 @@ class LogWatcher:
                 state.inferno.reset()
 
         # Parse all events through the unified reader pipeline.
-        parsed = parse_lines(lines)
+        parsed = parse_lines(lines, context_lines=_prior_context)
 
         # Snapshot the task/activity context as it stood *before* this batch —
         # used by reset attribution below so a reset line is matched against the

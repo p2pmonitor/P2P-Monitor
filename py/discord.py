@@ -4,6 +4,7 @@ All embed payloads, post_discord(), bot API helpers, bot setup, bot command runn
 """
 
 import json
+import sys
 import threading
 import time
 import urllib.request

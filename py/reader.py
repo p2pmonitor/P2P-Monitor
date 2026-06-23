@@ -27,11 +27,25 @@ PET_PATTERNS = [
 
 DEATH_RE        = re.compile(r'\[GAME\] Oh dear, you are dead!', re.I)
 
-# Intentional Wine of Zamorak death suppression — exact rule: check ONLY
-# the previous 2 raw log lines for either marker (substring match, case-
-# insensitive); no time window, no fuzzy matching beyond these two exact
-# phrases. See _is_suppressed_wine_death() below.
-_WINE_DEATH_MARKERS = ('STOP STEALING MY WINE', 'Interacting Wine of zamorak')
+# Intentional Wine of Zamorak death suppression. Two marker tiers:
+#   STRONG — unambiguous Wine-task context. Presence of either, anywhere
+#            in the scan window (before or after the death line, plus any
+#            supplied cross-batch context_lines before it), suppresses
+#            on its own.
+#   WEAK   — also appear around ordinary Prayer-related deaths that have
+#            nothing to do with Wine of Zamorak, so on their own they
+#            prove nothing. Only suppress via a WEAK marker if a STRONG
+#            marker is *also* present somewhere in the same window —
+#            never suppress on weak markers alone, or every prayer death
+#            on the Wine task's general area of the map would vanish.
+# Window size: deliberately small (a few lines either side), not a time
+# window — wide enough to survive a couple of incidental log lines
+# between the Wine interaction and the actual death line, narrow enough
+# that an unrelated PK death several lines away never matches by accident.
+_WINE_DEATH_STRONG = ('STOP STEALING MY WINE', 'Interacting Wine of zamorak')
+_WINE_DEATH_WEAK   = ('Ooh nasty', 'Died during Prayer')
+_WINE_DEATH_BACK_LINES    = 5  # lines to scan before the death line (within arr)
+_WINE_DEATH_FORWARD_LINES = 3  # lines to scan after the death line
 SKILL_LVL_RE    = re.compile(r"Congratulations, you've just advanced your (.+?) level\. You are now level (\d+)", re.I)
 SKILL_99_RE     = re.compile(r"Congratulations, you've reached the highest possible (.+?) level of 99", re.I)
 TOTAL_LVL_RE    = re.compile(r"Congratulations, you've reached a total level of (\d+)", re.I)
@@ -188,33 +202,52 @@ def _extract_farming_lock_reason(arr, lock_idx, lock_ts_str):
         return f"Farming locked: missing {', '.join(single_items)}"
     return ''
 
-def _is_suppressed_wine_death(arr, death_idx):
+def _is_suppressed_wine_death(arr, death_idx, context_lines=None):
     """
-    Intentional-death suppression for the Wine of Zamorak task. Exact
-    rule, deliberately narrow: check ONLY the previous 2 raw log lines
-    (not a time window, not any other context size) for either marker as
-    a plain case-insensitive substring — no fuzzy matching beyond these
-    two exact phrases:
-        - 'STOP STEALING MY WINE'
-        - 'Interacting Wine of zamorak'
-    If either is present in either of those 2 lines, this death should be
-    treated as if it never happened: returning True here means the caller
-    never appends a 'death' event for it at all, which is sufficient to
-    suppress every downstream effect (Discord ping, death counter,
-    history entry, status/highlight update) — all of those are driven
-    purely by the event's existence in the events list this module
-    produces; nothing else in the watcher independently re-scans raw
-    lines for this same death line.
+    Intentional-death suppression for the Wine of Zamorak task.
+
+    Scans a small window around the death line:
+      - backward up to _WINE_DEATH_BACK_LINES lines within arr, then
+        (if the window runs off the start of arr) continuing backward
+        into context_lines — recent raw lines from before this batch,
+        e.g. from py.watcher's per-account rolling line buffer. Without
+        this, a death whose Wine context landed in the *previous* poll
+        cycle's batch would never be checked against it at all, since
+        each batch is parsed independently — see the issue this was
+        widened for.
+      - forward up to _WINE_DEATH_FORWARD_LINES lines within arr (no
+        cross-batch forward extension — the lines immediately after a
+        death line are always written before the next poll fires, so
+        there's no batch-boundary risk on this side).
+
+    Suppresses if a STRONG marker is anywhere in that window. A WEAK
+    marker only suppresses if a STRONG marker is also present somewhere
+    in the same window — weak markers alone (e.g. an ordinary Prayer
+    death with "Ooh nasty") never suppress.
+
+    Returning True here means the caller never appends a 'death' event
+    for it at all, which is sufficient to suppress every downstream
+    effect (Discord ping, death counter, history entry, status/highlight
+    update) — all of those are driven purely by the event's existence in
+    the events list this module produces; nothing else in the watcher
+    independently re-scans raw lines for this same death line.
 
     Does not affect Inferno's own, unrelated death handling (Inferno
     tracks death via wave/KC state in py/inferno.py, not this generic
     DEATH_RE-based path at all).
     """
-    for j in range(max(0, death_idx - 2), death_idx):
-        line = arr[j]
-        if any(marker.lower() in line.lower() for marker in _WINE_DEATH_MARKERS):
-            return True
-    return False
+    back_start = death_idx - _WINE_DEATH_BACK_LINES
+    window = list(arr[max(0, back_start):death_idx])
+    if back_start < 0 and context_lines:
+        # Still short on backward lines after exhausting arr — pull the
+        # tail of context_lines (closest-to-this-batch lines first).
+        needed = -back_start
+        window = list(context_lines[-needed:]) + window
+    window += list(arr[death_idx + 1: death_idx + 1 + _WINE_DEATH_FORWARD_LINES])
+
+    has_strong = any(m.lower() in line.lower() for line in window for m in _WINE_DEATH_STRONG)
+    has_weak   = any(m.lower() in line.lower() for line in window for m in _WINE_DEATH_WEAK)
+    return has_strong or (has_weak and has_strong)
 
 # ── Individual slice functions ─────────────────────────────────────────────────
 
@@ -421,7 +454,7 @@ def slice_slayer_skipped(lines):
         if not_supported:
             if task_id is not None:
                 name = _UNSUPPORTED_TASK_IDS.get(task_id, f'Unknown task (ID {task_id})')
-                reason = f'Not supported by script'
+                reason = 'Not supported by script'
                 results.append((name, reason))
             else:
                 results.append(('Unsupported task', 'Not supported by script'))
@@ -497,7 +530,6 @@ def slice_tasks(lines):
     i = 0
     while i < n:
         b   = strip_prefix(arr[i]).strip()
-        raw = arr[i]
 
         # 'Actually task is X' — highest priority override
         # Suppressed if '> Locking' appears within the same timestamp + 15-line window
@@ -604,7 +636,6 @@ def slice_last_task(lines):
     Falls back to last BREAK START if no task found.
     Returns ('', '') if nothing found.
     """
-    from py.util import parse_break_length_ms, format_break_duration
     arr = list(lines)
     n   = len(arr)
 
@@ -773,10 +804,17 @@ def slice_chat_segments(lines):
 #   _drop_types — for drop events: list of type strings
 #   _slayer_complete — for slayer_complete: (tasks_done, points_earned, total_points)
 
-def parse_lines(lines):
+def parse_lines(lines, context_lines=None):
     """
     Parse a batch of log lines into a list of typed event dicts.
     No side effects. Used by both live watcher and backfill.
+
+    context_lines: optional list of raw lines from immediately before this
+    batch (most-recent-last), used only to extend the Wine of Zamorak
+    death-suppression check backward across a batch boundary — see
+    _is_suppressed_wine_death(). Every other check in this function is
+    deliberately scoped to `lines` alone, unchanged. Omitting this param
+    preserves the exact prior behavior (backward-compatible default).
     """
     events   = []
     arr      = list(lines)
@@ -1035,7 +1073,7 @@ def parse_lines(lines):
     # Deaths
     for i, line in enumerate(arr):
         if DEATH_RE.search(line):
-            if _is_suppressed_wine_death(arr, i):
+            if _is_suppressed_wine_death(arr, i, context_lines=context_lines):
                 continue  # intentional Wine of Zamorak death — fully ignored, see issue
             events.append({'type': 'death', 'value': 'Oh dear, you are dead!', 'activity': '',
                            'ts': _ts_for_line(i), '_line_idx': i})
