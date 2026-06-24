@@ -105,7 +105,10 @@ class LauncherTab:
         self._rows_frame = tk.Frame(canvas, bg=app.BG3)
         win = canvas.create_window((0, 0), window=self._rows_frame, anchor='nw')
 
+        needs_scroll = False
+
         def _sync_scroll(_e=None):
+            nonlocal needs_scroll
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._rows_frame.winfo_reqheight()
             visible_h = canvas.winfo_height()
@@ -118,10 +121,17 @@ class LauncherTab:
         self._rows_frame.bind('<Configure>', _sync_scroll)
         canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
 
+        # Mousewheel/trackpad scroll must be a no-op when content doesn't
+        # actually overflow the visible area — without the needs_scroll
+        # guard, yview_scroll() still nudges the view by a fraction of
+        # whatever scrollregion canvas.bbox('all') reports (which can be a
+        # few pixels larger than the visible area from rounding alone),
+        # letting the user drag content down even though there's nothing
+        # real to scroll to. That's the "invisible scroll" bug.
         def _on_enter(_):
-            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
-            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
-            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+            canvas.bind_all('<MouseWheel>', lambda e: needs_scroll and canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: needs_scroll and canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: needs_scroll and canvas.yview_scroll(1,  'units'))
         def _on_leave(_):
             canvas.unbind_all('<MouseWheel>')
             canvas.unbind_all('<Button-4>')

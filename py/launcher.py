@@ -352,6 +352,59 @@ def _geometry_is_sane(geom) -> bool:
     return True
 
 
+_KNOWN_DPI_SCALE_BANDS = [
+    (1.20, 1.30),   # 125%
+    (1.45, 1.55),   # 150%
+    (1.70, 1.80),   # 175%
+    (1.95, 2.05),   # 200%
+]
+
+
+def _detect_dpi_scale_mismatch(requested_w, requested_h, actual_w, actual_h):
+    """
+    Pure math, no Win32 calls — testable in isolation.
+
+    Returns the detected scale ratio (float) only if the actual-vs-
+    requested size ratio clearly, consistently matches one of Windows'
+    common DPI scale presets on *both* axes independently — a real DPI-
+    scaling bug affects width and height uniformly, so if only one axis
+    is off, that's a sign of something else (a different bug, or just
+    DWM-shadow-inset-sized noise), not this, and this deliberately
+    returns None rather than guess.
+
+    Returns None if no band matches — meaning either the restore already
+    landed correctly, or the mismatch (if any) doesn't look like DPI
+    scaling at all. None is the conservative default; a corrective second
+    SetWindowPos should only ever fire when this returns a real ratio.
+    """
+    if not requested_w or not requested_h:
+        return None
+    w_ratio = actual_w / requested_w
+    h_ratio = actual_h / requested_h
+    for lo, hi in _KNOWN_DPI_SCALE_BANDS:
+        if lo <= w_ratio <= hi and lo <= h_ratio <= hi:
+            return round((w_ratio + h_ratio) / 2.0, 4)
+    return None
+
+
+def _build_dpi_corrected_size(requested, ratio):
+    """
+    Given the originally-requested (x, y, w, h) and a *measured* scale
+    ratio (from _detect_dpi_scale_mismatch — never a blind DPI reading),
+    compute the corrective target for a second SetWindowPos call.
+
+    Deliberately leaves x, y completely unchanged. Dividing screen
+    position by a scale ratio is only valid if the coordinate origin is
+    the monitor's own top-left in the same units — on a multi-monitor
+    setup the virtual-desktop origin generally isn't (0, 0) for non-
+    primary monitors, so a naive x/ratio could move the window to a
+    completely different, wrong screen. The reported symptom has only
+    ever been about size; this only ever corrects width/height.
+    """
+    x, y, w, h = requested
+    return (x, y, round(w / ratio), round(h / ratio))
+
+
 def _size_is_plausible(geom) -> bool:
     """
     True if the captured size could plausibly be a real DreamBot window.
@@ -413,10 +466,94 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                      f'({restore_geometry}) — skipping restore rather than guessing.')
             else:
                 resize_ok = _size_is_plausible(restore_geometry)
+
+                def _dpi_debug_log(msg):
+                    # Always written to the persistent debug log regardless
+                    # of the debug toggle — this investigation needs a
+                    # reliable trail from a real scaled-DPI machine, not
+                    # just whatever happened to be visible in the console
+                    # at the time.
+                    write_debug_entry('launcher_dpi', {'account': account, 'msg': msg})
+                    if cfg and cfg.get('debug', False):
+                        _log(f'🔍 [{account}] {msg}')
+
                 try:
-                    from py.platform_ops import set_window_geometry
+                    from py.platform_ops import set_window_geometry, get_window_geometry
                     x, y, w, h = restore_geometry
-                    ok = set_window_geometry(new_wid, x, y, w, h, resize=resize_ok)
+
+                    # Primary path: the original captured rect, exactly as
+                    # captured, using the corrected (properly-typed)
+                    # SetThreadDpiAwarenessContext fix. No pre-emptive
+                    # scaling of any kind — if that fix is doing its job,
+                    # SetWindowPos already receives true physical
+                    # coordinates and needs nothing further.
+                    ok = set_window_geometry(new_wid, x, y, w, h, resize=resize_ok,
+                                              debug_log=_dpi_debug_log)
+
+                    # Give the new DreamBot/AWT window a moment to settle
+                    # before re-querying — immediately re-reading right
+                    # after SetWindowPos risks catching it mid-transition.
+                    if sys.platform == 'win32':
+                        time.sleep(0.4)
+
+                    # Verification: re-query using the exact same method
+                    # the original capture used. This is the direct,
+                    # unambiguous way to see whether what got applied
+                    # matches what was requested — no guessing.
+                    actual = get_window_geometry(new_wid, debug_log=_dpi_debug_log)
+                    if actual:
+                        ax, ay, aw, ah = actual
+                        w_ratio = round(aw / w, 4) if w else None
+                        h_ratio = round(ah / h, 4) if h else None
+                        _dpi_debug_log(
+                            f'Post-restore verification: requested=({x},{y},{w},{h}) '
+                            f'actual=({ax},{ay},{aw},{ah}) '
+                            f'size_ratio=(w={w_ratio}, h={h_ratio})')
+
+                        # Fallback correction: only fires if the measured
+                        # ratio clearly, consistently matches a known
+                        # Windows DPI scale preset on both axes — never a
+                        # blind pre-emptive scale. Size-only; x/y are
+                        # never touched (see _build_dpi_corrected_size's
+                        # docstring for why that's deliberate).
+                        ratio = (_detect_dpi_scale_mismatch(w, h, aw, ah)
+                                 if (resize_ok and sys.platform == 'win32') else None)
+                        if ratio is not None:
+                            cx, cy, cw, ch = _build_dpi_corrected_size((x, y, w, h), ratio)
+                            _dpi_debug_log(
+                                f'DPI scale mismatch detected: ratio≈{ratio} matches a known Windows '
+                                f'scale preset — applying one corrective SetWindowPos: '
+                                f'requested=({x},{y},{w},{h}) corrected=({cx},{cy},{cw},{ch})')
+                            ok = set_window_geometry(new_wid, cx, cy, cw, ch, resize=True,
+                                                      debug_log=_dpi_debug_log)
+                            if sys.platform == 'win32':
+                                time.sleep(0.4)
+                            final_actual = get_window_geometry(new_wid, debug_log=_dpi_debug_log)
+                            _dpi_debug_log(
+                                f'Post-correction verification: corrected_target=({cx},{cy},{cw},{ch}) '
+                                f'final_actual={final_actual}')
+                            if final_actual:
+                                faw, fah = final_actual[2], final_actual[3]
+                                if abs((faw / w if w else 1) - 1.0) > 0.05:
+                                    _log(f'⚠️ [{account}] DPI correction did not fully resolve the size '
+                                         f'mismatch for "{account}" (requested {w}x{h}, final {faw}x{fah}) '
+                                         f'— see debug log for full trail.')
+                                elif cfg and cfg.get('debug', False):
+                                    _log(f'↩️ [{account}] Detected and corrected a DPI scale mismatch '
+                                         f'(ratio≈{ratio}) on restore.')
+                        elif resize_ok and w_ratio is not None and abs(w_ratio - 1.0) > 0.10:
+                            # Off by more than simple rounding/DWM-inset noise,
+                            # but not a clean match to a known scale preset —
+                            # logged for visibility, not auto-corrected, since
+                            # guessing at an unrecognized ratio risks making
+                            # things worse rather than better.
+                            _log(f'⚠️ [{account}] Restored size differs from requested '
+                                 f'(requested {w}x{h}, actual {aw}x{ah}, ratio {w_ratio}x/{h_ratio}x) '
+                                 f'but doesn\'t clearly match a known DPI scale — not auto-correcting. '
+                                 f'See debug log.')
+                    else:
+                        _dpi_debug_log('Post-restore verification: could not re-query window geometry.')
+
                     if ok:
                         action = 'Restored window position' if resize_ok else \
                                  'Restored window position only — captured size was below DreamBot\'s minimum, not reapplied'
@@ -584,15 +721,25 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
         try:
             existing_wid = window_result.get('window_id')
             if existing_wid:
-                from py.platform_ops import get_window_geometry, is_window_minimized
+                from py.platform_ops import get_window_geometry, is_window_minimized, get_dpi_diagnostics
+
+                def _capture_dpi_log(msg):
+                    write_debug_entry('launcher_dpi', {'account': account, 'msg': msg})
+                    if cfg and cfg.get('debug', False):
+                        _log(f'🔍 [{account}] {msg}')
+
                 if is_window_minimized(existing_wid):
                     _dbg_log(f'ℹ️ [{account}] Existing window is minimized — '
                              f'skipping position capture (nothing meaningful to restore).')
                 else:
-                    captured_geometry = get_window_geometry(existing_wid)
+                    captured_geometry = get_window_geometry(existing_wid, debug_log=_capture_dpi_log)
                     if captured_geometry:
                         _dbg_log(f'📐 [{account}] Captured window position {captured_geometry} '
                                  f'before closing.', extra={'geometry': captured_geometry})
+                        try:
+                            _capture_dpi_log(f'Capture-time dpi_diag={get_dpi_diagnostics(existing_wid)}')
+                        except Exception:
+                            pass
                     else:
                         _dbg_log(f'⚠️ [{account}] Could not read window geometry before closing — '
                                  f'position restore will be skipped after relaunch.')

@@ -82,33 +82,35 @@ class WomGoalsPage:
         root = tk.Frame(self.frame, bg=app.BG2, padx=16, pady=16)
         root.pack(fill='both', expand=True)
 
-        self._header_lbl = tk.Label(root, text="GOALS & MAXING", font=(app.SANS[0], 18, 'bold'),
-                                     bg=app.BG2, fg=app.FG)
-        self._header_lbl.pack(anchor='w')
-        self._subtitle_lbl = tk.Label(root, text="All accounts overview", font=app.SANS,
-                                       bg=app.BG2, fg=app.FG2)
-        self._subtitle_lbl.pack(anchor='w', pady=(0, 10))
-
         toolbar = tk.Frame(root, bg=app.BG2)
-        toolbar.pack(fill='x', pady=(0, 12))
+        toolbar.pack(fill='x', pady=(0, 10))
+
+        title_block = tk.Frame(toolbar, bg=app.BG2)
+        title_block.pack(side='left')
+        self._header_lbl = tk.Label(title_block, text="GOALS & MAXING", font=(app.SANS[0], 11, 'bold'),
+                                     bg=app.BG2, fg=app.FG)
+        self._header_lbl.pack(side='left')
+        self._subtitle_lbl = tk.Label(title_block, text="  ·  All accounts", font=app.SANSS,
+                                       bg=app.BG2, fg=app.FG2)
+        self._subtitle_lbl.pack(side='left', pady=(2, 0))
 
         self._account_var = tk.StringVar(value='All Accounts')
         self._account_combo = ttk.Combobox(toolbar, textvariable=self._account_var, state='readonly',
-                                            font=app.SANS, width=20)
-        self._account_combo.pack(side='left', ipady=2)
+                                            font=app.SANSS, width=9)
+        self._account_combo.pack(side='left', padx=(10, 0), ipady=1)
         self._account_combo.bind('<<ComboboxSelected>>', lambda e: self._on_account_changed())
 
         btn_row = tk.Frame(toolbar, bg=app.BG2)
         btn_row.pack(side='right')
-        self._refresh_btn = tk.Button(btn_row, text='🔄  Refresh WOM', font=app.SANSB,
-            bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6, cursor='hand2',
+        self._refresh_btn = tk.Button(btn_row, text='🔄  Refresh', font=app.SANSS,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=5, pady=3, cursor='hand2',
             command=self._on_refresh_click)
-        self._refresh_btn.pack(side='left', padx=(0, 8))
-        tk.Button(btn_row, text='✏  Edit XP Rates', font=app.SANSB, bg=app.BG4, fg=app.ACC2,
-                  relief='flat', padx=12, pady=6, cursor='hand2',
-                  command=self._open_edit_rates_dialog).pack(side='left', padx=(0, 8))
-        tk.Button(btn_row, text='↺  Reset Defaults', font=app.SANSB, bg=app.BG4, fg=app.FG2,
-                  relief='flat', padx=12, pady=6, cursor='hand2',
+        self._refresh_btn.pack(side='left', padx=(0, 3))
+        tk.Button(btn_row, text='✏  Edit XP Rates', font=app.SANSS, bg=app.BG4, fg=app.ACC2,
+                  relief='flat', padx=5, pady=3, cursor='hand2',
+                  command=self._open_edit_rates_dialog).pack(side='left', padx=(0, 3))
+        tk.Button(btn_row, text='↺  Reset Defaults', font=app.SANSS, bg=app.BG4, fg=app.FG2,
+                  relief='flat', padx=5, pady=3, cursor='hand2',
                   command=self._on_reset_defaults_click).pack(side='left')
 
         self._username_row_area = tk.Frame(root, bg=app.BG2)
@@ -240,26 +242,26 @@ class WomGoalsPage:
             w.destroy()
 
         if self._selected_account == 'All Accounts':
-            self._subtitle_lbl.configure(text="All accounts overview")
+            self._subtitle_lbl.configure(text="  ·  All accounts")
             self._render_all_accounts_view()
         else:
-            self._subtitle_lbl.configure(text=f"Account: {self._selected_account}")
+            self._subtitle_lbl.configure(text=f"  ·  Account: {self._selected_account}")
             self._render_wom_username_row(self._selected_account)
             self._render_single_account_view(self._selected_account)
 
     # ── Shared small helpers ─────────────────────────────────────────────────────
     def _summary_card(self, parent, icon, title, icon_color=None):
         app = self.app
-        cell = tk.Frame(parent, bg=app.BG3, padx=12, pady=10)
+        cell = tk.Frame(parent, bg=app.BG3, padx=9, pady=6)
         cell.pack(side='left', fill='both', expand=True, padx=(0, 8))
         top = tk.Frame(cell, bg=app.BG3)
         top.pack(fill='x', anchor='w')
         tk.Label(top, text=icon, font=(app.SANS[0], 11), bg=app.BG3,
                  fg=icon_color or app.ACC).pack(side='left', padx=(0, 4))
         tk.Label(top, text=title, font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(side='left')
-        val_lbl = tk.Label(cell, text="—", font=(app.SANS[0], 15, 'bold'), bg=app.BG3,
+        val_lbl = tk.Label(cell, text="—", font=(app.SANS[0], 12), bg=app.BG3,
                             fg=app.FG, anchor='w', justify='left', wraplength=180)
-        val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
+        val_lbl.pack(fill='x', anchor='w', pady=(2, 0))
         sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
         sub_lbl.pack(fill='x', anchor='w')
         return val_lbl, sub_lbl
@@ -367,10 +369,10 @@ class WomGoalsPage:
         card = tk.Frame(self._content_area, bg=app.BG3, padx=2, pady=2)
         card.pack(fill='both', expand=True)
         cols = ('account', 'total_level', 'last99', 'time_to_max', 'closest99', 'last_refresh')
-        tree = ttk.Treeview(card, columns=cols, show='headings', height=min(max(len(accounts), 3), 14))
-        headers = [('account', 'ACCOUNT', 150), ('total_level', 'TOTAL LEVEL', 100),
-                   ('last99', 'LAST 99', 130), ('time_to_max', 'TIME TO MAX', 120),
-                   ('closest99', 'CLOSEST 99', 150), ('last_refresh', 'LAST REFRESH', 110)]
+        tree = ttk.Treeview(card, columns=cols, show='headings', height=min(max(len(accounts), 3), 10))
+        headers = [('account', 'ACCOUNT', 115), ('total_level', 'TOTAL LEVEL', 85),
+                   ('last99', 'LAST 99', 100), ('time_to_max', 'TIME TO MAX', 95),
+                   ('closest99', 'CLOSEST 99', 115), ('last_refresh', 'LAST REFRESH', 90)]
         for col, label, width in headers:
             tree.heading(col, text=label)
             tree.column(col, width=width, anchor='w')
@@ -403,16 +405,16 @@ class WomGoalsPage:
         deliberately does NOT trigger a refresh itself — Refresh WOM
         stays a separate, explicit action either way."""
         app = self.app
-        row = tk.Frame(self._username_row_area, bg=app.BG3, padx=10, pady=8)
+        row = tk.Frame(self._username_row_area, bg=app.BG3, padx=8, pady=5)
         row.pack(fill='x')
         tk.Label(row, text='WOM Username:', font=app.SANSS, bg=app.BG3, fg=app.FG2
-                 ).pack(side='left', padx=(0, 8))
+                 ).pack(side='left', padx=(0, 6))
         var = tk.StringVar(value=self._wom_username_for(account))
-        entry = tk.Entry(row, textvariable=var, font=app.SANS, bg=app.BG4, fg=app.FG,
-                          insertbackground=app.ACC, relief='flat', width=22)
-        entry.pack(side='left', ipady=3, padx=(0, 8))
+        entry = tk.Entry(row, textvariable=var, font=app.SANSS, bg=app.BG4, fg=app.FG,
+                          insertbackground=app.ACC, relief='flat', width=16)
+        entry.pack(side='left', ipady=2, padx=(0, 6))
         note_lbl = tk.Label(row, text='', font=app.SANSS, bg=app.BG3, fg=app.GREEN)
-        note_lbl.pack(side='left', padx=(0, 8))
+        note_lbl.pack(side='left', padx=(0, 6))
 
         def _save():
             new_username = var.get().strip() or account
@@ -426,8 +428,8 @@ class WomGoalsPage:
             note_lbl.configure(text='Saved ✓')
             self.app.after(1500, lambda: note_lbl.configure(text='') if note_lbl.winfo_exists() else None)
 
-        tk.Button(row, text='Save', font=app.SANSB, bg=app.BG4, fg=app.ACC, relief='flat',
-                  padx=10, pady=4, cursor='hand2', command=_save).pack(side='left')
+        tk.Button(row, text='Save', font=app.SANSS, bg=app.BG4, fg=app.ACC, relief='flat',
+                  padx=8, pady=3, cursor='hand2', command=_save).pack(side='left')
         tk.Label(row, text="Used when the DreamBot account name differs from the WOM username.",
                  font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=280, justify='left'
                  ).pack(side='left', padx=(12, 0))

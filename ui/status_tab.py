@@ -31,7 +31,6 @@ _counts/_highlights source data) and an Accounts Overview card — both
 read-only summaries of data that already exists.
 """
 import threading
-import time
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
@@ -42,10 +41,8 @@ class StatusTab:
         self.app = app
         self._refresh_in_flight = False  # prevents thread accumulation
         self._row_widgets = {}           # account -> dict of widget refs
-        self._overview_tick_id = None    # guards against duplicate ticker chains
         self._build(parent_frame)
         self._tick_uptime()
-        self._schedule_overview_tick()
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self, f):
@@ -53,16 +50,8 @@ class StatusTab:
         root = tk.Frame(f, bg=app.BG2, padx=16, pady=16)
         root.pack(fill='both', expand=True)
 
-        left = tk.Frame(root, bg=app.BG2, width=270)
-        left.pack(side='left', fill='y', padx=(0, 16))
-        left.pack_propagate(False)
-
         right = tk.Frame(root, bg=app.BG2)
         right.pack(side='left', fill='both', expand=True)
-
-        self._build_session_overview(left)
-        self._build_accounts_overview(left)
-        self._build_quick_tip(left)
 
         self._build_stat_strip(right)
         self._build_account_table(right)
@@ -82,112 +71,6 @@ class StatusTab:
         return card
 
     # ── Session Overview (mirrors Monitor's — same source data) ─────────────────
-    def _build_session_overview(self, parent):
-        app = self.app
-        card = self._card(parent, None)
-        self._so_status_lbl = tk.Label(card, text="● STOPPED", font=app.SANSB,
-                                        bg=app.BG3, fg=app.RED)
-        self._so_status_lbl.pack(anchor='w', pady=(0, 8))
-        self._so_uptime_lbl  = self._so_row(card, "Uptime", "—")
-        self._so_started_lbl = self._so_row(card, "Started", "—")
-        self._so_events_lbl  = self._so_row(card, "Events", "0")
-
-    def _so_row(self, parent, label, value):
-        app = self.app
-        row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=2)
-        tk.Label(row, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                 width=10, anchor='w').pack(side='left')
-        val_lbl = tk.Label(row, text=value, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w')
-        val_lbl.pack(side='left', fill='x', expand=True)
-        return val_lbl
-
-    def _schedule_overview_tick(self):
-        """Only ever schedules a tick if one isn't already pending — this
-        guard is what makes it impossible for multiple call sites (the
-        ticker itself, plus App._start()/_stop() calling
-        refresh_session_overview() directly) to ever stack up parallel
-        ticker chains."""
-        if self._overview_tick_id is None:
-            self._overview_tick_id = self.app.after(1000, self._tick_overview)
-
-    def _tick_overview(self):
-        """Pure local math, same pattern as Monitor's — no I/O. Runs every
-        second regardless of which tab is visible (passive self.after()
-        chain), since it's cheap and keeps things in sync the moment you
-        switch back to Status. This is the *only* method that schedules
-        the next tick — refresh_session_overview() must stay display-only."""
-        self._overview_tick_id = None
-        self.refresh_session_overview()
-        self._schedule_overview_tick()
-
-    def refresh_session_overview(self):
-        """Display-only — updates labels from current state, never
-        schedules anything. Called both by the ticker above and directly
-        by App._start()/_stop() for an immediate refresh; if this method
-        scheduled its own tick, every one of those extra call sites would
-        spawn a second, independent ticker chain. With two schedulers
-        (this method and _tick_overview()) both firing every second, the
-        number of pending callbacks doubles every tick — 1, 2, 4, 8, 16,
-        32... — and within seconds the entire Tk event queue is flooded,
-        making the whole app permanently unresponsive. That bug existed
-        here before — fixed by making this method strictly display-only."""
-        app = self.app
-        running = str(app._btn_stop.cget('state')) == 'normal'
-        self._so_status_lbl.configure(
-            text="● RUNNING" if running else "● STOPPED",
-            fg=app.GREEN if running else app.RED)
-        if app._session_start_ts:
-            started_dt = datetime.fromtimestamp(app._session_start_ts)
-            today = datetime.now().date() == started_dt.date()
-            prefix = "Today" if today else started_dt.strftime('%b %d')
-            self._so_started_lbl.configure(text=f"{prefix}, {started_dt.strftime('%H:%M:%S')}")
-            if running:
-                elapsed = int(time.time() - app._session_start_ts)
-                h, rem = divmod(elapsed, 3600)
-                m, s = divmod(rem, 60)
-                self._so_uptime_lbl.configure(text=f"{h:02d}:{m:02d}:{s:02d}")
-        else:
-            self._so_started_lbl.configure(text="—")
-            self._so_uptime_lbl.configure(text="—")
-        self._so_events_lbl.configure(text=str(sum(app._counts.values())))
-
-    # ── Accounts Overview ────────────────────────────────────────────────────────
-    def _build_accounts_overview(self, parent):
-        app = self.app
-        card = self._card(parent, None)
-        self._ao_total_lbl = tk.Label(card, text="0", font=(app.SANS[0], 22, 'bold'),
-                                       bg=app.BG3, fg=app.FG)
-        self._ao_total_lbl.pack(anchor='w')
-        tk.Label(card, text="Total Monitored", font=app.SANSS, bg=app.BG3, fg=app.FG2
-                 ).pack(anchor='w', pady=(0, 8))
-        self._ao_active_lbl = self._ao_row(card, app.GREEN)
-        self._ao_active_sub = tk.Label(card, text="Active Accounts", font=app.SANSS,
-                                        bg=app.BG3, fg=app.FG2)
-        self._ao_active_sub.pack(anchor='w', pady=(0, 6))
-        self._ao_break_lbl  = self._ao_row(card, app.YEL)
-        self._ao_break_sub  = tk.Label(card, text="On Break", font=app.SANSS,
-                                        bg=app.BG3, fg=app.FG2)
-        self._ao_break_sub.pack(anchor='w', pady=(0, 6))
-        self._ao_status_lbl = tk.Label(card, text="No accounts yet", font=app.SANSS,
-                                        bg=app.BG3, fg=app.FG2)
-        self._ao_status_lbl.pack(anchor='w', pady=(4, 0))
-
-    def _ao_row(self, parent, color):
-        app = self.app
-        lbl = tk.Label(parent, text="0 (0%)", font=app.SANSB, bg=app.BG3, fg=color, anchor='w')
-        lbl.pack(anchor='w')
-        return lbl
-
-    def _build_quick_tip(self, parent):
-        app = self.app
-        card = self._card(parent, None)
-        tk.Label(card, text="💡 QUICK TIP", font=app.SANSB, bg=app.BG3, fg=app.ACC2
-                 ).pack(anchor='w', pady=(0, 6))
-        tk.Label(card, text="Double-click an account name to open its history.",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=220,
-                 justify='left').pack(anchor='w')
-
     # ── Stat strip ────────────────────────────────────────────────────────────────
     def _build_stat_strip(self, parent):
         app = self.app
@@ -238,8 +121,8 @@ class StatusTab:
 
         col_hdr = tk.Frame(card, bg=app.BG3)
         col_hdr.pack(fill='x', pady=(0, 4))
-        for text, w in [("ACCOUNT", 9), ("TASK", 6), ("ACTIVITY", 7), ("UPTIME", 5),
-                         ("BREAK", 5), ("STATUS", 9), ("", 7), ("", 8)]:
+        for text, w in [("ACCOUNT", 17), ("TASK", 12), ("ACTIVITY", 17), ("UPTIME", 7),
+                         ("BREAK", 7), ("STATUS", 9), ("", 7), ("", 8)]:
             tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
                      width=w, anchor='w').pack(side='left', padx=(0, 6))
 
@@ -259,7 +142,10 @@ class StatusTab:
         self._rows_container = tk.Frame(canvas, bg=app.BG3)
         win = canvas.create_window((0, 0), window=self._rows_container, anchor='nw')
 
+        needs_scroll = False
+
         def _sync_scroll(_e=None):
+            nonlocal needs_scroll
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._rows_container.winfo_reqheight()
             visible_h = canvas.winfo_height()
@@ -273,9 +159,9 @@ class StatusTab:
         canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
 
         def _on_enter(_):
-            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
-            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
-            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+            canvas.bind_all('<MouseWheel>', lambda e: needs_scroll and canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: needs_scroll and canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: needs_scroll and canvas.yview_scroll(1,  'units'))
         def _on_leave(_):
             canvas.unbind_all('<MouseWheel>')
             canvas.unbind_all('<Button-4>')
@@ -326,8 +212,8 @@ class StatusTab:
         tk.Frame(row, bg=app.BG4, height=1).pack(fill='x', side='bottom')
 
         # Avatar circle + name (double-click → history)
-        name_cell = tk.Frame(row, bg=app.BG3, width=100)
-        name_cell.pack(side='left', fill='y', padx=(0, 4))
+        name_cell = tk.Frame(row, bg=app.BG3, width=170)
+        name_cell.pack(side='left', fill='y', padx=(0, 6))
         name_cell.pack_propagate(False)
         avatar = tk.Canvas(name_cell, width=24, height=24, bg=app.BG3, highlightthickness=0)
         avatar.pack(side='left', padx=(0, 6))
@@ -335,7 +221,7 @@ class StatusTab:
         avatar.create_text(12, 12, text=(account[:1] or '?').upper(), fill=app.BG, font=app.SANSB)
         text_col = tk.Frame(name_cell, bg=app.BG3, cursor='hand2')
         text_col.pack(side='left', fill='both', expand=True)
-        name_lbl = tk.Label(text_col, text=self._clip(account, 11), font=app.SANSB, bg=app.BG3, fg=app.ACC,
+        name_lbl = tk.Label(text_col, text=self._clip(account, 18), font=app.SANSB, bg=app.BG3, fg=app.ACC,
                              cursor='hand2', anchor='w')
         name_lbl.pack(anchor='w', fill='x')
         hint_lbl = tk.Label(text_col, text="View history", font=app.SANSS,
@@ -344,18 +230,18 @@ class StatusTab:
         for w in (name_lbl, hint_lbl, text_col):
             w.bind('<Double-1>', lambda e, a=account: self._open_history(a))
 
-        task_lbl = tk.Label(row, text=self._clip(r['task'], 6), font=app.SANS, bg=app.BG3, fg=app.FG,
-                             width=6, anchor='w')
-        task_lbl.pack(side='left', padx=(0, 3))
-        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 7), font=app.SANS, bg=app.BG3, fg=app.FG2,
-                                 width=7, anchor='w')
-        activity_lbl.pack(side='left', padx=(0, 3))
+        task_lbl = tk.Label(row, text=self._clip(r['task'], 12), font=app.SANS, bg=app.BG3, fg=app.FG,
+                             width=12, anchor='w')
+        task_lbl.pack(side='left', padx=(0, 6))
+        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 17), font=app.SANS, bg=app.BG3, fg=app.FG2,
+                                 width=17, anchor='w')
+        activity_lbl.pack(side='left', padx=(0, 6))
         uptime_lbl = tk.Label(row, text=r.get('uptime', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                               width=5, anchor='w')
-        uptime_lbl.pack(side='left', padx=(0, 3))
+                               width=7, anchor='w')
+        uptime_lbl.pack(side='left', padx=(0, 6))
         break_lbl = tk.Label(row, text=r.get('break_time', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                              width=5, anchor='w')
-        break_lbl.pack(side='left', padx=(0, 3))
+                              width=7, anchor='w')
+        break_lbl.pack(side='left', padx=(0, 6))
 
         status_text = r['status'].split(' ', 1)[-1] if ' ' in r['status'] else r['status']
         badge_color = self._status_color(r['status'])
@@ -533,7 +419,6 @@ class StatusTab:
         return datetime.now().strftime('%H:%M:%S')
 
     def _update_stat_strip(self, rows):
-        app = self.app
         total = len(rows)
         active = sum(1 for r in rows if 'Offline' not in r['status'])
         on_break = sum(1 for r in rows if 'On Break' in r['status'])
@@ -548,13 +433,3 @@ class StatusTab:
             count_lbl, pct_lbl = self._stat_widgets[key]
             count_lbl.configure(text=str(n))
             pct_lbl.configure(text=pct(n))
-
-        self._ao_total_lbl.configure(text=str(total))
-        self._ao_active_lbl.configure(text=f"{active} ({pct(active)})")
-        self._ao_break_lbl.configure(text=f"{on_break} ({pct(on_break)})")
-        if total == 0:
-            self._ao_status_lbl.configure(text="No accounts yet", fg=app.FG2)
-        elif active == total:
-            self._ao_status_lbl.configure(text="✓ All accounts operational", fg=app.GREEN)
-        else:
-            self._ao_status_lbl.configure(text=f"⚠ {total - active} need attention", fg=app.YEL)

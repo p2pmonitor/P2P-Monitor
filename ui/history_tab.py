@@ -135,7 +135,10 @@ class HistoryTab:
         self._accounts_frame = tk.Frame(canvas, bg=app.BG2)
         win = canvas.create_window((0, 0), window=self._accounts_frame, anchor='nw')
 
+        needs_scroll = False
+
         def _sync_scroll(_e=None):
+            nonlocal needs_scroll
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._accounts_frame.winfo_reqheight()
             visible_h = canvas.winfo_height()
@@ -149,9 +152,9 @@ class HistoryTab:
         canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
 
         def _on_enter(_):
-            canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
-            canvas.bind_all('<Button-4>',   lambda e: canvas.yview_scroll(-1, 'units'))
-            canvas.bind_all('<Button-5>',   lambda e: canvas.yview_scroll(1,  'units'))
+            canvas.bind_all('<MouseWheel>', lambda e: needs_scroll and canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: needs_scroll and canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: needs_scroll and canvas.yview_scroll(1,  'units'))
         def _on_leave(_):
             canvas.unbind_all('<MouseWheel>')
             canvas.unbind_all('<Button-4>')
@@ -496,11 +499,38 @@ class HistoryTab:
             return ds_from if ds_from == ds_to else f"{ds_from} → {ds_to}"
 
     def _toggle_account(self, acc):
+        """Expand/collapse one account's card in place — never a full
+        _rebuild_accounts(). Collapsing just unpacks the body (its tree
+        stays alive, fully built, just hidden), so re-expanding the same
+        account later is instant rather than rebuilding from scratch.
+        A tree is only ever built lazily, the first time that account is
+        actually expanded — exactly the same lazy-build contract
+        _build_account_card already uses at full-rebuild time, just
+        applied here too so toggling doesn't bypass it.
+        """
+        widgets = self._account_widgets.get(acc)
+        if widgets is None:
+            # Card isn't currently rendered (shouldn't normally happen —
+            # you can only click a chevron that's visible) — fall back to
+            # the safe default.
+            if acc in self._open_accounts:
+                self._open_accounts.discard(acc)
+            else:
+                self._open_accounts.add(acc)
+            self._rebuild_accounts()
+            return
+
         if acc in self._open_accounts:
             self._open_accounts.discard(acc)
+            widgets['body_outer'].pack_forget()
+            widgets['chevron'].configure(text='▸')
         else:
             self._open_accounts.add(acc)
-        self._rebuild_accounts()
+            widgets['chevron'].configure(text='▾')
+            if widgets.get('tree') is None:
+                entries = self._filtered_entries_for(acc)
+                widgets['tree'] = self._build_event_tree(widgets['body_outer'], acc, entries)
+            widgets['body_outer'].pack(fill='x', pady=(0, 10))
 
     # ── Per-account event tree ───────────────────────────────────────────────────
     COL_DEFAULTS = {'time': 110, 'type': 110, 'value': 220, 'activity': 420, 'severity': 90}

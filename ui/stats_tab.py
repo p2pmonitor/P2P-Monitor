@@ -70,6 +70,19 @@ class StatsTab:
         self._donut_resize_pending = False  # guards the single after_idle retry in _size_donut_to_panel
         self._chart_points = []          # set for real in _build_chart/_redraw_chart
         self._tooltip_last_idx = None
+        # Cached last series/breakdown, so the chart can be redrawn when its
+        # canvas resizes (e.g. the page settling into its final layout after
+        # first draw, or the window being resized) without needing fresh
+        # data — see _chart_canvas's <Configure> binding in _build_chart.
+        # Without this, the chart only ever draws once at whatever size the
+        # canvas happened to have *at that moment*, and if the canvas later
+        # ends up smaller (KPI tiles/filters settling into their real size,
+        # window shrinking, etc.) the already-drawn x-axis labels — positioned
+        # using the stale, larger height — extend past the canvas's real
+        # bounds and get clipped. That's the reported bottom-clipping bug.
+        self._last_chart_series = None
+        self._last_chart_breakdown = None
+        self._chart_resize_after_id = None
         self._donut_redraw_in_progress = False  # reentrancy guard — see _redraw_skill_donut
 
         # Lightweight placeholder — replaced by _build_real_content() on first show
@@ -356,11 +369,11 @@ class StatsTab:
             ('top_account',  'TOP ACCOUNT',     app.GREEN),
         ]
         for key, title, color in cards:
-            card = tk.Frame(row, bg=app.BG3, padx=14, pady=10)
+            card = tk.Frame(row, bg=app.BG3, padx=10, pady=7)
             card.pack(side='left', fill='x', expand=True, padx=(0, 8))
             tk.Label(card, text=title, font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w')
             val_var = tk.StringVar(value='—')
-            tk.Label(card, textvariable=val_var, font=(app.SANS[0], 18, 'bold'),
+            tk.Label(card, textvariable=val_var, font=(app.SANS[0], 15, 'bold'),
                      bg=app.BG3, fg=color).pack(anchor='w')
             sub_var = tk.StringVar(value='')
             tk.Label(card, textvariable=sub_var, font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w')
@@ -378,6 +391,20 @@ class StatsTab:
                             width=300, height=130)
         canvas.pack(fill='both', expand=True)
         self._chart_canvas = canvas
+
+        def _on_canvas_configure(_e=None):
+            if self._chart_resize_after_id is not None:
+                self.app.after_cancel(self._chart_resize_after_id)
+            def _redraw_now():
+                self._chart_resize_after_id = None
+                if self._last_chart_series is not None:
+                    self._redraw_chart(self._last_chart_series, self._last_chart_breakdown)
+            # Small debounce: a live window drag fires many Configure events
+            # in a row, and re-running the chart's full redraw on every
+            # single one would be wasteful (and visibly janky) — wait for
+            # things to settle for 80ms instead.
+            self._chart_resize_after_id = self.app.after(80, _redraw_now)
+        canvas.bind('<Configure>', _on_canvas_configure)
 
         # Cached once (not per-redraw) — used to measure actual x-axis label
         # pixel widths for collision avoidance in _select_chart_x_labels(),
@@ -548,6 +575,8 @@ class StatsTab:
 
         series = daily_series_for_range(rows, date_from=date_from, date_to=date_to)
         breakdown = self._daily_account_breakdown(rows)
+        self._last_chart_series = series
+        self._last_chart_breakdown = breakdown
         self._redraw_chart(series, breakdown)
 
         # Levels by Skill: obeys Account + Date range, ignores Skill — a

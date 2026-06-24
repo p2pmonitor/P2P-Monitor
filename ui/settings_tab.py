@@ -115,18 +115,18 @@ class SettingsTab:
 
     def _build_sidebar(self, parent):
         app = self.app
-        nav = tk.Frame(parent, bg=app.BG2, width=200)
+        nav = tk.Frame(parent, bg=app.BG2, width=150)
         nav.pack(side='left', fill='y')
         nav.pack_propagate(False)
         tk.Label(nav, text="SETTINGS", font=app.SANSS, bg=app.BG2, fg=app.FG2
-                 ).pack(anchor='w', padx=16, pady=(16, 8))
+                 ).pack(anchor='w', padx=12, pady=(12, 6))
         for sid, icon, label in self.SECTIONS:
             wrap = tk.Frame(nav, bg=app.BG2)
-            wrap.pack(fill='x', padx=8, pady=1)
+            wrap.pack(fill='x', padx=6, pady=1)
             indicator = tk.Frame(wrap, width=3, bg=app.BG2)
             indicator.pack(side='left', fill='y')
-            lbl = tk.Label(wrap, text=f"{icon}  {label}", font=app.SANSB,
-                           bg=app.BG2, fg=app.FG2, anchor='w', padx=12, pady=10,
+            lbl = tk.Label(wrap, text=f"{icon}  {label}", font=app.SANSS,
+                           bg=app.BG2, fg=app.FG2, anchor='w', padx=8, pady=7,
                            cursor='hand2')
             lbl.pack(side='left', fill='x', expand=True)
             for w in (wrap, lbl):
@@ -153,11 +153,11 @@ class SettingsTab:
     # ── Shared row/card builders (used by every page) ───────────────────────
     def _page_header(self, parent, title, subtitle):
         app = self.app
-        wrap = tk.Frame(parent, bg=app.BG2, padx=24, pady=20)
+        wrap = tk.Frame(parent, bg=app.BG2, padx=16, pady=12)
         wrap.pack(fill='x')
-        tk.Label(wrap, text=title, font=(app.SANS[0], 20, 'bold'),
+        tk.Label(wrap, text=title, font=(app.SANS[0], 15, 'bold'),
                  bg=app.BG2, fg=app.FG).pack(anchor='w')
-        tk.Label(wrap, text=subtitle, font=app.SANS, bg=app.BG2, fg=app.FG2
+        tk.Label(wrap, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2
                  ).pack(anchor='w', pady=(2, 0))
 
     def _scrollable_body(self, parent):
@@ -170,7 +170,7 @@ class SettingsTab:
         comparison, every time the page or window is resized."""
         app = self.app
         outer = tk.Frame(parent, bg=app.BG2)
-        outer.pack(fill='both', expand=True, padx=24, pady=(0, 12))
+        outer.pack(fill='both', expand=True, padx=16, pady=(0, 10))
         canvas = tk.Canvas(outer, bg=app.BG2, highlightthickness=0)
         canvas.pack(side='left', fill='both', expand=True)
         sb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
@@ -215,8 +215,8 @@ class SettingsTab:
         via <Configure> so it reads correctly whether the card sits in a
         two-column or full-width page."""
         app = self.app
-        card = tk.Frame(parent, bg=app.BG3, padx=16, pady=14)
-        card.pack(fill='x', pady=(0, 12))
+        card = tk.Frame(parent, bg=app.BG3, padx=11, pady=9)
+        card.pack(fill='x', pady=(0, 9))
         hdr = tk.Frame(card, bg=app.BG3)
         hdr.pack(fill='x', anchor='w')
         tk.Label(hdr, text=icon, font=(app.SANS[0], 13), bg=app.BG3, fg=app.ACC
@@ -226,7 +226,7 @@ class SettingsTab:
             sub_lbl = tk.Label(card, text=subtitle, font=app.SANSS, bg=app.BG3,
                                 fg=app.FG2, justify='left', anchor='w')
             sub_lbl.pack(fill='x', anchor='w', pady=(4, 10))
-            card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 32, 100)))
+            card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 22, 100)))
         body = tk.Frame(card, bg=app.BG3)
         body.pack(fill='x')
         return card, body
@@ -234,22 +234,24 @@ class SettingsTab:
     def _row_bool(self, parent, label, attr, default=False, helper=None):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=4, anchor='w')
+        row.pack(fill='x', pady=3, anchor='w')
         var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
         tk.Checkbutton(row, text=label, variable=var, font=app.SANS,
             bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
             selectcolor=app.BG2, relief='flat', cursor='hand2', anchor='w'
             ).pack(side='top', anchor='w')
         if helper:
-            tk.Label(row, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                     justify='left', anchor='w').pack(side='top', anchor='w', padx=(24, 0))
+            helper_lbl = tk.Label(row, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                                   justify='left', anchor='w')
+            helper_lbl.pack(side='top', anchor='w', padx=(24, 0))
+            parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 32, 100)), add='+')
         self._vars[attr] = var
         return var
 
-    def _row_text(self, parent, label, attr, helper=None, pw=False, width_label=22):
+    def _row_text(self, parent, label, attr, helper=None, pw=False, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=4)
+        row.pack(fill='x', pady=3)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         var = tk.StringVar(value=str(app.cfg.get(attr, '')))
@@ -259,14 +261,16 @@ class SettingsTab:
                  ).pack(side='left', fill='x', expand=True, ipady=4, padx=(8, 0))
         self._vars[attr] = var
         if helper:
-            tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                     justify='left', anchor='w').pack(fill='x', pady=(0, 2))
+            helper_lbl = tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                                   justify='left', anchor='w')
+            helper_lbl.pack(fill='x', pady=(0, 2))
+            parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 8, 100)), add='+')
         return var
 
-    def _row_int(self, parent, label, attr, lo, hi, default=None, helper=None, width_label=22):
+    def _row_int(self, parent, label, attr, lo, hi, default=None, helper=None, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=4)
+        row.pack(fill='x', pady=3)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         d = default if default is not None else lo
@@ -276,8 +280,10 @@ class SettingsTab:
                   ).pack(side='left', padx=(8, 0))
         self._vars[attr] = var
         if helper:
-            tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                     justify='left', anchor='w').pack(fill='x', pady=(0, 2))
+            helper_lbl = tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                                   justify='left', anchor='w')
+            helper_lbl.pack(fill='x', pady=(0, 2))
+            parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 8, 100)), add='+')
         return var
 
     def _path_row_with_open(self, parent, label, path):
@@ -293,15 +299,22 @@ class SettingsTab:
                  ).pack(anchor='w')
         row = tk.Frame(wrap, bg=app.BG3)
         row.pack(fill='x', pady=(4, 0))
-        tk.Label(row, text=str(path), font=app.SANSS, bg=app.BG4, fg=app.FG2,
-                 anchor='w', padx=8, pady=4).pack(side='left', fill='x', expand=True)
+        path_lbl = tk.Label(row, text=str(path), font=app.SANSS, bg=app.BG4, fg=app.FG2,
+                             anchor='w', justify='left', padx=8, pady=4, wraplength=300)
+        path_lbl.pack(side='left', fill='x', expand=True)
         exists = Path(path).exists()
-        tk.Button(row, text="📂 Open" if exists else "📂 Open (not created yet)",
+        open_btn = tk.Button(row, text="📂 Open" if exists else "📂 Open (not created yet)",
                   font=app.SANSS, bg=app.BG4, fg=app.ACC if exists else app.FG2,
                   relief='flat', padx=8, pady=4,
                   cursor='hand2' if exists else 'arrow',
                   state='normal' if exists else 'disabled',
-                  command=lambda: open_path(path)).pack(side='left', padx=(6, 0))
+                  command=lambda: open_path(path))
+        open_btn.pack(side='left', padx=(6, 0))
+        # Wraplength accounts for the button's actual measured width (it
+        # varies a lot between "Open" and "Open (not created yet)") rather
+        # than a guessed fixed offset.
+        row.bind('<Configure>', lambda e: path_lbl.configure(
+            wraplength=max(e.width - open_btn.winfo_reqwidth() - 14, 100)))
 
     def _warning_banner(self, parent, text):
         app = self.app
@@ -324,10 +337,22 @@ class SettingsTab:
 
         cols = tk.Frame(inner, bg=app.BG2)
         cols.pack(fill='both', expand=True)
+        cols.grid_columnconfigure(0, weight=1, uniform='settings_cols')
+        cols.grid_columnconfigure(1, weight=1, uniform='settings_cols')
+        cols.grid_rowconfigure(0, weight=1)
+        # grid+uniform (not pack) is deliberate: pack gives whichever column
+        # is packed first its full natural width before the second one gets
+        # anything, so if the left column's natural content is ever wider
+        # than half the available space, the right column gets starved down
+        # to whatever's left over — which is exactly what was clipping the
+        # Monitoring Intervals/Debug cards. grid+uniform forces both columns
+        # to share space equally regardless of which one's content wants
+        # more, which is also what lets each card's own dynamic-wraplength
+        # Configure handler ever see a true, bounded width to react to.
         left = tk.Frame(cols, bg=app.BG2)
-        left.pack(side='left', fill='both', expand=True, padx=(0, 6))
+        left.grid(row=0, column=0, sticky='nsew', padx=(0, 6))
         right = tk.Frame(cols, bg=app.BG2)
-        right.pack(side='left', fill='both', expand=True, padx=(6, 0))
+        right.grid(row=0, column=1, sticky='nsew', padx=(6, 0))
 
         # ── Logs folder ──────────────────────────────────────────────────────
         _, body = self._card(left, '📁', 'DreamBot Logs Folder',
@@ -389,7 +414,7 @@ class SettingsTab:
 
         # ── Monitoring Intervals ─────────────────────────────────────────────
         _, body = self._card(right, '🕐', 'Monitoring Intervals')
-        self._row_int(body, "Log check interval (seconds):", 'check_interval', 1, 60,
+        self._row_int(body, "Interval (sec):", 'check_interval', 1, 60,
                       helper="How often P2P Monitor checks DreamBot logs for changes.")
 
         # ── Debug ────────────────────────────────────────────────────────────
@@ -447,19 +472,21 @@ class SettingsTab:
                               "without a specific webhook will fall back to it.")
         wh_cols = tk.Frame(body, bg=app.BG3)
         wh_cols.pack(fill='x')
+        wh_cols.grid_columnconfigure(0, weight=1, uniform='wh_cols')
+        wh_cols.grid_columnconfigure(1, weight=1, uniform='wh_cols')
         wh_left = tk.Frame(wh_cols, bg=app.BG3)
-        wh_left.pack(side='left', fill='both', expand=True, padx=(0, 12))
+        wh_left.grid(row=0, column=0, sticky='nsew', padx=(0, 12))
         wh_right = tk.Frame(wh_cols, bg=app.BG3)
-        wh_right.pack(side='left', fill='both', expand=True)
+        wh_right.grid(row=0, column=1, sticky='nsew')
 
-        self._row_text(wh_left,  "Default Webhook:",  'webhook_default', width_label=14)
-        self._row_text(wh_left,  "Quest Webhook:",     'webhook_quest',   width_label=14)
-        self._row_text(wh_left,  "Task Webhook:",      'webhook_task',    width_label=14)
-        self._row_text(wh_left,  "Chat Webhook:",       'webhook_chat',    width_label=14)
-        self._row_text(wh_right, "Error Webhook:",     'webhook_error',   width_label=14)
-        self._row_text(wh_right, "Drops Webhook:",     'webhook_drops',   width_label=14)
-        self._row_text(wh_right, "Deaths Webhook:",    'webhook_deaths',  width_label=14)
-        self._row_text(wh_right, "Level Up Webhook:",  'webhook_levelup', width_label=14)
+        self._row_text(wh_left,  "Default Webhook:",  'webhook_default', width_label=15)
+        self._row_text(wh_left,  "Quest Webhook:",     'webhook_quest',   width_label=15)
+        self._row_text(wh_left,  "Task Webhook:",      'webhook_task',    width_label=15)
+        self._row_text(wh_left,  "Chat Webhook:",       'webhook_chat',    width_label=15)
+        self._row_text(wh_right, "Error Webhook:",     'webhook_error',   width_label=15)
+        self._row_text(wh_right, "Drops Webhook:",     'webhook_drops',   width_label=15)
+        self._row_text(wh_right, "Deaths Webhook:",    'webhook_deaths',  width_label=15)
+        self._row_text(wh_right, "Level Up Webhook:",  'webhook_levelup', width_label=15)
 
         tk.Button(body, text="⚡  Test Webhooks", font=app.SANSB,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,

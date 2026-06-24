@@ -366,22 +366,19 @@ def _get_window_bounds(hwnd, debug_log=None):
         import ctypes
         from ctypes import wintypes
 
-        # Set DPI awareness and save old context for restore
+        # Set DPI awareness and save old context for restore.
+        # DPI_AWARENESS_CONTEXT is a HANDLE (pointer-sized, 8 bytes on
+        # x64) — argtypes/restype must say so explicitly, or ctypes'
+        # default guess (c_int, 32-bit) can silently misread the actual
+        # old-context value being saved here, before this function ever
+        # gets a chance to restore it correctly afterward.
         try:
-            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+            _u32 = ctypes.WinDLL('user32', use_last_error=True)
+            _u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            _u32.SetThreadDpiAwarenessContext.restype  = ctypes.c_void_p
+            old_ctx = _u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
         except Exception:
             old_ctx = None
-
-        user32  = ctypes.WinDLL('user32',  use_last_error=True)
-        dwmapi  = ctypes.WinDLL('dwmapi',  use_last_error=True)
-
-        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-        user32.GetWindowRect.restype  = wintypes.BOOL
-
-        dwmapi.DwmGetWindowAttribute.argtypes = [
-            wintypes.HWND, ctypes.c_uint,
-            ctypes.c_void_p, ctypes.c_uint]
-        dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long  # HRESULT
 
         DWMWA_EXTENDED_FRAME_BOUNDS = 9
         MAX_W, MAX_H = 7680, 4320  # 8K upper bound sanity check
@@ -391,60 +388,74 @@ def _get_window_bounds(hwnd, debug_log=None):
         chosen_rect = None
         method      = None
 
-        # ── Try DWM extended frame bounds ────────────────────────────────────
-        dwm_r = wintypes.RECT()
-        hr = dwmapi.DwmGetWindowAttribute(
-            hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
-            ctypes.byref(dwm_r), ctypes.sizeof(dwm_r))
-        if hr == 0:
-            dw = dwm_r.right  - dwm_r.left
-            dh = dwm_r.bottom - dwm_r.top
-            if 0 < dw <= MAX_W and 0 < dh <= MAX_H:
-                dwm_rect    = (dwm_r.left, dwm_r.top, dw, dh)
-                chosen_rect = dwm_rect
-                method      = 'dwm'
-                if debug_log:
-                    debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                              f'DWM bounds=({dwm_r.left},{dwm_r.top},{dw},{dh})')
-            else:
-                if debug_log:
-                    debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                              f'DWM returned invalid size {dw}x{dh}, skipping')
-        else:
-            if debug_log:
-                debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                          f'DwmGetWindowAttribute failed HRESULT=0x{hr & 0xFFFFFFFF:08X}')
+        try:
+            user32  = ctypes.WinDLL('user32',  use_last_error=True)
+            dwmapi  = ctypes.WinDLL('dwmapi',  use_last_error=True)
 
-        # ── Try GetWindowRect if DWM failed ───────────────────────────────────
-        if chosen_rect is None:
-            wr = wintypes.RECT()
-            ok = user32.GetWindowRect(hwnd, ctypes.byref(wr))
-            if ok:
-                ww = wr.right  - wr.left
-                wh = wr.bottom - wr.top
-                if 0 < ww <= MAX_W and 0 < wh <= MAX_H:
-                    winrect     = (wr.left, wr.top, ww, wh)
-                    chosen_rect = winrect
-                    method      = 'winrect'
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect.restype  = wintypes.BOOL
+
+            dwmapi.DwmGetWindowAttribute.argtypes = [
+                wintypes.HWND, ctypes.c_uint,
+                ctypes.c_void_p, ctypes.c_uint]
+            dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long  # HRESULT
+
+            # ── Try DWM extended frame bounds ────────────────────────────────
+            dwm_r = wintypes.RECT()
+            hr = dwmapi.DwmGetWindowAttribute(
+                hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                ctypes.byref(dwm_r), ctypes.sizeof(dwm_r))
+            if hr == 0:
+                dw = dwm_r.right  - dwm_r.left
+                dh = dwm_r.bottom - dwm_r.top
+                if 0 < dw <= MAX_W and 0 < dh <= MAX_H:
+                    dwm_rect    = (dwm_r.left, dwm_r.top, dw, dh)
+                    chosen_rect = dwm_rect
+                    method      = 'dwm'
                     if debug_log:
                         debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                                  f'GetWindowRect=({wr.left},{wr.top},{ww},{wh})')
+                                  f'DWM bounds=({dwm_r.left},{dwm_r.top},{dw},{dh})')
                 else:
                     if debug_log:
                         debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                                  f'GetWindowRect invalid size {ww}x{wh}')
+                                  f'DWM returned invalid size {dw}x{dh}, skipping')
             else:
-                err = ctypes.get_last_error()
                 if debug_log:
                     debug_log(f'_get_window_bounds hwnd={hwnd}: '
-                              f'GetWindowRect failed error={err}')
+                              f'DwmGetWindowAttribute failed HRESULT=0x{hr & 0xFFFFFFFF:08X}')
 
-        # ── Restore DPI context ───────────────────────────────────────────────
-        if old_ctx is not None:
-            try:
-                ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
-            except Exception:
-                pass
+            # ── Try GetWindowRect if DWM failed ───────────────────────────────
+            if chosen_rect is None:
+                wr = wintypes.RECT()
+                ok = user32.GetWindowRect(hwnd, ctypes.byref(wr))
+                if ok:
+                    ww = wr.right  - wr.left
+                    wh = wr.bottom - wr.top
+                    if 0 < ww <= MAX_W and 0 < wh <= MAX_H:
+                        winrect     = (wr.left, wr.top, ww, wh)
+                        chosen_rect = winrect
+                        method      = 'winrect'
+                        if debug_log:
+                            debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                                      f'GetWindowRect=({wr.left},{wr.top},{ww},{wh})')
+                    else:
+                        if debug_log:
+                            debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                                      f'GetWindowRect invalid size {ww}x{wh}')
+                else:
+                    err = ctypes.get_last_error()
+                    if debug_log:
+                        debug_log(f'_get_window_bounds hwnd={hwnd}: '
+                                  f'GetWindowRect failed error={err}')
+        finally:
+            # Must run even if the calls above raise — must never leave the
+            # thread stuck in PER_MONITOR_AWARE_V2 for every later Win32
+            # call on it, just because one geometry read failed.
+            if old_ctx is not None:
+                try:
+                    _u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+                except Exception:
+                    pass
 
         if chosen_rect is None:
             return None
@@ -690,7 +701,7 @@ def _get_focused_window_windows():
         return None
 
 
-def get_window_geometry(wid):
+def get_window_geometry(wid, debug_log=None):
     """
     Return (x, y, width, height) for the given window.
 
@@ -700,7 +711,7 @@ def get_window_geometry(wid):
         if sys.platform.startswith('linux'):
             return _get_window_geometry_linux(wid)
         elif sys.platform == 'win32':
-            return _get_window_geometry_windows(wid)
+            return _get_window_geometry_windows(wid, debug_log=debug_log)
         return None
     except Exception:
         return None
@@ -718,13 +729,13 @@ def _get_window_geometry_linux(wid):
         return None
 
 
-def _get_window_geometry_windows(wid):
+def _get_window_geometry_windows(wid, debug_log=None):
     """Uses _get_window_bounds for DWM-first geometry.
     Same coordinate space as capture_window_image — paint/force clicks align correctly.
     """
     try:
         hwnd   = int(str(wid), 0)
-        bounds = _get_window_bounds(hwnd)
+        bounds = _get_window_bounds(hwnd, debug_log=debug_log)
         if bounds is None:
             return None
         return (bounds.sx, bounds.sy, bounds.w, bounds.h)
@@ -732,7 +743,7 @@ def _get_window_geometry_windows(wid):
         return None
 
 
-def set_window_geometry(wid, x, y, w, h, resize=True):
+def set_window_geometry(wid, x, y, w, h, resize=True, debug_log=None):
     """
     Move/resize the given window to (x, y, w, h).
 
@@ -744,6 +755,9 @@ def set_window_geometry(wid, x, y, w, h, resize=True):
     resize: when False, only moves the window — the size is left as-is.
     Used when the caller has a position it trusts but a w/h it doesn't.
 
+    debug_log: optional callable(msg) — Windows only, see
+    _set_window_geometry_windows's docstring for exactly what gets logged.
+
     Returns: bool — True if the underlying command/API call ran without
     raising. This does NOT independently re-verify the window actually
     moved (window managers can refuse/clamp); callers that care should
@@ -753,7 +767,7 @@ def set_window_geometry(wid, x, y, w, h, resize=True):
         if sys.platform.startswith('linux'):
             return _set_window_geometry_linux(wid, x, y, w, h, resize=resize)
         elif sys.platform == 'win32':
-            return _set_window_geometry_windows(wid, x, y, w, h, resize=resize)
+            return _set_window_geometry_windows(wid, x, y, w, h, resize=resize, debug_log=debug_log)
         return False
     except Exception:
         return False
@@ -771,7 +785,7 @@ def _set_window_geometry_linux(wid, x, y, w, h, resize=True):
         return False
 
 
-def _set_window_geometry_windows(wid, x, y, w, h, resize=True):
+def _set_window_geometry_windows(wid, x, y, w, h, resize=True, debug_log=None):
     """Same coordinate space as _get_window_geometry_windows (DWM extended
     frame bounds), applied directly to SetWindowPos. SetWindowPos itself
     operates on the raw window rect, not the DWM-adjusted one, so the
@@ -795,14 +809,39 @@ def _set_window_geometry_windows(wid, x, y, w, h, resize=True):
     resize: when False, only moves the window (SWP_NOSIZE) — used when
     the caller has decided the captured w/h isn't trustworthy enough to
     reapply, but the position still is.
+
+    debug_log: optional callable(msg) — if given, logs the thread DPI
+    context immediately before and after the SetWindowPos call (not just
+    trusting that the set succeeded — GetThreadDpiAwarenessContext is
+    queried fresh both times), and the exact rect requested. Combined
+    with a fresh capture of the window immediately after (the caller's
+    job, since this function only knows what it asked for, not what it
+    actually got), this is what lets a real before/after comparison be
+    made on a real scaled-DPI Windows machine.
     """
     try:
         import ctypes
         from ctypes import wintypes
 
         old_ctx = None
+        u32 = None
         try:
-            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+            u32 = ctypes.WinDLL('user32', use_last_error=True)
+            # DPI_AWARENESS_CONTEXT is pointer-sized (HANDLE) — explicit
+            # argtypes/restype required, or ctypes' default 32-bit c_int
+            # guess can silently misread the value on 64-bit Windows.
+            u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            u32.SetThreadDpiAwarenessContext.restype  = ctypes.c_void_p
+            old_ctx = u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+            if debug_log:
+                try:
+                    from py.platform_ops import get_dpi_diagnostics
+                    diag = get_dpi_diagnostics(wid)
+                    debug_log(f'_set_window_geometry_windows wid={wid}: '
+                              f'requesting rect=({x},{y},{w},{h}) resize={resize} '
+                              f'pre-restore dpi_diag={diag}')
+                except Exception as diag_e:
+                    debug_log(f'_set_window_geometry_windows wid={wid}: diag failed: {diag_e}')
         except Exception:
             pass
 
@@ -817,14 +856,25 @@ def _set_window_geometry_windows(wid, x, y, w, h, resize=True):
             SWP_NOSIZE = 0x0001
             flags = SWP_NOZORDER | SWP_NOACTIVATE | (SWP_NOSIZE if not resize else 0)
             ok = user32.SetWindowPos(hwnd, None, int(x), int(y), int(w), int(h), flags)
+            if debug_log:
+                err = ctypes.get_last_error() if not ok else 0
+                debug_log(f'_set_window_geometry_windows wid={wid}: '
+                          f'SetWindowPos returned ok={bool(ok)} last_error={err}')
         finally:
             # Must run even if SetWindowPos (or anything above) raises —
             # leaving the thread stuck in PER_MONITOR_AWARE_V2 would affect
             # every later Win32 call made on this same thread, not just
             # this one.
-            if old_ctx is not None:
+            if old_ctx is not None and u32 is not None:
                 try:
-                    ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
+                    u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+                    if debug_log:
+                        try:
+                            from py.platform_ops import get_dpi_diagnostics
+                            debug_log(f'_set_window_geometry_windows wid={wid}: '
+                                      f'post-restore dpi_diag={get_dpi_diagnostics(wid)}')
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -1039,79 +1089,202 @@ def _click_at_windows(x, y):
         from ctypes import wintypes
 
         old_ctx = None
+        u32 = None
         try:
-            old_ctx = ctypes.windll.user32.SetThreadDpiAwarenessContext(-4)
+            u32 = ctypes.WinDLL('user32', use_last_error=True)
+            # DPI_AWARENESS_CONTEXT is a HANDLE (pointer-sized, 8 bytes on
+            # x64) — argtypes/restype must say so explicitly, or ctypes'
+            # default guess (c_int, 32-bit) can silently misread the
+            # actual old-context value being saved here. Same fix as
+            # _get_window_bounds/_set_window_geometry_windows — this was
+            # the last remaining untyped call of this specific function.
+            u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            u32.SetThreadDpiAwarenessContext.restype  = ctypes.c_void_p
+            old_ctx = u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
         except Exception:
             pass
 
-        MOUSEEVENTF_MOVE        = 0x0001
-        MOUSEEVENTF_LEFTDOWN    = 0x0002
-        MOUSEEVENTF_LEFTUP      = 0x0004
-        MOUSEEVENTF_ABSOLUTE    = 0x8000
-        MOUSEEVENTF_VIRTUALDESK = 0x4000
-
-        # ── Virtual desktop bounds via EnumDisplayMonitors (physical pixels) ──
-        monitors = []
-        vx = vy = vw = vh = None
-
         try:
-            MonitorEnumProc = ctypes.WINFUNCTYPE(
-                ctypes.c_bool,
-                ctypes.c_ulong,
-                ctypes.c_ulong,
-                ctypes.POINTER(wintypes.RECT),
-                ctypes.c_double
-            )
+            MOUSEEVENTF_MOVE        = 0x0001
+            MOUSEEVENTF_LEFTDOWN    = 0x0002
+            MOUSEEVENTF_LEFTUP      = 0x0004
+            MOUSEEVENTF_ABSOLUTE    = 0x8000
+            MOUSEEVENTF_VIRTUALDESK = 0x4000
 
-            def _monitor_cb(hmon, hdc, lprect, data):
-                r = lprect.contents
-                monitors.append((r.left, r.top, r.right, r.bottom))
-                return True
+            # ── Virtual desktop bounds via EnumDisplayMonitors (physical pixels) ──
+            monitors = []
+            vx = vy = vw = vh = None
 
-            cb = MonitorEnumProc(_monitor_cb)
-            ctypes.windll.user32.EnumDisplayMonitors(None, None, cb, 0)
-
-            if monitors:
-                vx = min(m[0] for m in monitors)
-                vy = min(m[1] for m in monitors)
-                vw = max(m[2] for m in monitors) - vx
-                vh = max(m[3] for m in monitors) - vy
-        except Exception:
-            pass
-
-        # ── Fallback: GetSystemMetrics ────────────────────────────────────────
-        if vx is None or vw is None or vw <= 0:
-            vx = ctypes.windll.user32.GetSystemMetrics(76)
-            vy = ctypes.windll.user32.GetSystemMetrics(77)
-            vw = ctypes.windll.user32.GetSystemMetrics(78)
-            vh = ctypes.windll.user32.GetSystemMetrics(79)
-            if vw <= 0:
-                vw = ctypes.windll.user32.GetSystemMetrics(0)
-            if vh <= 0:
-                vh = ctypes.windll.user32.GetSystemMetrics(1)
-
-        # ── Normalize and inject ──────────────────────────────────────────────
-        ax = int((x - vx) * 65535 / max(vw, 1))
-        ay = int((y - vy) * 65535 / max(vh, 1))
-
-        flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
-        ctypes.windll.user32.SetCursorPos(x, y)
-        ctypes.windll.user32.mouse_event(flags, ax, ay, 0, 0)
-        ctypes.windll.user32.mouse_event(
-            MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-            ax, ay, 0, 0)
-        ctypes.windll.user32.mouse_event(
-            MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-            ax, ay, 0, 0)
-
-        if old_ctx is not None:
             try:
-                ctypes.windll.user32.SetThreadDpiAwarenessContext(old_ctx)
+                MonitorEnumProc = ctypes.WINFUNCTYPE(
+                    ctypes.c_bool,
+                    ctypes.c_ulong,
+                    ctypes.c_ulong,
+                    ctypes.POINTER(wintypes.RECT),
+                    ctypes.c_double
+                )
+
+                def _monitor_cb(hmon, hdc, lprect, data):
+                    r = lprect.contents
+                    monitors.append((r.left, r.top, r.right, r.bottom))
+                    return True
+
+                cb = MonitorEnumProc(_monitor_cb)
+                ctypes.windll.user32.EnumDisplayMonitors(None, None, cb, 0)
+
+                if monitors:
+                    vx = min(m[0] for m in monitors)
+                    vy = min(m[1] for m in monitors)
+                    vw = max(m[2] for m in monitors) - vx
+                    vh = max(m[3] for m in monitors) - vy
             except Exception:
                 pass
 
+            # ── Fallback: GetSystemMetrics ────────────────────────────────────────
+            if vx is None or vw is None or vw <= 0:
+                vx = ctypes.windll.user32.GetSystemMetrics(76)
+                vy = ctypes.windll.user32.GetSystemMetrics(77)
+                vw = ctypes.windll.user32.GetSystemMetrics(78)
+                vh = ctypes.windll.user32.GetSystemMetrics(79)
+                if vw <= 0:
+                    vw = ctypes.windll.user32.GetSystemMetrics(0)
+                if vh <= 0:
+                    vh = ctypes.windll.user32.GetSystemMetrics(1)
+
+            # ── Normalize and inject ──────────────────────────────────────────────
+            ax = int((x - vx) * 65535 / max(vw, 1))
+            ay = int((y - vy) * 65535 / max(vh, 1))
+
+            flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+            ctypes.windll.user32.SetCursorPos(x, y)
+            ctypes.windll.user32.mouse_event(flags, ax, ay, 0, 0)
+            ctypes.windll.user32.mouse_event(
+                MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                ax, ay, 0, 0)
+            ctypes.windll.user32.mouse_event(
+                MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                ax, ay, 0, 0)
+        finally:
+            # Must run even if anything above raises — must never leave the
+            # thread stuck in PER_MONITOR_AWARE_V2 for every later Win32
+            # call on it just because one click attempt failed partway
+            # through.
+            if old_ctx is not None and u32 is not None:
+                try:
+                    u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+                except Exception:
+                    pass
+
     except Exception:
         pass
+
+
+def get_dpi_diagnostics(window_id=None):
+    """
+    Snapshot of everything relevant to the "DreamBot client restored at the
+    wrong DPI scale" investigation, for direct before/after comparison on a
+    real scaled-DPI Windows machine — this function makes no assumptions
+    about which value is "correct," it just reports what the OS actually
+    says at this exact moment, including the *current thread's* DPI
+    awareness context (the actual current state, not just whatever the
+    last SetThreadDpiAwarenessContext call claimed to set — if that call's
+    effect was ever silently lost for any reason, this is what would catch
+    it). Linux: returns platform='linux' with everything else None, since
+    none of this concept applies there.
+
+    Returns a dict — never raises. Always JSON-serializable (for
+    write_debug_entry).
+    """
+    if not sys.platform.startswith('win32') and sys.platform != 'win32':
+        return {'platform': 'linux'}
+    out = {'platform': 'win32', 'window_id': str(window_id) if window_id else None}
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL('user32', use_last_error=True)
+
+        # DPI_AWARENESS_CONTEXT is a HANDLE (pointer-sized — 8 bytes on
+        # x64), not a plain int. Both of these specifically need
+        # c_void_p, not the ctypes-guessed default of c_int (32-bit) —
+        # this exact mismatch is the leading suspect for why the beta18
+        # fix may not have fully worked: a truncated/misread context
+        # value here would make every later DPI-awareness check or
+        # restore unreliable in ways that wouldn't necessarily raise.
+        user32.GetThreadDpiAwarenessContext.argtypes = []
+        user32.GetThreadDpiAwarenessContext.restype  = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.GetAwarenessFromDpiAwarenessContext.restype  = ctypes.c_int
+        user32.AreDpiAwarenessContextsEqual.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        user32.AreDpiAwarenessContextsEqual.restype  = wintypes.BOOL
+
+        ctx = user32.GetThreadDpiAwarenessContext()
+        out['thread_dpi_context_raw'] = ctx
+
+        # Named DPI_AWARENESS_CONTEXT sentinel values, for identifying
+        # which one `ctx` actually is via AreDpiAwarenessContextsEqual
+        # (the context values themselves are opaque/version-dependent
+        # pseudo-handles — comparing by equality is the documented way,
+        # not comparing the raw integer to -1/-2/-3/-4/-5 directly).
+        named = {
+            'DPI_AWARENESS_CONTEXT_UNAWARE': -1,
+            'DPI_AWARENESS_CONTEXT_SYSTEM_AWARE': -2,
+            'DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE': -3,
+            'DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2': -4,
+            'DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED': -5,
+        }
+        out['thread_dpi_context_name'] = 'UNKNOWN'
+        for name, val in named.items():
+            try:
+                if user32.AreDpiAwarenessContextsEqual(ctx, ctypes.c_void_p(val)):
+                    out['thread_dpi_context_name'] = name
+                    break
+            except Exception:
+                pass
+
+        try:
+            out['thread_dpi_awareness_enum'] = user32.GetAwarenessFromDpiAwarenessContext(ctx)
+        except Exception:
+            out['thread_dpi_awareness_enum'] = None
+
+        # Process-level awareness (set once at startup, if ever — this app
+        # currently never calls SetProcessDpiAwareness/Context anywhere,
+        # which this diagnostic should make directly visible).
+        try:
+            shcore = ctypes.WinDLL('shcore', use_last_error=True)
+            shcore.GetProcessDpiAwareness.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_int)]
+            shcore.GetProcessDpiAwareness.restype  = ctypes.c_long
+            val = ctypes.c_int()
+            hr = shcore.GetProcessDpiAwareness(None, ctypes.byref(val))
+            out['process_dpi_awareness'] = val.value if hr == 0 else None
+        except Exception:
+            out['process_dpi_awareness'] = None
+
+        if window_id:
+            try:
+                hwnd = int(str(window_id), 0)
+                user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+                user32.GetDpiForWindow.restype  = ctypes.c_uint
+                dpi = user32.GetDpiForWindow(hwnd)
+                out['window_dpi'] = dpi
+                out['window_scale_factor'] = round(dpi / 96.0, 4) if dpi else None
+            except Exception as e:
+                out['window_dpi_error'] = str(e)
+
+        # System-wide DPI (GetDpiForSystem), for comparison against the
+        # per-window value above — they only differ on real multi-monitor
+        # setups with mixed scaling.
+        try:
+            user32.GetDpiForSystem.argtypes = []
+            user32.GetDpiForSystem.restype  = ctypes.c_uint
+            out['system_dpi'] = user32.GetDpiForSystem()
+        except Exception:
+            out['system_dpi'] = None
+
+        return out
+    except Exception as e:
+        out['error'] = str(e)
+        return out
 
 
 def get_window_dpi_scale(window_id):

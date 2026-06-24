@@ -51,9 +51,54 @@ class MonitorTab:
         root = tk.Frame(f, bg=app.BG2, padx=16, pady=16)
         root.pack(fill='both', expand=True)
 
-        left = tk.Frame(root, bg=app.BG2, width=270)
-        left.pack(side='left', fill='y', padx=(0, 16))
-        left.pack_propagate(False)
+        left_outer = tk.Frame(root, bg=app.BG2, width=200)
+        left_outer.pack(side='left', fill='y', padx=(0, 12))
+        left_outer.pack_propagate(False)
+
+        # Canvas+Scrollbar wrap, same pattern as Status/History/Launcher/
+        # Settings — the four stacked cards below (Session Control, the
+        # status card, Active Accounts, Max Progress) used to live directly
+        # in a plain pack_propagate(False) frame with no explicit height,
+        # which meant real populated content (a real account, real WOM
+        # cache data) could silently overflow the visible area with zero
+        # signal anywhere in the widget tree — that's what was clipping
+        # Max Progress. Compaction (below) should mean this scrollbar
+        # never actually needs to appear in practice; this is the backstop
+        # for whatever compaction doesn't fully cover (e.g. Windows' own
+        # font metrics, which aren't the same as what's measurable here).
+        canvas = tk.Canvas(left_outer, bg=app.BG2, highlightthickness=0)
+        canvas.pack(side='left', fill='both', expand=True)
+        sb = ttk.Scrollbar(left_outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        left = tk.Frame(canvas, bg=app.BG2)
+        win = canvas.create_window((0, 0), window=left, anchor='nw')
+
+        needs_scroll = False
+
+        def _sync_scroll(_e=None):
+            nonlocal needs_scroll
+            canvas.configure(scrollregion=canvas.bbox('all'))
+            content_h = left.winfo_reqheight()
+            visible_h = canvas.winfo_height()
+            needs_scroll = content_h > visible_h > 1
+            if needs_scroll and not sb.winfo_ismapped():
+                sb.pack(side='right', fill='y')
+            elif not needs_scroll and sb.winfo_ismapped():
+                sb.pack_forget()
+                canvas.yview_moveto(0)
+        left.bind('<Configure>', _sync_scroll)
+        canvas.bind('<Configure>', lambda e: (canvas.itemconfig(win, width=e.width), _sync_scroll()))
+
+        def _on_enter(_):
+            canvas.bind_all('<MouseWheel>', lambda e: needs_scroll and canvas.yview_scroll(-1 * (e.delta // 120), 'units'))
+            canvas.bind_all('<Button-4>',   lambda e: needs_scroll and canvas.yview_scroll(-1, 'units'))
+            canvas.bind_all('<Button-5>',   lambda e: needs_scroll and canvas.yview_scroll(1,  'units'))
+        def _on_leave(_):
+            canvas.unbind_all('<MouseWheel>')
+            canvas.unbind_all('<Button-4>')
+            canvas.unbind_all('<Button-5>')
+        canvas.bind('<Enter>', _on_enter)
+        canvas.bind('<Leave>', _on_leave)
 
         right = tk.Frame(root, bg=app.BG2)
         right.pack(side='left', fill='both', expand=True)
@@ -69,11 +114,11 @@ class MonitorTab:
 
     def _card(self, parent, title, icon=None):
         app = self.app
-        card = tk.Frame(parent, bg=app.BG3, padx=14, pady=12)
-        card.pack(fill='x', pady=(0, 12))
+        card = tk.Frame(parent, bg=app.BG3, padx=10, pady=8)
+        card.pack(fill='x', pady=(0, 8))
         if title:
             hdr = tk.Frame(card, bg=app.BG3)
-            hdr.pack(fill='x', anchor='w', pady=(0, 8))
+            hdr.pack(fill='x', anchor='w', pady=(0, 5))
             if icon:
                 tk.Label(hdr, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
                          ).pack(side='left', padx=(0, 6))
@@ -86,11 +131,11 @@ class MonitorTab:
         app = self.app
         card = self._card(parent, "SESSION CONTROL", '▶')
         app._btn_start = tk.Button(card, text="▶  START", font=app.SANSB,
-            bg=app.GREEN, fg=app.BG, relief='flat', padx=16, pady=10,
+            bg=app.GREEN, fg=app.BG, relief='flat', padx=14, pady=7,
             cursor='hand2', command=app._start)
-        app._btn_start.pack(fill='x', pady=(0, 6))
+        app._btn_start.pack(fill='x', pady=(0, 4))
         app._btn_stop = tk.Button(card, text="■  STOP", font=app.SANSB,
-            bg=app.BG3, fg=app.FG2, relief='flat', padx=16, pady=10,
+            bg=app.BG3, fg=app.FG2, relief='flat', padx=14, pady=7,
             cursor='hand2', command=app._stop, state='disabled')
         app._btn_stop.pack(fill='x')
 
@@ -100,7 +145,7 @@ class MonitorTab:
         card = self._card(parent, None)
         self._so_status_lbl = tk.Label(card, text="● STOPPED", font=app.SANSB,
                                         bg=app.BG3, fg=app.RED)
-        self._so_status_lbl.pack(anchor='w', pady=(0, 8))
+        self._so_status_lbl.pack(anchor='w', pady=(0, 5))
 
         self._so_uptime_lbl   = self._so_row(card, "Uptime", "—")
         self._so_started_lbl  = self._so_row(card, "Started", "—")
@@ -109,9 +154,9 @@ class MonitorTab:
     def _so_row(self, parent, label, value):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=2)
+        row.pack(fill='x', pady=1)
         tk.Label(row, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                 width=10, anchor='w').pack(side='left')
+                 width=9, anchor='w').pack(side='left')
         val_lbl = tk.Label(row, text=value, font=app.SANS, bg=app.BG3, fg=app.FG, anchor='w')
         val_lbl.pack(side='left', fill='x', expand=True)
         return val_lbl
@@ -145,11 +190,11 @@ class MonitorTab:
     def _build_active_accounts_card(self, parent):
         app = self.app
         card = self._card(parent, "ACTIVE ACCOUNTS", '👥')
-        self._aa_count_lbl = tk.Label(card, text="—", font=(app.SANS[0], 22, 'bold'),
+        self._aa_count_lbl = tk.Label(card, text="—", font=(app.SANS[0], 18, 'bold'),
                                        bg=app.BG3, fg=app.FG)
         self._aa_count_lbl.pack(anchor='w')
         self._aa_dots = tk.Frame(card, bg=app.BG3)
-        self._aa_dots.pack(anchor='w', pady=(4, 6))
+        self._aa_dots.pack(anchor='w', pady=(3, 4))
         self._aa_sub_lbl = tk.Label(card, text="No accounts yet", font=app.SANSS,
                                      bg=app.BG3, fg=app.FG2)
         self._aa_sub_lbl.pack(anchor='w')
@@ -178,16 +223,19 @@ class MonitorTab:
         card = self._card(parent, "MAX PROGRESS", '🏆')
         tk.Label(card, text="Closest to max", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(anchor='w')
-        self._mp_account_lbl = tk.Label(card, text="No WOM data yet", font=(app.SANS[0], 14, 'bold'),
-                                         bg=app.BG3, fg=app.FG, cursor='hand2', anchor='w')
-        self._mp_account_lbl.pack(anchor='w', pady=(2, 4), fill='x')
-        self._mp_99_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
+        self._mp_account_lbl = tk.Label(card, text="No WOM data yet", font=(app.SANS[0], 12, 'bold'),
+                                         bg=app.BG3, fg=app.FG, cursor='hand2', anchor='w',
+                                         wraplength=172, justify='left')
+        self._mp_account_lbl.pack(anchor='w', pady=(2, 3), fill='x')
+        self._mp_99_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                                    anchor='w', wraplength=172, justify='left')
         self._mp_99_lbl.pack(anchor='w', fill='x')
-        self._mp_time_lbl = tk.Label(card, text="", font=app.SANSB, bg=app.BG3, fg=app.ACC, anchor='w')
-        self._mp_time_lbl.pack(anchor='w', pady=(0, 4), fill='x')
-        self._mp_bar_bg = tk.Frame(card, bg=app.BG4, height=6)
-        self._mp_bar_bg.pack(fill='x', pady=(0, 6))
-        self._mp_bar_fill = tk.Frame(self._mp_bar_bg, bg=app.GREEN, height=6, width=0)
+        self._mp_time_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.ACC,
+                                      anchor='w', wraplength=172, justify='left')
+        self._mp_time_lbl.pack(anchor='w', pady=(0, 3), fill='x')
+        self._mp_bar_bg = tk.Frame(card, bg=app.BG4, height=5)
+        self._mp_bar_bg.pack(fill='x', pady=(0, 4))
+        self._mp_bar_fill = tk.Frame(self._mp_bar_bg, bg=app.GREEN, height=5, width=0)
         self._mp_bar_fill.place(x=0, y=0)
         self._mp_note_lbl = tk.Label(card, text="No WOM data yet", font=app.SANSS,
                                       bg=app.BG3, fg=app.FG2, anchor='w')
@@ -224,35 +272,58 @@ class MonitorTab:
         """
         app = self.app
         def _do():
-            from py.wom import load_wom_cache, compute_account_summary, determine_last_99
+            best, last99 = None, None
             try:
-                cache = load_wom_cache()
-            except Exception:
-                cache = {'accounts': {}}
-            best = None
-            for account, entry in cache.get('accounts', {}).items():
-                skills = entry.get('skills') or {}
-                if not skills:
-                    continue
-                summary = compute_account_summary(account, app.cfg, skills)
-                ttm = summary.get('time_to_max_hours')
-                if not ttm or ttm <= 0:
-                    continue
-                if best is None or ttm < best['time_to_max_hours']:
-                    best = summary
-
-            last99 = None
-            if best:
-                account = best['account']
+                from py.wom import load_wom_cache, compute_account_summary, determine_last_99
                 try:
-                    from py.stats import load_levelup_rows
-                    from py.history import _parse_ts
-                    rows99 = [{'value': r['skill'], 'activity': '99', '_ts_epoch': _parse_ts(r['time'])}
-                              for r in load_levelup_rows(accounts=[account]) if r['level'] == 99]
+                    cache = load_wom_cache()
                 except Exception:
-                    rows99 = []
-                acc_skills = cache.get('accounts', {}).get(account, {}).get('skills') or {}
-                last99 = determine_last_99(rows99, acc_skills)
+                    cache = {'accounts': {}}
+                for account, entry in cache.get('accounts', {}).items():
+                    skills = entry.get('skills') or {}
+                    if not skills:
+                        continue
+                    try:
+                        summary = compute_account_summary(account, app.cfg, skills)
+                    except Exception as e:
+                        # One malformed/legacy-shaped cache entry must never
+                        # take down every other account's computation — this
+                        # loop previously had no try/except here at all, so a
+                        # single bad entry would crash this whole background
+                        # thread silently (daemon thread, uncaught exception
+                        # just kills it), leaving the UI stuck on its initial
+                        # "No WOM data yet" state forever even though the
+                        # cache file itself was read successfully. That's
+                        # indistinguishable from "no cache" in the UI, which
+                        # is the reported symptom.
+                        if app.cfg.get('debug', False):
+                            self.app._log(f'⚠ Max Progress: skipping {account}, '
+                                           f'compute_account_summary failed: {e}')
+                        continue
+                    ttm = summary.get('time_to_max_hours')
+                    if not ttm or ttm <= 0:
+                        continue
+                    if best is None or ttm < best['time_to_max_hours']:
+                        best = summary
+
+                if best:
+                    account = best['account']
+                    try:
+                        from py.stats import load_levelup_rows
+                        from py.history import _parse_ts
+                        rows99 = [{'value': r['skill'], 'activity': '99', '_ts_epoch': _parse_ts(r['time'])}
+                                  for r in load_levelup_rows(accounts=[account]) if r['level'] == 99]
+                    except Exception:
+                        rows99 = []
+                    acc_skills = cache.get('accounts', {}).get(account, {}).get('skills') or {}
+                    last99 = determine_last_99(rows99, acc_skills)
+            except Exception as e:
+                # Outermost safety net: whatever happened, the UI must still
+                # get an update (falling back to "no data") rather than the
+                # thread just vanishing and the card staying stuck forever.
+                if app.cfg.get('debug', False):
+                    self.app._log(f'⚠ Max Progress: refresh failed unexpectedly: {e}')
+                best, last99 = None, None
 
             app.after(0, lambda: self._apply_max_progress(best, last99))
         threading.Thread(target=_do, daemon=True).start()
@@ -303,17 +374,17 @@ class MonitorTab:
             ("LEVELS",  "levelup", '📈', app.ACC2),
         ]
         for label, key, icon, color in specs:
-            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
+            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=6)
             cell.pack(side='left', fill='x', expand=True, padx=(0, 3))
             top = tk.Frame(cell, bg=app.BG3)
             top.pack(fill='x', anchor='w')
-            tk.Label(top, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=color
+            tk.Label(top, text=icon, font=(app.SANS[0], 11), bg=app.BG3, fg=color
                      ).pack(side='left', padx=(0, 4))
             tk.Label(top, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
                      ).pack(side='left')
             var = tk.StringVar(value='0')
-            tk.Label(cell, textvariable=var, font=(app.SANS[0], 18, 'bold'),
-                     bg=app.BG3, fg=color).pack(anchor='w', pady=(4, 0))
+            tk.Label(cell, textvariable=var, font=(app.SANS[0], 15, 'bold'),
+                     bg=app.BG3, fg=color).pack(anchor='w', pady=(2, 0))
             app._sv[key] = var
 
     # ── Highlights row ───────────────────────────────────────────────────────────
@@ -334,7 +405,7 @@ class MonitorTab:
             ('drop',     "LATEST DROP",     '💎', app.GREEN),
         ]
         for key, label, icon, color in specs:
-            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
+            cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=6)
             cell.pack(side='left', fill='both', expand=True, padx=(0, 1))
             top = tk.Frame(cell, bg=app.BG3)
             top.pack(fill='x', anchor='w')
@@ -342,10 +413,11 @@ class MonitorTab:
                      ).pack(side='left', padx=(0, 4))
             tk.Label(top, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
                      ).pack(side='left')
-            val_lbl = tk.Label(cell, text="None yet", font=app.SANSB, bg=app.BG3, fg=app.FG,
-                                anchor='w', justify='left', wraplength=72)
-            val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
-            sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
+            val_lbl = tk.Label(cell, text="None yet", font=app.SANSS, bg=app.BG3, fg=app.FG,
+                                anchor='w', justify='left', wraplength=110)
+            val_lbl.pack(fill='x', anchor='w', pady=(3, 0))
+            sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                                anchor='w', wraplength=110, justify='left')
             sub_lbl.pack(fill='x', anchor='w')
             self._hl_widgets[key] = (val_lbl, sub_lbl)
 
@@ -353,7 +425,7 @@ class MonitorTab:
         # (that data is already shown in the Active Accounts sidebar card;
         # showing it twice was redundant). Uses the same val/sub pattern as
         # the other highlight cards: val = "Skill → 99", sub = "account • ago".
-        cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=8)
+        cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=6)
         cell.pack(side='left', fill='both', expand=True)
         top = tk.Frame(cell, bg=app.BG3)
         top.pack(fill='x', anchor='w')
@@ -361,10 +433,11 @@ class MonitorTab:
                  ).pack(side='left', padx=(0, 4))
         tk.Label(top, text="LAST 99 ACHIEVED", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
-        val_lbl = tk.Label(cell, text="None yet", font=app.SANSB, bg=app.BG3, fg=app.FG,
-                            anchor='w', justify='left', wraplength=72)
-        val_lbl.pack(fill='x', anchor='w', pady=(4, 0))
-        sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2, anchor='w')
+        val_lbl = tk.Label(cell, text="None yet", font=app.SANSS, bg=app.BG3, fg=app.FG,
+                            anchor='w', justify='left', wraplength=110)
+        val_lbl.pack(fill='x', anchor='w', pady=(3, 0))
+        sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                            anchor='w', wraplength=110, justify='left')
         sub_lbl.pack(fill='x', anchor='w')
         self._hl_widgets['last99'] = (val_lbl, sub_lbl)
 

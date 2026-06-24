@@ -1,5 +1,235 @@
 # Changelog
 
+## v2.0.0-beta.19
+### UI polish pass (Windows + Linux) + DPI restore re-investigation
+
+Driven entirely by real screenshots from both platforms at minimum window
+size, not the Xvfb requested-size harness alone — the harness's numeric
+"fits" checks turned out to have real blind spots (see Monitor below),
+exactly as flagged going into this pass. Every fix in this entry was
+verified against an actual rendered screenshot, not just a measurement.
+
+**1. Monitor tab — structural root cause found and fixed, not just resized.**
+The left sidebar (Session Control, the status card, Active Accounts, Max
+Progress) used `pack_propagate(False)` with no explicit height, sized via
+`fill='y'` to whatever the window's real height happened to be — completely
+decoupled from its own children's actual content needs. With real data
+(a real account, real WOM cache values) the four cards needed ~647px
+combined, well past what's available, and silently clipped at the bottom
+with **zero numeric signal anywhere** — every `winfo_reqheight()` check
+kept reporting a small, misleading number. This is exactly why Max
+Progress was getting cut off despite earlier checks saying the tab "fit."
+Fixed two ways: added the same Canvas+Scrollbar safety net already used
+elsewhere in this app (so future overflow degrades to a scrollbar instead
+of silent clipping), and separately tightened every card's padding, the
+sidebar width (−25%), the header/nav chrome (~−17%), the stat strip, and
+the Highlights row (bold removed, smaller font) so in practice the
+scrollbar should never need to actually appear. Found and fixed two more
+missing-`wraplength` overflow bugs along the way (Max Progress's own
+labels, the Highlights row's sub-labels) that only showed up once real
+(non-empty) data was used to test.
+
+**2. Status tab.** Left column removed entirely, per spec — everything in
+it either duplicated Monitor or was visible on Status itself already. The
+account table's columns were widened to use the freed space and re-tuned
+to line up with the actual row content. Re-discovered and fixed a real
+rendering bug while verifying this visually: the status badge (Logged
+In / On Break / Offline) was built via `pack(in_=badge_wrap)` — a
+separate-wrapper-frame indirection — which silently failed to render at
+all once that wrapper became width-constrained. Rewritten to parent the
+badge directly to its wrapper (simpler, and the actual standard pattern),
+which fixed it outright.
+
+**3. Stats Overview.** The "Daily Levels Gained" chart's bottom-clipping
+bug had a real, specific cause: the chart canvas had no `<Configure>`
+binding at all, unlike the donut chart on the same page — it only ever
+drew once, at whatever size it happened to have at that exact moment, and
+never redrew if the page later settled into a different (typically
+smaller) final layout. Fixed by caching the last-drawn series/breakdown
+and redrawing (debounced) whenever the canvas's real size changes —
+verified with an actual resize test confirming the chart's plotted
+coordinates update correctly. KPI tiles shortened vertically.
+
+**4. Stats → Goals & Maxing (both All Accounts and single-account views).**
+Header, account selector, and all three buttons condensed onto one
+toolbar row — required trimming font sizes and a couple of button labels
+("Refresh WOM" → "Refresh") to actually fit at 960px width once title and
+controls shared one line instead of two. Summary tiles de-bolded and
+shrunk (affects all of: Closest to Max, Closest 99, Last 99 Achieved,
+Last WOM Refresh, and the three footer cards). WOM Username row
+shrunk. The three bottom footer cards (Estimated Time to Max, Combat
+Skills Covered by Slayer, About XP Rates) were being clipped below the
+visible window — confirmed fixed via screenshot, fully visible now. Also
+found and fixed the **All Accounts overview table**'s own column-width
+overflow (its `LAST REFRESH` column ran off the right edge) — a different
+table than the per-account skill table fixed in beta.18, same bug class;
+narrowed columns and capped it to the same 10-row scroll behavior.
+
+**5. Invisible-scroll bug (Launcher, plus 4 other places using the same
+pattern).** Real root cause: every Canvas+Scrollbar implementation in this
+app shows/hides the scrollbar based on whether content actually overflows
+— correctly — but the mousewheel/trackpad handlers underneath that
+scrollbar called `yview_scroll()` *unconditionally*, regardless of
+whether scrolling was ever actually needed. `canvas.bbox('all')` can
+report a scrollregion a few pixels taller than the visible canvas from
+rounding alone, which was enough for a wheel scroll to nudge the view
+even when there was visually "nothing to scroll to." Fixed by gating the
+actual scroll action on a live `needs_scroll` flag, not just the
+scrollbar's visibility — found and fixed identically in Launcher, Status,
+History, and Monitor's new sidebar wrapper. Verified both that scrolling
+is now a no-op when content fits, and that it still works correctly when
+content genuinely overflows. Settings' own scroll wrapper already had an
+equivalent guard via a different mechanism (gating the bind itself) and
+needed no change.
+
+**6. Settings — all 4 pages (General, Discord Alerts, Event Notifications,
+Restarts & Updates).** The reported "right side clips out" had a real,
+structural cause, not just tight padding: the two-column layout used
+`pack(side='left', expand=True)` for both columns, and pack gives
+whichever column is packed *first* its full natural width before the
+second one gets anything — so if the left column's content was ever
+wider than half the available space (it was: an unwrapped subtitle on
+the Paint Reference card), the right column got starved down to whatever
+was left over, compressing "Monitoring Intervals" and the Debug card well
+below their own minimum width. Switched both two-column layouts (General
+page's main columns, and the Discord page's webhook columns) from `pack`
+to `grid` with equal `uniform`-weighted columns, which forces a fair
+50/50 split regardless of which side's content is heavier — confirmed via
+direct widget measurement that both columns now get equal, bounded width,
+and the previously-compressed labels render at their full requested size.
+Also fixed several more missing-`wraplength` instances (`_row_text`/
+`_row_int`/`_row_bool`'s helper text, the debug-file path display) that
+were silently overflowing under the canvas-width constraint. Sidebar
+narrowed (−25%), font sizes reduced, page header and card padding
+tightened throughout.
+
+**7. Linux Monitor — "No WOM data" despite a real WOM cache existing.**
+Traced to a real, concrete bug: `refresh_max_progress()`'s per-account
+loop called `compute_account_summary()` with no exception handling at
+all. One malformed or unexpectedly-shaped cache entry would silently
+crash the *entire* background thread (daemon thread, uncaught exception),
+meaning `_apply_max_progress()` never got called and the UI stayed stuck
+on its initial "No WOM data yet" placeholder forever — indistinguishable
+from there being no cache at all, even though the cache file itself was
+read successfully moments earlier. Fixed with a per-account try/except
+(one bad entry no longer blocks every other account) plus an outer
+safety net (any other unexpected failure still results in a real UI
+update, falling back to "no data," instead of the thread just vanishing).
+Verified with a test that deliberately puts a malformed entry *before* a
+good one in iteration order and confirms the good one still gets found.
+
+**8. Linux History — expanding an account rebuilt it every time.**
+`_toggle_account()` called the same full `_rebuild_accounts()` used for
+filter changes on *every single expand/collapse click* — destroying and
+rebuilding every account's card, including every other already-open
+account's tree, just to toggle one chevron. Rewritten to operate directly
+on the toggled account: collapsing just unpacks its body (the built tree
+stays alive, merely hidden); expanding re-packs it if already built, or
+builds it lazily exactly once if this is the first time that account has
+ever been expanded. Verified: re-expanding reuses the literal same tree
+widget object (no rebuild at all), and toggling one account never touches
+any other account's card.
+
+**9. DPI restore — re-investigated, not re-assumed fixed.** The beta18 fix
+(thread-level `SetThreadDpiAwarenessContext`) addressed a real gap, but a
+DPI *scaling* error (the reported symptom) is a multiplicative effect —
+1.25x/1.5x — categorically different from the small additive pixel offset
+that fix's own docstring acknowledged accepting. Fixed every remaining
+untyped `SetThreadDpiAwarenessContext` call in the file (there were three:
+`_get_window_bounds`, `_set_window_geometry_windows`, and
+`_click_at_windows`) — `DPI_AWARENESS_CONTEXT` is a pointer-sized `HANDLE`
+(8 bytes on 64-bit Windows), and without explicit `c_void_p`
+argtypes/restype, ctypes' default 32-bit `c_int` guess can silently
+misread the saved "old context" value. All three now match, with a
+`finally` around each so the context is restored even if the call it
+wraps raises.
+
+Went through a real back-and-forth on the actual restore logic that's
+worth recording. First pass divided the captured rect by
+`get_window_dpi_scale()` *before every* `SetWindowPos` call, on the theory
+that the target window (DreamBot's own process) might not be DPI-aware
+and could be re-inflating an already-correct physical value. Caught and
+reverted before shipping, for exactly the reasons that make this dangerous
+as a default: if the thread-awareness fix is already working, pre-dividing
+would make a correctly-restored client too small instead — `get_window_dpi_scale()`
+is a DPI *reading*, not proof `SetWindowPos` is actually misbehaving — and
+dividing x/y by a scale factor is a real correctness risk on multi-monitor
+setups, where the coordinate origin for a non-primary monitor generally
+isn't (0, 0), so a naive divide can move the window to a different screen
+entirely. Replaced with the right shape of fix: restore using the
+**original captured rect** first (no pre-emptive scaling of any kind),
+wait ~400ms for the new window to settle, then re-query its actual
+geometry the same way it was originally captured. Only if that measured
+ratio clearly, consistently matches a recognized Windows DPI scale preset
+on *both* axes independently (125%/150%/175%/200%, each within a tight
+band) does a second, corrective `SetWindowPos` fire — and that correction
+only ever touches width/height; **x/y are never divided**, for the same
+multi-monitor-origin reason above. An unrecognized or single-axis-only
+mismatch is logged but never auto-corrected, since guessing at a ratio
+that doesn't match a real preset risks making things worse, not better.
+
+Cannot independently verify this is the *complete* fix — there is no way
+to exercise real Windows DPI virtualization from this Linux sandbox.
+What's shipped: the safe primary path (original rect, corrected thread
+typing) plus a measured, conservative fallback that only ever activates
+on unambiguous evidence — not a guess applied up front. Comprehensive,
+always-on diagnostics (`get_dpi_diagnostics()` — thread DPI awareness
+context *by name*, process DPI awareness, window DPI, system DPI) are
+logged at both capture and restore time, and every step of the
+verify-then-maybe-correct sequence (requested rect, first actual rect,
+detected ratio if any, corrected rect if a correction fired, final actual
+rect) writes to the persistent debug log regardless of the debug toggle —
+specifically so a real scaled-DPI Windows test now produces a complete,
+readable trail instead of a guess. Did not set process-level DPI
+awareness (the other option raised) — that carries real risk of affecting
+Tk's own rendering in ways untestable from here, so it's deliberately
+deferred pending what the new diagnostics show on real hardware. Did not
+clamp to work area, per instruction — exact position is always restored,
+never touched by the fallback correction either.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean;
+`pyflakes` diffed against the pre-pass baseline — zero new warnings. 85+
+checks across 14 test scripts (10 new this pass), covering: the Monitor
+sidebar/scroll fixes, the invisible-scroll guard (both the no-op and the
+genuinely-needed case), DPI diagnostics logic (Linux no-op path +
+mocked-Windows scale-factor computation), the measured DPI fallback
+correction (band detection, single-axis-mismatch rejection, unrecognized-
+ratio rejection, x/y-untouched, and a full simulated round-trip), the WOM
+cache exception resilience, the chart resize-redraw, and the History
+toggle-caching behavior. Layout re-measured at the literal 960×680 minimum
+across all 6
+tabs and the Goals & Maxing sub-page under synthetic load. Every
+structural finding (Monitor's `pack_propagate` gap, the Status badge
+render bug, Settings' `pack` greedy-column bug) was confirmed via an
+actual rendered screenshot, not measurement alone — per this pass's own
+opening instruction.
+
+**Known limitations:**
+- DPI restore: see item 9 — diagnostics are comprehensive and ready, but
+  the fix's completeness cannot be confirmed without a real scaled-DPI
+  Windows test. Next step is reading what `get_dpi_diagnostics()` and the
+  post-restore verification log actually show on real hardware.
+- All UI fixes were verified visually under Xvfb (effectively a Linux
+  render) and against the user-provided Windows screenshots/spec, but
+  there's no substitute for a fresh screenshot pass on real Windows to
+  catch anything Segoe UI's font metrics do differently from DejaVu
+  Sans's.
+
+**Files changed:** `p2p_monitor.py` (header chrome/nav height, version
+bump to beta.19), `py/platform_ops.py` (DPI diagnostics, ctypes typing
+fixes — all 3 instances — debug_log threading), `py/launcher.py` (DPI
+debug logging at capture and restore, measured-fallback size correction),
+`ui/monitor_tab.py` (sidebar restructure, scroll
+guard, sizing), `ui/status_tab.py` (left column removed, badge render
+fix, scroll guard), `ui/stats_tab.py` (chart resize-redraw, KPI sizing),
+`ui/wom_goals.py` (toolbar consolidation, tile sizing, all-accounts table
+columns), `ui/launcher_tab.py` (scroll guard), `ui/history_tab.py`
+(toggle-account caching, scroll guard), `ui/settings_tab.py` (grid-based
+column fix, sidebar/card sizing, wraplength fixes), `CHANGELOG.md`.
+`update_manifest.txt`/`install.sh` unchanged — no new files added.
+
+---
+
 ## v2.0.0-beta.18
 ### Fix pass: Windows DPI restore, Wine/Prayer cross-batch suppression, Goals & Maxing + app-wide 960×680 containment, History live-append
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.18
+P2P Monitor v2.0.0-beta.19
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -62,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.18"
+VERSION      = "2.0.0-beta.19"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -289,7 +289,7 @@ class App(tk.Tk):
 
     def _build(self):
         # ── Window chrome ──────────────────────────────────────────────────────
-        chrome = tk.Frame(self, bg=self.BG, padx=16, pady=11)
+        chrome = tk.Frame(self, bg=self.BG, padx=16, pady=6)
         chrome.pack(fill='x')
         tk.Label(chrome, text="P2P MONITOR", font=self.BIG,
                  bg=self.BG, fg=self.ACC).pack(side='left')
@@ -327,7 +327,7 @@ class App(tk.Tk):
             wrap = tk.Frame(nav, bg=self.BG)
             wrap.pack(side='left')
             lbl = tk.Label(wrap, text=f"{icon}  {text}", font=self.SANSB,
-                           bg=self.BG, fg=self.FG2, padx=16, pady=10, cursor='hand2')
+                           bg=self.BG, fg=self.FG2, padx=14, pady=7, cursor='hand2')
             lbl.pack()
             ind = tk.Frame(wrap, height=2, bg=self.BG)   # active underline indicator
             ind.pack(fill='x')
@@ -525,8 +525,6 @@ class App(tk.Tk):
         if getattr(self, '_monitor_tab', None):
             self._monitor_tab.refresh_session_overview()
             self._monitor_tab.refresh_highlights()
-        if getattr(self, '_status_tab', None):
-            self._status_tab.refresh_session_overview()
         self._log("=" * 60)
         self._log(f"▶ Starting P2P Monitor v{VERSION}...")
         self.watcher = LogWatcher(
@@ -553,8 +551,6 @@ class App(tk.Tk):
         self._log("■ Monitoring stopped")
         if getattr(self, '_monitor_tab', None):
             self._monitor_tab.refresh_session_overview()
-        if getattr(self, '_status_tab', None):
-            self._status_tab.refresh_session_overview()
 
     # ── Auto-updater ───────────────────────────────────────────────────────────
     def _check_for_update(self):
