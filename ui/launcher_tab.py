@@ -48,6 +48,13 @@ from py.config   import save_config
 from py.launcher import (launch_account, relaunch_account, build_command, list_presets,
                           discover_account_process)
 
+# Minimum genuine overflow (in px) before a scroll container shows its
+# scrollbar — without this, even a few pixels of rounding/measurement
+# noise (which happens routinely across different font metrics, e.g.
+# Windows vs Linux) triggers a scrollbar that barely moves and serves
+# no purpose. Only real, meaningful overflow should ever scroll.
+_SCROLL_TOLERANCE_PX = 16
+
 
 class LauncherTab:
     def __init__(self, app, frame):
@@ -112,7 +119,7 @@ class LauncherTab:
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._rows_frame.winfo_reqheight()
             visible_h = canvas.winfo_height()
-            needs_scroll = content_h > visible_h > 1
+            needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not sb.winfo_ismapped():
                 sb.pack(side='right', fill='y')
             elif not needs_scroll and sb.winfo_ismapped():

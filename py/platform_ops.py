@@ -473,6 +473,92 @@ def _get_window_bounds(hwnd, debug_log=None):
         return None
 
 
+def _get_window_rect_for_restore(hwnd, debug_log=None):
+    """
+    GetWindowRect ONLY — deliberately never falls back to or mixes in DWM
+    extended frame bounds, unlike _get_window_bounds() above.
+
+    This exists specifically for launcher window-position restore, and
+    only for that. SetWindowPos operates on the same "outer window rect"
+    coordinate space that GetWindowRect reads — not the DWM extended-
+    frame-bounds space, which is a visually-tighter measurement (DWM
+    bounds exclude the invisible resize-border padding that GetWindowRect
+    includes). These are genuinely different rects, not just different
+    units of the same rect — capturing one and restoring via an API that
+    operates on the other is wrong at *any* DPI, 100% included; it just
+    happens to look exactly like a DPI-scaling bug once the invisible
+    border's size (which itself scales with DPI) becomes proportionally
+    significant. Confirmed directly against real captured values on a
+    125%-scaled Windows machine: GetWindowRect and DWM bounds did not
+    just disagree by a small/constant margin — the ratio between them
+    matched the DPI scale factor, which is what made this look like a
+    pure DPI-awareness bug rather than a coordinate-space mismatch.
+
+    Runs in the identical PER_MONITOR_AWARE_V2 thread context that
+    _set_window_geometry_windows uses for the SetWindowPos call this
+    capture feeds into — capture and restore must agree on awareness
+    context, or the same virtualization mismatch reappears one level up.
+
+    Returns (x, y, w, h) or None on failure. Screenshot/click paths are
+    untouched by this function entirely — they keep using
+    _get_window_bounds() (DWM-first), which is the *correct* choice for
+    them: BitBlt and click-target math want the visually-true rendered
+    bounds, not the wider raw window rect.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        try:
+            _u32 = ctypes.WinDLL('user32', use_last_error=True)
+            _u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+            _u32.SetThreadDpiAwarenessContext.restype  = ctypes.c_void_p
+            old_ctx = _u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+        except Exception:
+            old_ctx = None
+
+        MAX_W, MAX_H = 7680, 4320  # 8K upper bound sanity check
+        result = None
+
+        try:
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect.restype  = wintypes.BOOL
+
+            wr = wintypes.RECT()
+            ok = user32.GetWindowRect(hwnd, ctypes.byref(wr))
+            if ok:
+                w = wr.right - wr.left
+                h = wr.bottom - wr.top
+                if 0 < w <= MAX_W and 0 < h <= MAX_H:
+                    result = (wr.left, wr.top, w, h)
+                    if debug_log:
+                        debug_log(f'_get_window_rect_for_restore hwnd={hwnd}: '
+                                  f'GetWindowRect=({wr.left},{wr.top},{w},{h})')
+                else:
+                    if debug_log:
+                        debug_log(f'_get_window_rect_for_restore hwnd={hwnd}: '
+                                  f'GetWindowRect invalid size {w}x{h}')
+            else:
+                err = ctypes.get_last_error()
+                if debug_log:
+                    debug_log(f'_get_window_rect_for_restore hwnd={hwnd}: '
+                              f'GetWindowRect failed error={err}')
+        finally:
+            if old_ctx is not None:
+                try:
+                    _u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+                except Exception:
+                    pass
+
+        return result
+
+    except Exception as e:
+        if debug_log:
+            debug_log(f'_get_window_rect_for_restore hwnd={hwnd}: unexpected error: {e}')
+        return None
+
+
 def _capture_window_image_windows(window_id, out_path, debug_log=None):
     """
     Windows screenshot using BitBlt from screen DC.
@@ -712,6 +798,48 @@ def get_window_geometry(wid, debug_log=None):
             return _get_window_geometry_linux(wid)
         elif sys.platform == 'win32':
             return _get_window_geometry_windows(wid, debug_log=debug_log)
+        return None
+    except Exception:
+        return None
+
+
+def get_window_geometry_for_restore(wid, debug_log=None):
+    """
+    Return (x, y, width, height) for the given window, in the specific
+    coordinate space that set_window_geometry()/SetWindowPos expects.
+
+    Use this ONLY for launcher window-position-restore capture (the
+    rect saved before closing a client, to be reapplied to the relaunched
+    one). Do NOT use this for screenshot cropping or paint-button click
+    targeting — those want get_window_geometry()'s DWM-first behavior,
+    which gives the visually-true rendered bounds rather than the wider
+    raw window rect this function deliberately returns instead.
+
+    On Windows this calls GetWindowRect directly, never DWM extended
+    frame bounds — those are a different, visually-tighter rect (DWM
+    bounds exclude the invisible resize-border padding GetWindowRect
+    includes), and SetWindowPos operates in GetWindowRect's space, not
+    DWM's. Capturing via DWM bounds and restoring via SetWindowPos was a
+    real coordinate-space mismatch that looked exactly like a DPI-scaling
+    bug — confirmed directly against real captured values on a 125%-
+    scaled Windows machine, where the ratio between the two measurements
+    matched the DPI scale factor almost exactly.
+
+    On Linux there's no DWM-vs-window-rect distinction to begin with
+    (xdotool's getwindowgeometry is the only geometry source), so this is
+    just an alias for get_window_geometry() there.
+
+    Returns: tuple[int,int,int,int], or None on failure
+    """
+    try:
+        if sys.platform.startswith('linux'):
+            return _get_window_geometry_linux(wid)
+        elif sys.platform == 'win32':
+            try:
+                hwnd = int(str(wid), 0)
+            except Exception:
+                return None
+            return _get_window_rect_for_restore(hwnd, debug_log=debug_log)
         return None
     except Exception:
         return None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.19
+P2P Monitor v2.0.0-beta.20
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -62,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.19"
+VERSION      = "2.0.0-beta.20"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -230,6 +230,16 @@ class App(tk.Tk):
                              'drop': None, 'last99': None}
         self._style()
         self._build()
+        # Lock the initial launch size to the intended minimum spec.
+        # minsize() alone only sets a floor on manual resizing — it does
+        # NOT control the window's natural/initial size, which Tk computes
+        # from whichever tab's packed content needs the most space (all 6
+        # tabs share one grid cell, so the window's natural width is
+        # max() across all of them). Without this explicit call, the app
+        # launches wider than 960 even though every individual tab fits
+        # within it — this is what makes it the actual launch size rather
+        # than just a resize floor.
+        self.geometry("960x680")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # Defer remote error rules fetch until after _build() so the Tkinter event
         # loop is running and the monitor tab widget exists to receive the log message.
@@ -502,6 +512,8 @@ class App(tk.Tk):
             self._stats_tab.on_tab_shown()
         elif name == 'Launcher' and getattr(self, '_launcher', None):
             self._launcher.on_tab_shown()
+        elif name == 'Monitor' and getattr(self, '_monitor_tab', None):
+            self._monitor_tab.on_tab_shown()
 
     # ── Start / Stop ───────────────────────────────────────────────────────────
     def _start(self):

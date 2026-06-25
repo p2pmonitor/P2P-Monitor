@@ -42,6 +42,13 @@ from py.history import (load_history_accounts, load_history_for,
 from py.config  import save_config
 from py.util    import fmt_ts
 
+# Minimum genuine overflow (in px) before a scroll container shows its
+# scrollbar — without this, even a few pixels of rounding/measurement
+# noise (which happens routinely across different font metrics, e.g.
+# Windows vs Linux) triggers a scrollbar that barely moves and serves
+# no purpose. Only real, meaningful overflow should ever scroll.
+_SCROLL_TOLERANCE_PX = 16
+
 
 class HistoryTab:
     TYPE_FILTER_OPTIONS = [
@@ -142,7 +149,7 @@ class HistoryTab:
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._accounts_frame.winfo_reqheight()
             visible_h = canvas.winfo_height()
-            needs_scroll = content_h > visible_h > 1
+            needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not sb.winfo_ismapped():
                 sb.pack(side='right', fill='y')
             elif not needs_scroll and sb.winfo_ismapped():
@@ -725,7 +732,7 @@ class HistoryTab:
         tw.wm_geometry(f"+{x}+{y}")
         tw.configure(bg=app.BG4)
         tk.Label(tw, text=str(text), font=app.SANS, bg=app.BG4, fg=app.FG,
-                 padx=8, pady=4, wraplength=600, justify='left').pack()
+                 padx=8, pady=4, wraplength=600, justify='left', anchor='w').pack()
 
     def _hide_tooltip(self, event=None):
         if getattr(self, '_tooltip_win', None):

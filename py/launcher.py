@@ -478,7 +478,7 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                         _log(f'🔍 [{account}] {msg}')
 
                 try:
-                    from py.platform_ops import set_window_geometry, get_window_geometry
+                    from py.platform_ops import set_window_geometry, get_window_geometry_for_restore
                     x, y, w, h = restore_geometry
 
                     # Primary path: the original captured rect, exactly as
@@ -500,7 +500,7 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                     # the original capture used. This is the direct,
                     # unambiguous way to see whether what got applied
                     # matches what was requested — no guessing.
-                    actual = get_window_geometry(new_wid, debug_log=_dpi_debug_log)
+                    actual = get_window_geometry_for_restore(new_wid, debug_log=_dpi_debug_log)
                     if actual:
                         ax, ay, aw, ah = actual
                         w_ratio = round(aw / w, 4) if w else None
@@ -528,7 +528,7 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                                                       debug_log=_dpi_debug_log)
                             if sys.platform == 'win32':
                                 time.sleep(0.4)
-                            final_actual = get_window_geometry(new_wid, debug_log=_dpi_debug_log)
+                            final_actual = get_window_geometry_for_restore(new_wid, debug_log=_dpi_debug_log)
                             _dpi_debug_log(
                                 f'Post-correction verification: corrected_target=({cx},{cy},{cw},{ch}) '
                                 f'final_actual={final_actual}')
@@ -654,8 +654,11 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     Never kills by generic process name.
 
     Window-position restore: if an existing window is found, its geometry
-    (x, y, w, h) is captured via platform_ops.get_window_geometry() before
-    closing anything. After the relaunch, once the new client window is
+    (x, y, w, h) is captured via platform_ops.get_window_geometry_for_restore()
+    before closing anything — deliberately the GetWindowRect-based capture,
+    not the DWM-bounds-based get_window_geometry() that screenshots/clicks
+    use, since SetWindowPos (below) operates in GetWindowRect's coordinate
+    space, not DWM's. After the relaunch, once the new client window is
     confirmed (same background poll that already discovers/caches its
     PID — see _discover_and_cache), that geometry is best-effort restored
     via platform_ops.set_window_geometry(). Any failure at any step here
@@ -721,7 +724,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
         try:
             existing_wid = window_result.get('window_id')
             if existing_wid:
-                from py.platform_ops import get_window_geometry, is_window_minimized, get_dpi_diagnostics
+                from py.platform_ops import get_window_geometry_for_restore, is_window_minimized, get_dpi_diagnostics
 
                 def _capture_dpi_log(msg):
                     write_debug_entry('launcher_dpi', {'account': account, 'msg': msg})
@@ -732,7 +735,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
                     _dbg_log(f'ℹ️ [{account}] Existing window is minimized — '
                              f'skipping position capture (nothing meaningful to restore).')
                 else:
-                    captured_geometry = get_window_geometry(existing_wid, debug_log=_capture_dpi_log)
+                    captured_geometry = get_window_geometry_for_restore(existing_wid, debug_log=_capture_dpi_log)
                     if captured_geometry:
                         _dbg_log(f'📐 [{account}] Captured window position {captured_geometry} '
                                  f'before closing.', extra={'geometry': captured_geometry})

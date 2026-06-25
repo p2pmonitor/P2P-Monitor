@@ -1,5 +1,186 @@
 # Changelog
 
+## v2.0.0-beta.20
+### Final beta19 polish: Monitor sidebar, launch size, Highlights format, Active Accounts sync, alignment, scroll thresholds
+
+**1. Monitor sidebar scrollbar on Windows.** Linux had margin to spare, so
+this was a font-metric difference, not a structural problem like beta19's
+fix. Trimmed card padding, button padding, and font sizes throughout the
+sidebar (Session Control, the status card, Active Accounts, Max Progress)
+for additional safety margin — total sidebar content height down another
+~8% on top of beta19's reduction. Cannot verify the exact margin needed
+for Segoe UI's metrics without a real Windows test, but the Canvas+
+Scrollbar safety net from beta19 means even if this isn't quite enough,
+the failure mode is a legitimate scrollbar, never silent clipping —
+Max Progress staying fully visible was the one hard requirement here and
+that's unaffected either way.
+
+**2. App launch size.** Root cause: `minsize(960, 680)` only sets a floor
+on manual resizing — it never controlled the *initial* size, which Tk
+computed from whichever tab's packed content needed the most width (all
+6 tabs share one grid cell). Added an explicit `self.geometry("960x680")`
+right after all tabs are built, which is what actually pins the launch
+size. Verified directly: the app now measures exactly 960×680 on launch,
+every time, with minsize still enforced as the resize floor.
+
+**3. Highlights row format.** Previously inconsistent: Latest Task/Last
+Level Up/Latest Drop never showed an account at all, while Last Error/
+Last 99 Achieved buried it inside the time line ("AccountName • 2d ago").
+Every highlight tile now consistently shows tile name → account → info →
+time as four separate lines, account included on every tile (data was
+always there — `app._highlights[key]['account']` is populated for every
+type; this was purely a rendering gap). Falls back to "Unknown account"
+if it's ever genuinely missing.
+
+**4. Monitor Active Accounts not matching Status.** Real root cause, not
+just a timing fluke: every other tab (Status, Stats, History, Launcher)
+has an `on_tab_shown()` hook that proactively re-queries its data the
+moment you switch to it. Monitor never had one — its Active Accounts
+card only ever refreshed *reactively*, debounced after a live event. If
+nothing new happened to trigger that debounce (e.g. accounts already
+running quietly, or right after launch before the first event), the
+card could show stale "No accounts yet" indefinitely even though Status,
+querying the exact same `get_account_rows()` on demand, showed the truth
+immediately. Added Monitor to the tab-switch dispatch with its own
+`on_tab_shown()`, pulling from the identical source Status uses — no new
+data source, no duplicated layout, per the scope note. Verified directly:
+simulated a live account with zero events fired, confirmed Monitor still
+showed "No accounts yet" until the tab was switched into, then correctly
+updated.
+
+**5. Running card timestamp.** Dropped seconds from "Started" (`%H:%M:%S`
+→ `%H:%M`). Scoped narrowly — Status's "Last updated" and Goals & Maxing's
+"Last WOM refresh" timestamps serve a different purpose (data freshness)
+and were left untouched.
+
+**6. Status table column alignment.** Found two compounding, very
+concrete causes, not just "needs better spacing": the ACCOUNT header
+used a character-count width (17 chars) while the row's `name_cell`
+below it was sized in raw pixels (170) — two different unit systems for
+the same column. On top of that, headers render in `SANSS` (9pt) while
+row values render in `SANS` (10pt) — the same declared character count
+in two different fonts doesn't produce the same pixel width, so every
+column drifted further right than the one before it (drift ranged
+30–66px by the STATUS column). Recalibrated every header's character
+width against the actual measured pixel width of its corresponding row
+content. Drift is now 2–6px across all columns — visually aligned.
+
+**7. Settings tiny scroll regions.** `needs_scroll = content_h > visible_h
+> 1` had zero tolerance — even 1px of overflow showed a scrollbar.
+Confirmed this was real, not theoretical: General Settings' baseline
+overflow measured exactly 13px. Added a shared `_SCROLL_TOLERANCE_PX`
+(16px) to the *same* scroll-container pattern everywhere it's used
+(Settings, Monitor sidebar, Status, History, Launcher) — per the
+instruction to fix this everywhere the pattern exists, not just Settings.
+
+**8. Event Notifications / Restarts & Updates height.** Moved each page's
+subtitle onto the title row (`_page_header`, shared by every Settings
+page) with a dynamically-bounded wraplength so longer subtitles
+(Discord Alerts, Restarts & Updates) can't push the row wider than
+available. Combined with tightened card/row padding throughout, every
+Settings page now fits with real margin, not just within tolerance:
+General −40px, Discord −72px, Notifications −2px, Summary −158px,
+Restarts −11px (negative = comfortably under the available height).
+
+**9. Windows Settings rendering bigger than Linux.** Addressed by the same
+general tightening as items 7–8 — card padding, row padding, and page-
+header height all reduced, which helps both platforms identically since
+none of it is Linux-specific. Cannot independently confirm Windows parity
+without a real Windows test.
+
+**10. DPI restore — actual root cause found, confirmed against real
+measured data.** Real Win32 calls tested directly on a 125%-scaled
+Windows machine: `GetDpiForWindow` → 120 dpi (scale 1.25, correct),
+`GetWindowRect` → 773×571, DWM extended frame bounds → 966×714. 966÷773
+≈ 714÷571 ≈ 1.25 — the ratio between the two *measurements* matches the
+DPI scale factor almost exactly, which is what made this look like a
+DPI-awareness bug. It isn't one. DWM bounds and GetWindowRect are
+different rects by definition — DWM bounds exclude the invisible resize-
+border padding that GetWindowRect includes — and launcher restore
+capture was using `get_window_geometry()` (DWM-first, correct for
+screenshots/clicks) to capture the rect, then handing it to
+`set_window_geometry()`, which calls `SetWindowPos` — an API that
+operates in GetWindowRect's coordinate space, not DWM's. Capturing in
+one space and restoring via an API that reads the other was wrong at any
+DPI; it only *looked* DPI-proportional because the invisible border being
+excluded/included also happens to scale with DPI. This is also exactly
+why beta19's fallback correction could never fire: it compares restored
+size against *captured* size, and if both the capture and the eventual
+restored result are measured the same (wrong) way, the ratio is 1.0 —
+no mismatch ever shows up to correct.
+
+Added `get_window_geometry_for_restore()` — GetWindowRect only, no DWM
+fallback, running in the identical PER_MONITOR_AWARE_V2 thread context
+`SetWindowPos` uses. Launcher restore capture (`_discover_and_cache`'s
+pre-close geometry read) and both post-restore/post-correction
+verification re-queries now all use this consistently — capture and
+verification must agree on coordinate space, or the same mismatch just
+reappears one level up. Screenshot and paint-button-click paths are
+completely untouched: they keep `get_window_geometry()`'s DWM-first
+behavior, which is the *correct* choice for them — BitBlt and click-
+target math want the visually-true rendered bounds, not the wider raw
+window rect this fix deliberately avoids for restore specifically.
+
+Verified directly against the real measured data: a test reproduces the
+exact 773×571-vs-966×714 scenario and confirms `get_window_geometry_for_
+restore()` returns the GetWindowRect value, never the DWM value, and
+that `_get_window_bounds` (the screenshot/click path) is completely
+unmodified and still DWM-first. Cannot independently confirm this fully
+resolves the on-screen symptom without a real Windows relaunch test —
+but the mechanism this targets is no longer a guess; it's the one the
+real measured data actually showed.
+
+**Found and fixed one more real, previously-invisible bug along the way:**
+a `tk.Label` with `justify='left'` but no explicit `anchor='w'` on the
+Label itself defaults to `anchor='center'` — invisible as long as the
+label has room to render at its natural size, but the instant it gets
+compressed below that (which is what most of this pass has been about),
+Tk center-anchors the text within the smaller box and clips content from
+*both* edges. Caught directly in a screenshot: "P2P Monitor does not
+auto-update." was rendering as "P Monitor does not auto-update." with no
+error, no warning, nothing in any measurement to catch it. Found and fixed
+every instance of this exact pattern across the codebase (4 labels, 3
+files) via a properly paren-matched search — confirmed zero remaining
+instances of `justify='left'` without `anchor=` anywhere. Reproduced the
+exact mechanism in isolation as a regression test.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean;
+`pyflakes` zero new warnings. 115 checks across 20 test scripts (10 new
+this pass) — covering: launch size (exact 960×680 confirmed), Monitor
+Active Accounts sync (the stale-vs-live scenario reproduced directly),
+the scroll-tolerance behavior (both the suppressed-tiny-overflow and the
+still-triggers-on-genuine-overflow cases), the label-anchor-clipping bug
+reproduced and confirmed fixed in isolation, and the DPI restore-capture
+fix reproduced against the exact real 773×571-vs-966×714 measured
+scenario, confirming the new function returns the GetWindowRect value
+and that the screenshot/click path remains completely untouched.
+Status/Settings/Monitor re-screenshotted with realistic populated data
+(not empty placeholders) after every fix in this entry, specifically
+because that's what caught both the alignment drift and the
+label-clipping bug — neither showed up in any numeric measurement.
+
+**Known limitations:** Items 1 and 9 (Windows-specific sidebar/Settings
+sizing) are addressed with real, meaningful reductions but not verified
+on actual Windows hardware — there is no way to do so from this sandbox.
+Item 10 (DPI restore) now targets a confirmed mechanism rather than a
+hypothesis, but whether it fully resolves the on-screen symptom still
+needs a real Windows relaunch test to know for certain.
+
+**Files changed:** `p2p_monitor.py` (explicit launch geometry, version
+bump to beta.20), `py/platform_ops.py` (new `get_window_geometry_for_
+restore()`/`_get_window_rect_for_restore()` — GetWindowRect-only capture
+for the restore path), `py/launcher.py` (restore capture and both
+verification re-queries switched to the new function), `ui/monitor_tab.py`
+(sidebar trim, Highlights 4-line format, `on_tab_shown`, scroll
+tolerance), `ui/status_tab.py` (column header recalibration, scroll
+tolerance), `ui/settings_tab.py` (inline page-header subtitle, card/row
+trim, scroll tolerance, 3 label-anchor fixes), `ui/history_tab.py`
+(scroll tolerance, 1 label-anchor fix), `ui/launcher_tab.py` (scroll
+tolerance), `ui/wom_goals.py` (1 label-anchor fix), `CHANGELOG.md`.
+`update_manifest.txt`/`install.sh` unchanged — no new files added.
+
+---
+
 ## v2.0.0-beta.19
 ### UI polish pass (Windows + Linux) + DPI restore re-investigation
 

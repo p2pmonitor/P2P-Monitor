@@ -431,7 +431,7 @@ class WomGoalsPage:
         tk.Button(row, text='Save', font=app.SANSS, bg=app.BG4, fg=app.ACC, relief='flat',
                   padx=8, pady=3, cursor='hand2', command=_save).pack(side='left')
         tk.Label(row, text="Used when the DreamBot account name differs from the WOM username.",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=280, justify='left'
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=280, justify='left', anchor='w'
                  ).pack(side='left', padx=(12, 0))
 
     def _render_single_account_view(self, account):

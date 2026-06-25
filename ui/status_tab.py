@@ -35,6 +35,13 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime
 
+# Minimum genuine overflow (in px) before a scroll container shows its
+# scrollbar — without this, even a few pixels of rounding/measurement
+# noise (which happens routinely across different font metrics, e.g.
+# Windows vs Linux) triggers a scrollbar that barely moves and serves
+# no purpose. Only real, meaningful overflow should ever scroll.
+_SCROLL_TOLERANCE_PX = 16
+
 
 class StatusTab:
     def __init__(self, app, parent_frame):
@@ -121,8 +128,15 @@ class StatusTab:
 
         col_hdr = tk.Frame(card, bg=app.BG3)
         col_hdr.pack(fill='x', pady=(0, 4))
-        for text, w in [("ACCOUNT", 17), ("TASK", 12), ("ACTIVITY", 17), ("UPTIME", 7),
-                         ("BREAK", 7), ("STATUS", 9), ("", 7), ("", 8)]:
+        # Calibrated against the actual rendered pixel widths of the row
+        # values below (which use app.SANS, a different/larger font than
+        # this header's app.SANSS) — same declared character count in two
+        # different fonts doesn't render to the same pixel width, which
+        # was the real cause of the header/row column misalignment. The
+        # ACCOUNT column specifically also has a units mismatch on top of
+        # that: name_cell below is sized in raw pixels (170), not characters.
+        for text, w in [("ACCOUNT", 21), ("TASK", 14), ("ACTIVITY", 19), ("UPTIME", 8),
+                         ("BREAK", 8), ("STATUS", 12), ("", 7), ("", 8)]:
             tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
                      width=w, anchor='w').pack(side='left', padx=(0, 6))
 
@@ -149,7 +163,7 @@ class StatusTab:
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = self._rows_container.winfo_reqheight()
             visible_h = canvas.winfo_height()
-            needs_scroll = content_h > visible_h > 1
+            needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not sb.winfo_ismapped():
                 sb.pack(side='right', fill='y')
             elif not needs_scroll and sb.winfo_ismapped():

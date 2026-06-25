@@ -31,6 +31,13 @@ import time
 from datetime import datetime
 from tkinter import ttk
 
+# Minimum genuine overflow (in px) before a scroll container shows its
+# scrollbar — without this, even a few pixels of rounding/measurement
+# noise (which happens routinely across different font metrics, e.g.
+# Windows vs Linux) triggers a scrollbar that barely moves and serves
+# no purpose. Only real, meaningful overflow should ever scroll.
+_SCROLL_TOLERANCE_PX = 16
+
 
 class MonitorTab:
     def __init__(self, app, parent_frame):
@@ -44,6 +51,18 @@ class MonitorTab:
         self.refresh_highlights()
         self.refresh_max_progress()
         self._tick()
+
+    def on_tab_shown(self):
+        """Called when the Monitor tab is selected. Active Accounts/
+        Highlights otherwise only ever refresh reactively (debounced,
+        after a live event arrives via App._debounced_refresh_tick) —
+        during a quiet period with no new events, that card could keep
+        showing whatever was true at construction time indefinitely, even
+        though Status, which queries the same underlying watcher state on
+        demand via its own on_tab_shown(), would show the truth
+        immediately. This makes Monitor do the same on-demand query Status
+        already does, from the exact same source (get_account_rows())."""
+        self.refresh_highlights()
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self, f):
@@ -80,7 +99,7 @@ class MonitorTab:
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = left.winfo_reqheight()
             visible_h = canvas.winfo_height()
-            needs_scroll = content_h > visible_h > 1
+            needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not sb.winfo_ismapped():
                 sb.pack(side='right', fill='y')
             elif not needs_scroll and sb.winfo_ismapped():
@@ -114,11 +133,11 @@ class MonitorTab:
 
     def _card(self, parent, title, icon=None):
         app = self.app
-        card = tk.Frame(parent, bg=app.BG3, padx=10, pady=8)
-        card.pack(fill='x', pady=(0, 8))
+        card = tk.Frame(parent, bg=app.BG3, padx=8, pady=6)
+        card.pack(fill='x', pady=(0, 6))
         if title:
             hdr = tk.Frame(card, bg=app.BG3)
-            hdr.pack(fill='x', anchor='w', pady=(0, 5))
+            hdr.pack(fill='x', anchor='w', pady=(0, 4))
             if icon:
                 tk.Label(hdr, text=icon, font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
                          ).pack(side='left', padx=(0, 6))
@@ -131,11 +150,11 @@ class MonitorTab:
         app = self.app
         card = self._card(parent, "SESSION CONTROL", '▶')
         app._btn_start = tk.Button(card, text="▶  START", font=app.SANSB,
-            bg=app.GREEN, fg=app.BG, relief='flat', padx=14, pady=7,
+            bg=app.GREEN, fg=app.BG, relief='flat', padx=14, pady=5,
             cursor='hand2', command=app._start)
-        app._btn_start.pack(fill='x', pady=(0, 4))
+        app._btn_start.pack(fill='x', pady=(0, 3))
         app._btn_stop = tk.Button(card, text="■  STOP", font=app.SANSB,
-            bg=app.BG3, fg=app.FG2, relief='flat', padx=14, pady=7,
+            bg=app.BG3, fg=app.FG2, relief='flat', padx=14, pady=5,
             cursor='hand2', command=app._stop, state='disabled')
         app._btn_stop.pack(fill='x')
 
@@ -145,7 +164,7 @@ class MonitorTab:
         card = self._card(parent, None)
         self._so_status_lbl = tk.Label(card, text="● STOPPED", font=app.SANSB,
                                         bg=app.BG3, fg=app.RED)
-        self._so_status_lbl.pack(anchor='w', pady=(0, 5))
+        self._so_status_lbl.pack(anchor='w', pady=(0, 3))
 
         self._so_uptime_lbl   = self._so_row(card, "Uptime", "—")
         self._so_started_lbl  = self._so_row(card, "Started", "—")
@@ -174,7 +193,7 @@ class MonitorTab:
             started_dt = datetime.fromtimestamp(app._session_start_ts)
             today = datetime.now().date() == started_dt.date()
             prefix = "Today" if today else started_dt.strftime('%b %d')
-            self._so_started_lbl.configure(text=f"{prefix}, {started_dt.strftime('%H:%M:%S')}")
+            self._so_started_lbl.configure(text=f"{prefix}, {started_dt.strftime('%H:%M')}")
             if running:
                 elapsed = int(time.time() - app._session_start_ts)
                 h, rem = divmod(elapsed, 3600)
@@ -190,11 +209,11 @@ class MonitorTab:
     def _build_active_accounts_card(self, parent):
         app = self.app
         card = self._card(parent, "ACTIVE ACCOUNTS", '👥')
-        self._aa_count_lbl = tk.Label(card, text="—", font=(app.SANS[0], 18, 'bold'),
+        self._aa_count_lbl = tk.Label(card, text="—", font=(app.SANS[0], 16, 'bold'),
                                        bg=app.BG3, fg=app.FG)
         self._aa_count_lbl.pack(anchor='w')
         self._aa_dots = tk.Frame(card, bg=app.BG3)
-        self._aa_dots.pack(anchor='w', pady=(3, 4))
+        self._aa_dots.pack(anchor='w', pady=(2, 3))
         self._aa_sub_lbl = tk.Label(card, text="No accounts yet", font=app.SANSS,
                                      bg=app.BG3, fg=app.FG2)
         self._aa_sub_lbl.pack(anchor='w')
@@ -226,15 +245,15 @@ class MonitorTab:
         self._mp_account_lbl = tk.Label(card, text="No WOM data yet", font=(app.SANS[0], 12, 'bold'),
                                          bg=app.BG3, fg=app.FG, cursor='hand2', anchor='w',
                                          wraplength=172, justify='left')
-        self._mp_account_lbl.pack(anchor='w', pady=(2, 3), fill='x')
+        self._mp_account_lbl.pack(anchor='w', pady=(1, 2), fill='x')
         self._mp_99_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                                     anchor='w', wraplength=172, justify='left')
         self._mp_99_lbl.pack(anchor='w', fill='x')
         self._mp_time_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.ACC,
                                       anchor='w', wraplength=172, justify='left')
-        self._mp_time_lbl.pack(anchor='w', pady=(0, 3), fill='x')
+        self._mp_time_lbl.pack(anchor='w', pady=(0, 2), fill='x')
         self._mp_bar_bg = tk.Frame(card, bg=app.BG4, height=5)
-        self._mp_bar_bg.pack(fill='x', pady=(0, 4))
+        self._mp_bar_bg.pack(fill='x', pady=(0, 3))
         self._mp_bar_fill = tk.Frame(self._mp_bar_bg, bg=app.GREEN, height=5, width=0)
         self._mp_bar_fill.place(x=0, y=0)
         self._mp_note_lbl = tk.Label(card, text="No WOM data yet", font=app.SANSS,
@@ -413,18 +432,21 @@ class MonitorTab:
                      ).pack(side='left', padx=(0, 4))
             tk.Label(top, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
                      ).pack(side='left')
+            account_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=color,
+                                    anchor='w', justify='left', wraplength=110)
+            account_lbl.pack(fill='x', anchor='w', pady=(2, 0))
             val_lbl = tk.Label(cell, text="None yet", font=app.SANSS, bg=app.BG3, fg=app.FG,
                                 anchor='w', justify='left', wraplength=110)
-            val_lbl.pack(fill='x', anchor='w', pady=(3, 0))
+            val_lbl.pack(fill='x', anchor='w')
             sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                                 anchor='w', wraplength=110, justify='left')
             sub_lbl.pack(fill='x', anchor='w')
-            self._hl_widgets[key] = (val_lbl, sub_lbl)
+            self._hl_widgets[key] = (account_lbl, val_lbl, sub_lbl)
 
         # Last 99 Achieved — replaces the old duplicate Active Accounts card
         # (that data is already shown in the Active Accounts sidebar card;
-        # showing it twice was redundant). Uses the same val/sub pattern as
-        # the other highlight cards: val = "Skill → 99", sub = "account • ago".
+        # showing it twice was redundant). Same tile-name/account/info/time
+        # rhythm as the other four highlight cards.
         cell = tk.Frame(strip, bg=app.BG3, padx=3, pady=6)
         cell.pack(side='left', fill='both', expand=True)
         top = tk.Frame(cell, bg=app.BG3)
@@ -433,13 +455,16 @@ class MonitorTab:
                  ).pack(side='left', padx=(0, 4))
         tk.Label(top, text="LAST 99 ACHIEVED", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
+        account_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.YEL,
+                                anchor='w', justify='left', wraplength=110)
+        account_lbl.pack(fill='x', anchor='w', pady=(2, 0))
         val_lbl = tk.Label(cell, text="None yet", font=app.SANSS, bg=app.BG3, fg=app.FG,
                             anchor='w', justify='left', wraplength=110)
-        val_lbl.pack(fill='x', anchor='w', pady=(3, 0))
+        val_lbl.pack(fill='x', anchor='w')
         sub_lbl = tk.Label(cell, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                             anchor='w', wraplength=110, justify='left')
         sub_lbl.pack(fill='x', anchor='w')
-        self._hl_widgets['last99'] = (val_lbl, sub_lbl)
+        self._hl_widgets['last99'] = (account_lbl, val_lbl, sub_lbl)
 
     def refresh_highlights(self):
         """app._highlights is a pure dict read (no I/O) — but
@@ -484,29 +509,31 @@ class MonitorTab:
         self._render_highlight_values()
 
     def _render_highlight_values(self):
-        app = self.app
-        for key, (val_lbl, sub_lbl) in self._hl_widgets.items():
-            h = app._highlights.get(key)
+        for key, (account_lbl, val_lbl, sub_lbl) in self._hl_widgets.items():
+            h = self.app._highlights.get(key)
             if not h:
+                account_lbl.configure(text="")
                 val_lbl.configure(text="None yet")
                 sub_lbl.configure(text="")
                 continue
+
+            account_lbl.configure(text=h.get('account') or "Unknown account")
+
             if key == 'task':
                 val_lbl.configure(text=f"{h['value']} — {h['activity']}" if h['activity'] else h['value'])
-                sub_lbl.configure(text=self._ago(h['ts']))
             elif key == 'levelup':
                 val_lbl.configure(text=f"{h['value']} → {h['activity']}")
-                sub_lbl.configure(text=self._ago(h['ts']))
             elif key == 'error':
                 val_lbl.configure(text=h['value'][:48] or 'Error')
-                sub_lbl.configure(text=f"{h['account']} • {self._ago(h['ts'])}")
             elif key == 'drop':
                 val_lbl.configure(text=h['value'])
-                sub_lbl.configure(text=self._ago(h['ts']))
             elif key == 'last99':
                 val_lbl.configure(text=f"{h['value']} → 99")
-                age_or_source = self._ago(h['ts']) if h['ts'] is not None else 'from WOM cache'
-                sub_lbl.configure(text=f"{h['account']} • {age_or_source}")
+
+            if key == 'last99':
+                sub_lbl.configure(text=self._ago(h['ts']) if h['ts'] is not None else 'from WOM cache')
+            else:
+                sub_lbl.configure(text=self._ago(h['ts']))
 
     @staticmethod
     def _ago(ts):

@@ -49,6 +49,13 @@ from py.util    import now_str, DEBUG_LOG_FILE, is_frozen
 from py.config  import save_config, is_logs_root_account_folder, CONFIG_FILE
 from py.platform_ops import open_path
 
+# Minimum genuine overflow (in px) before a scroll container shows its
+# scrollbar — without this, even a few pixels of rounding/measurement
+# noise (which happens routinely across different font metrics, e.g.
+# Windows vs Linux) triggers a scrollbar that barely moves and serves
+# no purpose. Only real, meaningful overflow should ever scroll.
+_SCROLL_TOLERANCE_PX = 16
+
 
 class SettingsTab:
     """Settings tab. Receives App reference for shared cfg, colours, fonts, watcher."""
@@ -153,12 +160,21 @@ class SettingsTab:
     # ── Shared row/card builders (used by every page) ───────────────────────
     def _page_header(self, parent, title, subtitle):
         app = self.app
-        wrap = tk.Frame(parent, bg=app.BG2, padx=16, pady=12)
+        wrap = tk.Frame(parent, bg=app.BG2, padx=16, pady=10)
         wrap.pack(fill='x')
-        tk.Label(wrap, text=title, font=(app.SANS[0], 15, 'bold'),
-                 bg=app.BG2, fg=app.FG).pack(anchor='w')
-        tk.Label(wrap, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2
-                 ).pack(anchor='w', pady=(2, 0))
+        row = tk.Frame(wrap, bg=app.BG2)
+        row.pack(fill='x', anchor='w')
+        title_lbl = tk.Label(row, text=title, font=(app.SANS[0], 15, 'bold'),
+                              bg=app.BG2, fg=app.FG)
+        title_lbl.pack(side='left', anchor='s')
+        subtitle_lbl = tk.Label(row, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2,
+                                 anchor='w', justify='left')
+        subtitle_lbl.pack(side='left', anchor='s', padx=(10, 0), pady=(0, 2))
+
+        def _sync_subtitle_wrap(_e=None):
+            available = row.winfo_width() - title_lbl.winfo_reqwidth() - 14
+            subtitle_lbl.configure(wraplength=max(available, 120))
+        row.bind('<Configure>', _sync_subtitle_wrap)
 
     def _scrollable_body(self, parent):
         """A container for a page's cards that behaves like a plain Frame
@@ -183,7 +199,7 @@ class SettingsTab:
             canvas.configure(scrollregion=canvas.bbox('all'))
             content_h = inner.winfo_reqheight()
             visible_h = canvas.winfo_height()
-            needs_scroll = content_h > visible_h > 1
+            needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not state['sb_visible']:
                 sb.pack(side='right', fill='y')
                 state['sb_visible'] = True
@@ -215,8 +231,8 @@ class SettingsTab:
         via <Configure> so it reads correctly whether the card sits in a
         two-column or full-width page."""
         app = self.app
-        card = tk.Frame(parent, bg=app.BG3, padx=11, pady=9)
-        card.pack(fill='x', pady=(0, 9))
+        card = tk.Frame(parent, bg=app.BG3, padx=9, pady=7)
+        card.pack(fill='x', pady=(0, 7))
         hdr = tk.Frame(card, bg=app.BG3)
         hdr.pack(fill='x', anchor='w')
         tk.Label(hdr, text=icon, font=(app.SANS[0], 13), bg=app.BG3, fg=app.ACC
@@ -225,8 +241,8 @@ class SettingsTab:
         if subtitle:
             sub_lbl = tk.Label(card, text=subtitle, font=app.SANSS, bg=app.BG3,
                                 fg=app.FG2, justify='left', anchor='w')
-            sub_lbl.pack(fill='x', anchor='w', pady=(4, 10))
-            card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 22, 100)))
+            sub_lbl.pack(fill='x', anchor='w', pady=(3, 7))
+            card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 18, 100)))
         body = tk.Frame(card, bg=app.BG3)
         body.pack(fill='x')
         return card, body
@@ -234,7 +250,7 @@ class SettingsTab:
     def _row_bool(self, parent, label, attr, default=False, helper=None):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=3, anchor='w')
+        row.pack(fill='x', pady=2, anchor='w')
         var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
         tk.Checkbutton(row, text=label, variable=var, font=app.SANS,
             bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
@@ -251,7 +267,7 @@ class SettingsTab:
     def _row_text(self, parent, label, attr, helper=None, pw=False, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=3)
+        row.pack(fill='x', pady=2)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         var = tk.StringVar(value=str(app.cfg.get(attr, '')))
@@ -270,7 +286,7 @@ class SettingsTab:
     def _row_int(self, parent, label, attr, lo, hi, default=None, helper=None, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=3)
+        row.pack(fill='x', pady=2)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         d = default if default is not None else lo
@@ -367,7 +383,7 @@ class SettingsTab:
             command=self._browse_dir).pack(side='left', padx=(6, 0))
         self._logs_root_warn = tk.Label(
             body, text="", font=app.SANSS, bg=app.BG3, fg=app.YEL,
-            wraplength=420, justify='left')
+            wraplength=420, justify='left', anchor='w')
         self._logs_root_warn.pack(fill='x', pady=(6, 0))
         body.bind('<Configure>', lambda e: self._logs_root_warn.configure(wraplength=max(e.width - 8, 100)))
         self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
@@ -379,7 +395,7 @@ class SettingsTab:
         _, body = self._card(left, '🔄', 'Manual Update Check')
         tk.Label(body, text="P2P Monitor does not auto-update.\n"
                              "Updates are checked manually only and are not auto-installed.",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left'
+                 font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left', anchor='w'
                  ).pack(anchor='w', pady=(0, 8))
         tk.Button(body, text="🔄  Check for Updates", font=app.SANSB,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=14, pady=6,
@@ -444,7 +460,7 @@ class SettingsTab:
         self._row_text(fields_col, "Discord Mention ID:", 'mention_id')
 
         self._bot_setup_lbl = tk.Label(status_col, text="", font=app.SANSS, bg=app.BG3,
-                                       fg=app.FG2, wraplength=220, justify='left')
+                                       fg=app.FG2, wraplength=220, justify='left', anchor='w')
         self._bot_setup_lbl.pack(anchor='w', pady=(0, 8))
         btn_row = tk.Frame(status_col, bg=app.BG3)
         btn_row.pack(anchor='w')
