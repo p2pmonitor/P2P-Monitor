@@ -1,5 +1,97 @@
 # Changelog
 
+## v2.0.0-beta.21
+### Final cleanup pass — release candidate for 2.0.0 stable
+
+Scoped intentionally small per request — no redesigns, all targeted fixes
+against a specific, named ask.
+
+**1. Save/restore main window size.** First launch still defaults to
+960×680 exactly. If the user manually resizes larger and then actually
+quits (not minimize-to-tray), that width/height is saved and restored on
+next launch. Deliberately width/height only, never x/y — saving position
+risks launching off-screen after a monitor gets disconnected/reconfigured;
+size alone carries no such risk. `_save_window_size()` refuses to save
+below the 960×680 minimum (a transient bad read should never become
+tomorrow's permanent floor) and refuses to save while minimized/withdrawn
+(checks `self.state()`, only saves on `'normal'`/`'zoomed'`). Hooked into
+`_do_quit()` specifically — confirmed minimize-to-tray never touches it,
+since `_minimize_to_tray()` doesn't call `_do_quit()` at all.
+
+**2. Status tab: removed the redundant "View history" hint.** The footer
+already says this; having it twice was noise. Double-click binding now
+attaches to just `name_lbl`/`text_col`, not the removed hint label.
+
+**3. Status tab: column alignment recalibration.** Applied the requested
+header-width tuple (ACCOUNT 22, ACTIVITY 18, UPTIME 9) and the matching
+row-width adjustment (activity 16, uptime 8).
+
+**4. Settings: compacted Windows-specific spacing further.** Applied
+every padding reduction from the request exactly as specified — shared
+card padding, all three row helpers, Event Notifications' per-event grid
+and "Notify every N levels" row, the hide-paint grid, Restarts & Updates'
+"Restart Delay" label, and the warning banner's inner padding. Net
+effect on Linux (measured, can't verify Windows directly): every Settings
+page now fits with real margin instead of being borderline — General
+−51px, Discord −92px, Notifications −33px (was −2px), Daily Summary
+−158px, Restarts −37px (was −11px). Negative = comfortably under the
+available height, not just within the scroll tolerance.
+
+**5. Last 99 Achieved: Combat is now skipped.** Combat is a derived/
+composite level (computed from Attack/Strength/Defence/Hitpoints/Ranged/
+Magic/Prayer), not a real trainable skill — it should never be reported
+as a "Last 99 Achieved" in its own right. Fixed in both paths
+`determine_last_99()` actually has: the history-row loop and the cache
+fallback loop. Tested directly: Combat-99-only returns nothing (correct —
+there's no real skill to report), Combat alongside a real skill's 99
+returns the real skill even when Combat's own timestamp is more recent,
+and both "Combat" and "Combat Level" spellings are caught case-
+insensitively. The user's own uploaded `wom.py` was checked directly
+against the live repo file — byte-identical aside from CRLF line endings,
+meaning the intended change had not actually been saved into it; this
+entry implements it directly instead, adapted to the actual existing
+code structure (the request's reference implementation assumed a
+`skill = r.get('value', '')` extraction that didn't yet exist in the
+history loop — added it, in both the check and the existing `best{}`
+construction, rather than introducing a parallel/duplicate variable).
+
+**6. History date-range filter: removed the hard 7-day cap.** The custom
+date-range picker's "Maximum range is 7 days" validation is gone
+entirely — user picks any From/To range now. Popup title updated to drop
+the now-incorrect "(max 7 days)" mention. The quick-filter preset buttons
+(All time / Today / 7 days / 30 days) were left untouched — "All time" is
+already an existing, always-available option there, so those were never
+actually a cap, just shortcut presets; the 7-day *hard limit* lived
+exclusively in the custom picker's validation, which is what was removed.
+Verified directly: a 20-day custom range now applies successfully with no
+error and is not silently clamped back down.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean;
+`pyflakes` zero new warnings. 137 checks across 22 test scripts (8 new
+this pass) — covering: window-size save/restore (first-launch default,
+valid restore, below-minimum clamping, garbage-value fallback, the
+minimized/withdrawn save-guard — verified by mocking `state()` directly,
+since Xvfb has no real window manager to honor a real `iconify()` call,
+confirmed by direct comparison), the Combat-skip logic in both code
+paths, and the date-range cap removal (a 20-day range applies and is not
+clamped). All 6 tabs + Settings sub-pages re-measured at 960×680.
+
+**Known limitations:** Settings/Status spacing changes are measured on
+Linux/Xvfb only — real Windows confirmation (Segoe UI metrics) still
+needs a user test, same caveat as every prior UI-spacing pass. DPI
+restore (beta20) and the broader Windows-specific items from beta19/20
+are unchanged this pass and remain pending real Windows verification.
+
+**Files changed:** `p2p_monitor.py` (`window_size` config key,
+`_restore_window_size()`/`_save_window_size()`, version bump to
+beta.21), `py/wom.py` (Combat skip in `determine_last_99()`),
+`ui/status_tab.py` (hint label removed, column recalibration),
+`ui/settings_tab.py` (spacing reductions throughout), `ui/history_tab.py`
+(7-day cap removed from the custom date-range picker), `CHANGELOG.md`.
+`update_manifest.txt`/`install.sh` unchanged — no new files added.
+
+---
+
 ## v2.0.0-beta.20
 ### Final beta19 polish: Monitor sidebar, launch size, Highlights format, Active Accounts sync, alignment, scroll thresholds
 
@@ -25,7 +117,7 @@ every time, with minsize still enforced as the resize floor.
 
 **3. Highlights row format.** Previously inconsistent: Latest Task/Last
 Level Up/Latest Drop never showed an account at all, while Last Error/
-Last 99 Achieved buried it inside the time line ("AccountName • 2d ago").
+Last 99 Achieved buried it inside the time line ("Account • 2d ago").
 Every highlight tile now consistently shows tile name → account → info →
 time as four separate lines, account included on every tile (data was
 always there — `app._highlights[key]['account']` is populated for every

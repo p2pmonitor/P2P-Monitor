@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-P2P Monitor v2.0.0-beta.20
+P2P Monitor v2.0.0-beta.21
 Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
@@ -62,7 +62,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.0-beta.20"
+VERSION      = "2.0.0-beta.21"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -78,6 +78,7 @@ DEFAULT_CFG = {
     "webhook_chat": "", "webhook_error": "", "webhook_drops": "", "webhook_default": "",
     "mention_id": "", "check_interval": 5, "beta_updates": False,
     "screenshot_minutes": 60, "bot_token": "",
+    "window_size": "",
     "monitor_quests": True, "monitor_tasks": True,
     "monitor_chat": True, "monitor_errors": True, "screenshots_enabled": False,
     "screenshot_on_startup": False,
@@ -230,16 +231,15 @@ class App(tk.Tk):
                              'drop': None, 'last99': None}
         self._style()
         self._build()
-        # Lock the initial launch size to the intended minimum spec.
-        # minsize() alone only sets a floor on manual resizing — it does
-        # NOT control the window's natural/initial size, which Tk computes
-        # from whichever tab's packed content needs the most space (all 6
-        # tabs share one grid cell, so the window's natural width is
-        # max() across all of them). Without this explicit call, the app
-        # launches wider than 960 even though every individual tab fits
-        # within it — this is what makes it the actual launch size rather
-        # than just a resize floor.
-        self.geometry("960x680")
+        # Lock the initial launch size — minsize() alone only sets a floor
+        # on manual resizing, it does NOT control the window's natural/
+        # initial size, which Tk computes from whichever tab's packed
+        # content needs the most space (all 6 tabs share one grid cell,
+        # so the window's natural width is max() across all of them).
+        # _restore_window_size() uses the user's last manually-resized
+        # size if one was saved, falling back to the 960x680 minimum
+        # spec otherwise.
+        self._restore_window_size()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # Defer remote error rules fetch until after _build() so the Tkinter event
         # loop is running and the monitor tab widget exists to receive the log message.
@@ -1369,7 +1369,49 @@ class App(tk.Tk):
         self._tray_icon = None
         self.after(0, self._do_quit)
 
+    def _restore_window_size(self):
+        """Restore the user's last manually-resized window size, falling
+        back to the 960x680 minimum spec on first launch or if the saved
+        value is missing/invalid. Only ever applies width/height — never
+        a saved x/y position, specifically to avoid launching off-screen
+        after a monitor got disconnected/reconfigured since the size was
+        last saved; size alone carries no such risk."""
+        w, h = 960, 680
+        raw = self.cfg.get('window_size', '')
+        if raw:
+            try:
+                parts = str(raw).lower().split('x')
+                if len(parts) == 2:
+                    pw, ph = int(parts[0]), int(parts[1])
+                    if pw >= 960 and ph >= 680:
+                        w, h = pw, ph
+            except (ValueError, TypeError):
+                pass
+        self.geometry(f"{w}x{h}")
+
+    def _save_window_size(self):
+        """Best-effort, called only from _do_quit() (a real quit) — never
+        from minimize-to-tray, which leaves the saved size untouched.
+        Refuses to save a minimized/withdrawn window's geometry (which
+        would be meaningless), and refuses to save anything below the
+        960x680 minimum spec, so a transient bad read can never become
+        tomorrow's permanent floor."""
+        try:
+            state = self.state()
+        except Exception:
+            return
+        if state not in ('normal', 'zoomed'):
+            return
+        try:
+            self.update_idletasks()
+            w, h = self.winfo_width(), self.winfo_height()
+        except Exception:
+            return
+        if w >= 960 and h >= 680:
+            self.cfg['window_size'] = f"{w}x{h}"
+
     def _do_quit(self):
+        self._save_window_size()
         if self.watcher:
             self.watcher.stop()
         save_config(self.cfg)

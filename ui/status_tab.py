@@ -135,7 +135,7 @@ class StatusTab:
         # was the real cause of the header/row column misalignment. The
         # ACCOUNT column specifically also has a units mismatch on top of
         # that: name_cell below is sized in raw pixels (170), not characters.
-        for text, w in [("ACCOUNT", 21), ("TASK", 14), ("ACTIVITY", 19), ("UPTIME", 8),
+        for text, w in [("ACCOUNT", 22), ("TASK", 14), ("ACTIVITY", 18), ("UPTIME", 9),
                          ("BREAK", 8), ("STATUS", 12), ("", 7), ("", 8)]:
             tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
                      width=w, anchor='w').pack(side='left', padx=(0, 6))
@@ -238,20 +238,17 @@ class StatusTab:
         name_lbl = tk.Label(text_col, text=self._clip(account, 18), font=app.SANSB, bg=app.BG3, fg=app.ACC,
                              cursor='hand2', anchor='w')
         name_lbl.pack(anchor='w', fill='x')
-        hint_lbl = tk.Label(text_col, text="View history", font=app.SANSS,
-                             bg=app.BG3, fg=app.FG2, cursor='hand2', anchor='w')
-        hint_lbl.pack(anchor='w', fill='x')
-        for w in (name_lbl, hint_lbl, text_col):
+        for w in (name_lbl, text_col):
             w.bind('<Double-1>', lambda e, a=account: self._open_history(a))
 
         task_lbl = tk.Label(row, text=self._clip(r['task'], 12), font=app.SANS, bg=app.BG3, fg=app.FG,
                              width=12, anchor='w')
         task_lbl.pack(side='left', padx=(0, 6))
-        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 17), font=app.SANS, bg=app.BG3, fg=app.FG2,
-                                 width=17, anchor='w')
+        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 16), font=app.SANS, bg=app.BG3, fg=app.FG2,
+                                 width=16, anchor='w')
         activity_lbl.pack(side='left', padx=(0, 6))
         uptime_lbl = tk.Label(row, text=r.get('uptime', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                               width=7, anchor='w')
+                               width=8, anchor='w')
         uptime_lbl.pack(side='left', padx=(0, 6))
         break_lbl = tk.Label(row, text=r.get('break_time', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
                               width=7, anchor='w')

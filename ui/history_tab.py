@@ -20,7 +20,7 @@ p2p_monitor.py / ui/status_tab.py):
 
 Untouched: py/history.py (file format, writing, parsing, dedupe, backfill,
 runtime-stats computation) and the date-range filter's logic/validation
-(MM/DD/YY parsing, 7-day max, auto-sync From->To) — only its colors/fonts
+(MM/DD/YY parsing, auto-sync From->To) — only its colors/fonts
 changed. Column-width persistence (hist_col_widths) is preserved per
 account-table column, same config key.
 
@@ -887,7 +887,7 @@ class HistoryTab:
         except Exception:
             pass
 
-        tk.Label(popup, text="Select date range (max 7 days)", font=app.SANSB,
+        tk.Label(popup, text="Select date range", font=app.SANSB,
                  bg=app.BG2, fg=app.ACC).pack(padx=14, pady=(10, 2))
         tk.Label(popup, text="Format: MM/DD/YY", font=app.SANS,
                  bg=app.BG2, fg=app.FG2).pack(padx=14, pady=(0, 6))
@@ -936,8 +936,6 @@ class HistoryTab:
                 err_lbl.config(text="Invalid To date — use MM/DD/YY"); return
             if d2 < d1:
                 d1, d2 = d2, d1
-            if (d2 - d1).days > 6:
-                err_lbl.config(text="Maximum range is 7 days."); return
             ds_from = d1.strftime('%Y-%m-%d')
             ds_to   = d2.strftime('%Y-%m-%d')
             self._filter_date = (ds_from, ds_to)

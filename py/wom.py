@@ -347,19 +347,29 @@ def determine_last_99(history_levelup_rows, cached_skills):
     when real history exists — exactly the bug this comment is here to
     prevent from recurring.
 
+    Skips any row/cached-skill named 'Combat' or 'Combat Level' entirely —
+    Combat is a derived/composite level (computed from Attack/Strength/
+    Defence/Hitpoints/Ranged/Magic/Prayer), not a real trainable skill, so
+    it should never be reported as a "Last 99 Achieved" in its own right.
+
     Returns {'skill':, 'ts': float|None, 'source': 'history'|'cache'} or
-    None if there's no 99 anywhere for this account at all.
+    None if there's no real (non-Combat) 99 anywhere for this account.
     """
     best = None
     for r in (history_levelup_rows or []):
         if r.get('activity') != '99':
             continue
+        skill = r.get('value', '')
+        if str(skill or '').strip().lower() in ('combat', 'combat level'):
+            continue
         ts = r.get('_ts_epoch')
         if best is None or (ts or 0) > (best['ts'] or 0):
-            best = {'skill': r.get('value', ''), 'ts': ts, 'source': 'history'}
+            best = {'skill': skill, 'ts': ts, 'source': 'history'}
     if best:
         return best
     for skill, s in (cached_skills or {}).items():
+        if str(skill or '').strip().lower() in ('combat', 'combat level'):
+            continue
         if s.get('experience', 0) >= LEVEL_99_XP:
             return {'skill': skill, 'ts': None, 'source': 'cache'}
     return None

@@ -231,8 +231,8 @@ class SettingsTab:
         via <Configure> so it reads correctly whether the card sits in a
         two-column or full-width page."""
         app = self.app
-        card = tk.Frame(parent, bg=app.BG3, padx=9, pady=7)
-        card.pack(fill='x', pady=(0, 7))
+        card = tk.Frame(parent, bg=app.BG3, padx=8, pady=6)
+        card.pack(fill='x', pady=(0, 6))
         hdr = tk.Frame(card, bg=app.BG3)
         hdr.pack(fill='x', anchor='w')
         tk.Label(hdr, text=icon, font=(app.SANS[0], 13), bg=app.BG3, fg=app.ACC
@@ -250,7 +250,7 @@ class SettingsTab:
     def _row_bool(self, parent, label, attr, default=False, helper=None):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=2, anchor='w')
+        row.pack(fill='x', pady=1, anchor='w')
         var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
         tk.Checkbutton(row, text=label, variable=var, font=app.SANS,
             bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
@@ -267,7 +267,7 @@ class SettingsTab:
     def _row_text(self, parent, label, attr, helper=None, pw=False, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=2)
+        row.pack(fill='x', pady=1)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         var = tk.StringVar(value=str(app.cfg.get(attr, '')))
@@ -286,7 +286,7 @@ class SettingsTab:
     def _row_int(self, parent, label, attr, lo, hi, default=None, helper=None, width_label=15):
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
-        row.pack(fill='x', pady=2)
+        row.pack(fill='x', pady=1)
         tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         d = default if default is not None else lo
@@ -337,7 +337,7 @@ class SettingsTab:
         banner = tk.Frame(parent, bg=app.BG4)
         banner.pack(fill='x', pady=(8, 0))
         tk.Frame(banner, bg=app.RED, width=4).pack(side='left', fill='y')
-        inner = tk.Frame(banner, bg=app.BG4, padx=12, pady=8)
+        inner = tk.Frame(banner, bg=app.BG4, padx=12, pady=6)
         inner.pack(side='left', fill='x', expand=True)
         lbl = tk.Label(inner, text=f"⚠  {text}", font=app.SANSS, bg=app.BG4,
                         fg=app.RED, justify='left', anchor='w')
@@ -565,20 +565,20 @@ class SettingsTab:
         ]
         for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
             tk.Label(tbl, text=label, font=app.SANS, bg=app.BG3, fg=app.FG,
-                     anchor='w').grid(row=r, column=0, sticky='w', pady=3)
+                     anchor='w').grid(row=r, column=0, sticky='w', pady=2)
 
             notify_var = tk.BooleanVar(value=bool(app.cfg.get(notify_attr, True)))
             tk.Checkbutton(tbl, variable=notify_var, font=app.SANS,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
                 selectcolor=app.BG2, relief='flat', cursor='hand2'
-                ).grid(row=r, column=1, padx=(16, 0), pady=3)
+                ).grid(row=r, column=1, padx=(16, 0), pady=2)
             self._vars[notify_attr] = notify_var
 
             ss_var = tk.BooleanVar(value=bool(app.cfg.get(ss_attr, False)))
             tk.Checkbutton(tbl, variable=ss_var, font=app.SANS,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
                 selectcolor=app.BG2, relief='flat', cursor='hand2'
-                ).grid(row=r, column=2, padx=(16, 0), pady=3)
+                ).grid(row=r, column=2, padx=(16, 0), pady=2)
             self._vars[ss_attr] = ss_var
 
             ping_default = app.cfg.get(ping_attr, ping_attr in ('ping_error', 'ping_death'))
@@ -586,11 +586,11 @@ class SettingsTab:
             tk.Checkbutton(tbl, variable=ping_var, font=app.SANS,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
                 selectcolor=app.BG2, relief='flat', cursor='hand2'
-                ).grid(row=r, column=3, padx=(16, 0), pady=3)
+                ).grid(row=r, column=3, padx=(16, 0), pady=2)
             self._vars[ping_attr] = ping_var
 
         lvl_row = tk.Frame(body, bg=app.BG3)
-        lvl_row.pack(fill='x', pady=(10, 0))
+        lvl_row.pack(fill='x', pady=(6, 0))
         tk.Label(lvl_row, text="Notify every N levels:", font=app.SANS,
                  bg=app.BG3, fg=app.FG2).pack(side='left')
         lev_var = tk.IntVar(value=int(app.cfg.get('levelup_every', 5)))
@@ -622,7 +622,7 @@ class SettingsTab:
         for i, (lbl, key) in enumerate(hp_entries):
             row_i, col = divmod(i, HP_COLS)
             cell = tk.Frame(hp_table, bg=app.BG3)
-            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=3)
+            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=2)
             var = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
             tk.Checkbutton(cell, text=lbl, variable=var, font=app.SANSS,
                 bg=app.BG3, fg=app.FG2, activebackground=app.BG3, activeforeground=app.ACC,
@@ -719,7 +719,7 @@ class SettingsTab:
                        'auto_restart_respect_breaks', default=True)
 
         tk.Label(body, text="Restart Delay", font=app.SANSB, bg=app.BG3, fg=app.FG
-                 ).pack(anchor='w', pady=(10, 0))
+                 ).pack(anchor='w', pady=(6, 0))
         tk.Label(body, text="Restart delay (random within window, ignored when respecting breaks):",
                  font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w', pady=(0, 6))
         delay_row = tk.Frame(body, bg=app.BG3)
