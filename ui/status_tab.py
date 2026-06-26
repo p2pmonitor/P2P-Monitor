@@ -135,10 +135,39 @@ class StatusTab:
         # was the real cause of the header/row column misalignment. The
         # ACCOUNT column specifically also has a units mismatch on top of
         # that: name_cell below is sized in raw pixels (170), not characters.
-        for text, w in [("ACCOUNT", 22), ("TASK", 14), ("ACTIVITY", 18), ("UPTIME", 9),
-                         ("BREAK", 8), ("STATUS", 12), ("", 7), ("", 8)]:
-            tk.Label(col_hdr, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
-                     width=w, anchor='w').pack(side='left', padx=(0, 6))
+        # The Mute/Screenshot button area is now right-pegged in the row
+        # (see _build_row) — these two header placeholders mirror that
+        # with plain pixel-width frames rather than character-width
+        # labels, for the same reason the ACCOUNT column needed pixel
+        # units instead of characters: button widths aren't expressible
+        # in character counts that'd actually match. Sized to the wider
+        # ("🔇 Unmute") state plus its gap, so the header's blank space
+        # comfortably covers either mute-state width without drifting
+        # row to row.
+        tk.Frame(col_hdr, bg=app.BG3, width=101).pack(side='right', padx=(0, 6))
+        tk.Frame(col_hdr, bg=app.BG3, width=80).pack(side='right', padx=(0, 3))
+
+        # Pixel-width frames, not character-width labels — matches the
+        # ACCOUNT column's and the Mute/Screenshot placeholders' existing
+        # approach above, now applied to every column. Character-count
+        # widths can never truly align across two different fonts (this
+        # header uses SANSS, the row values below use SANS) — the same
+        # declared width renders to a different pixel width in each, which
+        # is exactly what kept drifting on Windows even after recalibrating
+        # the character counts twice. Pixel widths are deterministic
+        # regardless of font metrics, so this is the actual fix rather
+        # than a third guess at new character-count numbers. Values below
+        # are the exact measured reqwidth of each corresponding row widget
+        # in _build_row (task_lbl=112, activity_lbl=148, uptime_lbl=76,
+        # break_lbl=67, badge_wrap=102) — keep these in sync if those ever
+        # change.
+        for text, pw in [("ACCOUNT", 170), ("TASK", 112), ("ACTIVITY", 148),
+                         ("UPTIME", 76), ("BREAK", 67), ("STATUS", 102)]:
+            cell = tk.Frame(col_hdr, bg=app.BG3, width=pw, height=19)
+            cell.pack_propagate(False)
+            cell.pack(side='left', padx=(0, 4))
+            tk.Label(cell, text=text, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                     anchor='w').pack(anchor='w', fill='x')
 
         # Canvas+Scrollbar wrap — same pattern as History/Launcher/Settings.
         # Without this, the row list (one row per monitored account, no
@@ -225,9 +254,32 @@ class StatusTab:
         row.pack(fill='x')
         tk.Frame(row, bg=app.BG4, height=1).pack(fill='x', side='bottom')
 
+        # Mute/Screenshot are packed first with side='right' so they're
+        # always pinned to the row's right edge — packed in reverse
+        # visual order (Screenshot first, ends up rightmost; Mute second,
+        # lands to its left) so they still read left-to-right as
+        # Mute/Screenshot. This matters beyond just consistency with the
+        # header: mute_btn's own text changes ("🔇 Unmute" vs "🔊 Mute")
+        # depending on mute state, so under the old sequential left-to-
+        # right pack, two rows could have their buttons start at two
+        # different x-positions for no reason other than one account
+        # happening to be muted — a real per-row misalignment, not just a
+        # font-metric difference. Right-pinning makes every row's buttons
+        # land in the exact same place regardless of that.
+        muted = bool(r.get('muted'))
+        ss_btn = tk.Button(row, text="📷 Screenshot", font=app.SANSS,
+            bg=app.BG4, fg=app.ACC, relief='flat', padx=3, pady=3,
+            cursor='hand2', command=lambda a=account: self._on_screenshot_click(a))
+        ss_btn.pack(side='right', padx=(0, 6))
+
+        mute_btn = tk.Button(row, text=("🔇 Unmute" if muted else "🔊 Mute"), font=app.SANSS,
+            bg=app.BG4, fg=(app.FG2 if muted else app.ACC), relief='flat', padx=3, pady=3,
+            cursor='hand2', command=lambda a=account: self._on_mute_click(a))
+        mute_btn.pack(side='right', padx=(0, 3))
+
         # Avatar circle + name (double-click → history)
         name_cell = tk.Frame(row, bg=app.BG3, width=170)
-        name_cell.pack(side='left', fill='y', padx=(0, 6))
+        name_cell.pack(side='left', fill='y', padx=(0, 4))
         name_cell.pack_propagate(False)
         avatar = tk.Canvas(name_cell, width=24, height=24, bg=app.BG3, highlightthickness=0)
         avatar.pack(side='left', padx=(0, 6))
@@ -241,18 +293,25 @@ class StatusTab:
         for w in (name_lbl, text_col):
             w.bind('<Double-1>', lambda e, a=account: self._open_history(a))
 
-        task_lbl = tk.Label(row, text=self._clip(r['task'], 12), font=app.SANS, bg=app.BG3, fg=app.FG,
-                             width=12, anchor='w')
-        task_lbl.pack(side='left', padx=(0, 6))
-        activity_lbl = tk.Label(row, text=self._clip(r['activity'], 16), font=app.SANS, bg=app.BG3, fg=app.FG2,
-                                 width=16, anchor='w')
-        activity_lbl.pack(side='left', padx=(0, 6))
-        uptime_lbl = tk.Label(row, text=r.get('uptime', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                               width=8, anchor='w')
-        uptime_lbl.pack(side='left', padx=(0, 6))
-        break_lbl = tk.Label(row, text=r.get('break_time', '—'), font=app.SANS, bg=app.BG3, fg=app.FG,
-                              width=7, anchor='w')
-        break_lbl.pack(side='left', padx=(0, 6))
+        # Pixel-width frames, not character-width labels — must match
+        # col_hdr's header cells exactly (same reasoning: a character
+        # count renders to a different pixel width on a different font/
+        # platform, so only fixed pixel widths can guarantee the row
+        # stays aligned with the header on Windows the same way it does
+        # here). name_cell above and badge_wrap below already used this
+        # approach; task/activity/uptime/break now match.
+        def _fixed_cell(parent, width, text, fg):
+            cell = tk.Frame(parent, bg=app.BG3, width=width)
+            cell.pack_propagate(False)
+            cell.pack(side='left', fill='y', padx=(0, 4))
+            lbl = tk.Label(cell, text=text, font=app.SANS, bg=app.BG3, fg=fg, anchor='w')
+            lbl.pack(anchor='w', fill='x')
+            return lbl
+
+        task_lbl = _fixed_cell(row, 112, self._clip(r['task'], 12), app.FG)
+        activity_lbl = _fixed_cell(row, 148, self._clip(r['activity'], 16), app.FG2)
+        uptime_lbl = _fixed_cell(row, 76, r.get('uptime', '—'), app.FG)
+        break_lbl = _fixed_cell(row, 67, r.get('break_time', '—'), app.FG)
 
         status_text = r['status'].split(' ', 1)[-1] if ' ' in r['status'] else r['status']
         badge_color = self._status_color(r['status'])
@@ -261,17 +320,6 @@ class StatusTab:
         badge = tk.Label(badge_wrap, text=f" {status_text} ", font=app.SANSB,
                           bg=badge_color, fg=app.BG, padx=6, pady=2)
         badge.pack(anchor='w')
-
-        muted = bool(r.get('muted'))
-        mute_btn = tk.Button(row, text=("🔇 Unmute" if muted else "🔊 Mute"), font=app.SANSS,
-            bg=app.BG4, fg=(app.FG2 if muted else app.ACC), relief='flat', padx=3, pady=3,
-            cursor='hand2', command=lambda a=account: self._on_mute_click(a))
-        mute_btn.pack(side='left', padx=(0, 3))
-
-        ss_btn = tk.Button(row, text="📷 Screenshot", font=app.SANSS,
-            bg=app.BG4, fg=app.ACC, relief='flat', padx=3, pady=3,
-            cursor='hand2', command=lambda a=account: self._on_screenshot_click(a))
-        ss_btn.pack(side='left')
 
         return {'frame': row, 'task': task_lbl, 'activity': activity_lbl,
                 'uptime': uptime_lbl, 'break_time': break_lbl, 'badge': badge,

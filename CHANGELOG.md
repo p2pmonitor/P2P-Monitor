@@ -1,5 +1,123 @@
 # Changelog
 
+## v2.0.0-beta.22
+### Status alignment (real fix this time), Settings Windows/Linux font split, Max Progress diagnostics
+
+beta.21's Status column recalibration and Settings padding reduction were
+both real attempts, but neither actually worked once tested against real
+screenshots — this entry replaces both with mechanisms that don't depend
+on guessing font metrics.
+
+**1. Status tab column alignment — the actual fix.** beta.21 tried
+recalibrating character-count widths a second time; a real Windows
+screenshot confirmed UPTIME/BREAK were still visibly shifted right of
+their headers. Character-width Labels can never reliably align across
+two different fonts (header uses `SANSS`, row values use `SANS`) — the
+same declared character count renders to a different pixel width in
+each, no matter how carefully the numbers are tuned. Replaced every
+column, both header and row, with deterministic pixel-width frames sized
+to the actual measured widget width. Verified directly at the widget
+level: every column's x-position now matches header-to-row exactly, to
+the pixel, regardless of font.
+
+Caught a real, serious bug while verifying this with an actual
+screenshot (not just widget introspection): `pack_propagate(False)` on a
+frame with only `width=` set and no `fill='y'`/explicit `height=`
+renders as corrupted, illegible dotted text under Tk — confirmed with
+an isolated four-way comparison reproducing the exact mechanism. Fixed
+(row cells use `fill='y'`, inheriting height from the row the way the
+account-name cell already did; header cells use an explicit `height=19`
+instead, since the header row has nothing else to anchor a height the
+way the data row does). Swept every other `pack_propagate(False)` usage
+in the codebase for the same pattern — confirmed no other instance is
+vulnerable.
+
+**2. Settings: Windows/Linux font split.** Investigated the actual
+mechanism behind Windows needing a scrollbar on Event
+Notifications/Restarts & Updates that Linux didn't, since the previous
+two rounds of padding reduction (down to `pady=0` on every single
+Checkbutton — confirmed, all 8 of them) hadn't closed the gap. Root
+cause is the font, not the padding: Segoe UI (Windows) has a
+meaningfully taller line-height than DejaVu Sans (Linux) at the *same*
+point size — not something any amount of padx/pady tuning can fix, since
+it's not a spacing setting. Added Settings-specific platform-conditional
+font sizes (scoped to Settings only, not touching Monitor/Status/Stats):
+9pt/8pt on Windows (down from 10pt/9pt), 11pt/10pt on Linux (up from
+10pt/9pt, using some of Linux's existing spare margin rather than
+leaving it unused while Windows still overflows). Caught and reverted a
+self-inflicted regression before it shipped: the same substitution also
+touched the sidebar's navigation labels, which then truncated "General
+Settings"/"Discord Alerts" at the larger size — reverted just the
+sidebar to its original, unconditional font, since it was never the
+actual target. Re-verified every Settings page still fits comfortably
+on the Linux/larger-font path (worst case: Restarts at −19px, still
+genuinely under budget, not just within the scroll tolerance).
+
+**3. Monitor Active Accounts / Max Progress on Linux — diagnostics
+clarified, root cause still open.** Confirmed directly in the live code
+(not from memory) that `on_tab_shown()` already calls both
+`refresh_highlights()` and `refresh_max_progress()` together — this was
+fixed in beta.20 as one combined hook, not two separate fixes at
+different times. Added a debug-gated log line directly inside
+`on_tab_shown()` itself, separate from the WOM-computation logging
+already inside `refresh_max_progress()` — this lets a future report
+distinguish "the hook never fired" from "the hook fired but found
+nothing useful in the cache," which the existing logging alone couldn't
+tell apart. No behavior change; this is purely diagnostic, since no
+concrete bug has been found in this code path yet.
+
+**4. Event Notifications "rebuilds on Linux" — empirically disproven,
+not just re-asserted.** Rather than re-read the code and restate the
+same conclusion, built an actual test that instruments the real
+`_build_notifications_page` method and runs a realistic sequence:
+switching between Settings sections 3×, then switching away to Monitor
+and back to Settings→Notifications 3×. Result: the build method is
+never called again (0 times), the page's widget count is identical
+before and after every switch (90, unchanged), and a specific
+checkbox's `BooleanVar` is confirmed to be the literal same Python
+object throughout — not recreated. `load_fields()` (which would reload
+config into existing widgets, a different thing from a structural
+rebuild) also only ever runs once, at startup. No rebuild mechanism
+exists in this code for this or any other Settings page. What's
+actually being observed remains unidentified — flagged as open, pending
+more specific reproduction detail, rather than a fix attempted against
+a mechanism that doesn't exist.
+
+**Deliberately not changed this entry:** the blank Mute button
+visible in one row of a real Status screenshot — could not be
+reproduced, and chasing a one-off visual artifact without a way to
+trigger it risks a speculative, unverifiable "fix." Flagged, not
+touched.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean;
+`pyflakes` zero new warnings. 142 checks across 24 test scripts (3 new
+this pass: deterministic pixel-width alignment + the rendering-glitch
+reproduction, platform-conditional font resolution for both code paths,
+and the Event Notifications no-rebuild proof). Every Settings page
+re-measured on the Linux/larger-font path — all still fit with real
+margin. Status tab re-screenshotted after every change in this entry,
+specifically because that's what caught the rendering bug — it never
+showed up in any widget-level measurement, only in an actual rendered
+screenshot.
+
+**Known limitations:** Settings font split is unverified on real Windows
+(Segoe UI specifically) — cannot render it from this sandbox. Max
+Progress/Active Accounts root cause on Linux remains genuinely
+undiagnosed; the new logging should make the next reproduction
+conclusive rather than ambiguous. The blank Mute button and the
+described Event-Notifications sensation are both still open, pending
+more specific information.
+
+**Files changed:** `p2p_monitor.py` (version bump to beta.22 only —
+no other changes), `ui/status_tab.py` (deterministic pixel-width column
+alignment, the `pack_propagate(False)` rendering-bug fix),
+`ui/settings_tab.py` (platform-conditional fonts, sidebar-regression
+revert), `ui/monitor_tab.py` (diagnostic log line in `on_tab_shown()`),
+`CHANGELOG.md`. `update_manifest.txt`/`install.sh` unchanged — no new
+files added.
+
+---
+
 ## v2.0.0-beta.21
 ### Final cleanup pass — release candidate for 2.0.0 stable
 
@@ -117,7 +235,7 @@ every time, with minsize still enforced as the resize floor.
 
 **3. Highlights row format.** Previously inconsistent: Latest Task/Last
 Level Up/Latest Drop never showed an account at all, while Last Error/
-Last 99 Achieved buried it inside the time line ("Account • 2d ago").
+Last 99 Achieved buried it inside the time line ("AccountName • 2d ago").
 Every highlight tile now consistently shows tile name → account → info →
 time as four separate lines, account included on every tile (data was
 always there — `app._highlights[key]['account']` is populated for every

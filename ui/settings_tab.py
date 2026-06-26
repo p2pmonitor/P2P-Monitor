@@ -74,6 +74,23 @@ class SettingsTab:
         self._nav_btns = {}      # section_id -> (wrap_frame, label, indicator)
         self._pages = {}         # section_id -> page frame
         self._active_section = None
+        # Settings-specific font sizes, deliberately diverging from
+        # app.SANS/SANSB/SANSS (which stay the same everywhere else in the
+        # app). Segoe UI (Windows) has a meaningfully taller line-height
+        # than DejaVu Sans (Linux) at the *same* point size — that's a
+        # font-rendering fact, not a padding setting, and it's the actual
+        # reason Settings (the most text/checkbox-dense tab) needed a
+        # scrollbar on Windows while Linux had real margin to spare even
+        # after every padx/pady reduction so far (every Checkbutton here
+        # already runs at pady=0 — that lever is maxed out). Rather than
+        # keep shrinking padding that's already near zero, this shrinks
+        # the font itself on Windows specifically, and uses some of
+        # Linux's spare margin to size back up slightly there.
+        _win = sys.platform == 'win32'
+        fam = app.SANS[0]
+        self._sans   = (fam, 9 if _win else 11)
+        self._sansb  = (fam, 9 if _win else 11, 'bold')
+        self._sanss  = (fam, 8 if _win else 10)
         self._build(parent_frame)
         self.load_fields()
 
@@ -88,12 +105,12 @@ class SettingsTab:
         # section is active. Divider line sits just above it.
         save_bar = tk.Frame(root, bg=app.BG2, padx=16, pady=10)
         save_bar.pack(fill='x', side='bottom')
-        tk.Button(save_bar, text="💾  Save Settings", font=app.SANSB,
+        tk.Button(save_bar, text="💾  Save Settings", font=self._sansb,
                   bg=app.ACC, fg=app.BG, relief='flat', padx=16, pady=8,
                   cursor='hand2', command=self.save).pack(side='left')
         tk.Label(save_bar, text="Your changes will be applied immediately.",
-                 font=app.SANSS, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(12, 0))
-        self._saved_lbl = tk.Label(save_bar, text="", font=app.SANSB, bg=app.BG2, fg=app.GREEN)
+                 font=self._sanss, bg=app.BG2, fg=app.FG2).pack(side='left', padx=(12, 0))
+        self._saved_lbl = tk.Label(save_bar, text="", font=self._sansb, bg=app.BG2, fg=app.GREEN)
         self._saved_lbl.pack(side='left', padx=(12, 0))
         tk.Frame(root, bg=app.BG4, height=1).pack(fill='x', side='bottom')
 
@@ -164,10 +181,10 @@ class SettingsTab:
         wrap.pack(fill='x')
         row = tk.Frame(wrap, bg=app.BG2)
         row.pack(fill='x', anchor='w')
-        title_lbl = tk.Label(row, text=title, font=(app.SANS[0], 15, 'bold'),
+        title_lbl = tk.Label(row, text=title, font=(self._sans[0], 15, 'bold'),
                               bg=app.BG2, fg=app.FG)
         title_lbl.pack(side='left', anchor='s')
-        subtitle_lbl = tk.Label(row, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2,
+        subtitle_lbl = tk.Label(row, text=subtitle, font=self._sanss, bg=app.BG2, fg=app.FG2,
                                  anchor='w', justify='left')
         subtitle_lbl.pack(side='left', anchor='s', padx=(10, 0), pady=(0, 2))
 
@@ -235,11 +252,11 @@ class SettingsTab:
         card.pack(fill='x', pady=(0, 6))
         hdr = tk.Frame(card, bg=app.BG3)
         hdr.pack(fill='x', anchor='w')
-        tk.Label(hdr, text=icon, font=(app.SANS[0], 13), bg=app.BG3, fg=app.ACC
+        tk.Label(hdr, text=icon, font=(self._sans[0], 13), bg=app.BG3, fg=app.ACC
                  ).pack(side='left', padx=(0, 8))
-        tk.Label(hdr, text=title, font=app.SANSB, bg=app.BG3, fg=app.FG).pack(side='left')
+        tk.Label(hdr, text=title, font=self._sansb, bg=app.BG3, fg=app.FG).pack(side='left')
         if subtitle:
-            sub_lbl = tk.Label(card, text=subtitle, font=app.SANSS, bg=app.BG3,
+            sub_lbl = tk.Label(card, text=subtitle, font=self._sanss, bg=app.BG3,
                                 fg=app.FG2, justify='left', anchor='w')
             sub_lbl.pack(fill='x', anchor='w', pady=(3, 7))
             card.bind('<Configure>', lambda e: sub_lbl.configure(wraplength=max(e.width - 18, 100)))
@@ -252,12 +269,12 @@ class SettingsTab:
         row = tk.Frame(parent, bg=app.BG3)
         row.pack(fill='x', pady=1, anchor='w')
         var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
-        tk.Checkbutton(row, text=label, variable=var, font=app.SANS,
+        tk.Checkbutton(row, text=label, variable=var, font=self._sans,
             bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
-            selectcolor=app.BG2, relief='flat', cursor='hand2', anchor='w'
+            selectcolor=app.BG2, relief='flat', cursor='hand2', anchor='w', pady=0
             ).pack(side='top', anchor='w')
         if helper:
-            helper_lbl = tk.Label(row, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+            helper_lbl = tk.Label(row, text=helper, font=self._sanss, bg=app.BG3, fg=app.FG2,
                                    justify='left', anchor='w')
             helper_lbl.pack(side='top', anchor='w', padx=(24, 0))
             parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 32, 100)), add='+')
@@ -268,16 +285,16 @@ class SettingsTab:
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
         row.pack(fill='x', pady=1)
-        tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
+        tk.Label(row, text=label, font=self._sans, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         var = tk.StringVar(value=str(app.cfg.get(attr, '')))
         kw = {'show': '•'} if pw else {}
-        tk.Entry(row, textvariable=var, font=app.SANS, bg=app.BG4, fg=app.FG,
+        tk.Entry(row, textvariable=var, font=self._sans, bg=app.BG4, fg=app.FG,
                   relief='flat', insertbackground=app.ACC, **kw
                  ).pack(side='left', fill='x', expand=True, ipady=4, padx=(8, 0))
         self._vars[attr] = var
         if helper:
-            helper_lbl = tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+            helper_lbl = tk.Label(parent, text=helper, font=self._sanss, bg=app.BG3, fg=app.FG2,
                                    justify='left', anchor='w')
             helper_lbl.pack(fill='x', pady=(0, 2))
             parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 8, 100)), add='+')
@@ -287,16 +304,16 @@ class SettingsTab:
         app = self.app
         row = tk.Frame(parent, bg=app.BG3)
         row.pack(fill='x', pady=1)
-        tk.Label(row, text=label, font=app.SANS, bg=app.BG3, fg=app.FG2,
+        tk.Label(row, text=label, font=self._sans, bg=app.BG3, fg=app.FG2,
                  width=width_label, anchor='w').pack(side='left')
         d = default if default is not None else lo
         var = tk.IntVar(value=int(app.cfg.get(attr, d)))
-        tk.Spinbox(row, from_=lo, to=hi, textvariable=var, width=6, font=app.SANS,
+        tk.Spinbox(row, from_=lo, to=hi, textvariable=var, width=6, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                   ).pack(side='left', padx=(8, 0))
         self._vars[attr] = var
         if helper:
-            helper_lbl = tk.Label(parent, text=helper, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+            helper_lbl = tk.Label(parent, text=helper, font=self._sanss, bg=app.BG3, fg=app.FG2,
                                    justify='left', anchor='w')
             helper_lbl.pack(fill='x', pady=(0, 2))
             parent.bind('<Configure>', lambda e: helper_lbl.configure(wraplength=max(e.width - 8, 100)), add='+')
@@ -311,16 +328,16 @@ class SettingsTab:
         app = self.app
         wrap = tk.Frame(parent, bg=app.BG3)
         wrap.pack(fill='x', pady=(8, 0))
-        tk.Label(wrap, text=label, font=app.SANSS, bg=app.BG3, fg=app.FG2
+        tk.Label(wrap, text=label, font=self._sanss, bg=app.BG3, fg=app.FG2
                  ).pack(anchor='w')
         row = tk.Frame(wrap, bg=app.BG3)
         row.pack(fill='x', pady=(4, 0))
-        path_lbl = tk.Label(row, text=str(path), font=app.SANSS, bg=app.BG4, fg=app.FG2,
+        path_lbl = tk.Label(row, text=str(path), font=self._sanss, bg=app.BG4, fg=app.FG2,
                              anchor='w', justify='left', padx=8, pady=4, wraplength=300)
         path_lbl.pack(side='left', fill='x', expand=True)
         exists = Path(path).exists()
         open_btn = tk.Button(row, text="📂 Open" if exists else "📂 Open (not created yet)",
-                  font=app.SANSS, bg=app.BG4, fg=app.ACC if exists else app.FG2,
+                  font=self._sanss, bg=app.BG4, fg=app.ACC if exists else app.FG2,
                   relief='flat', padx=8, pady=4,
                   cursor='hand2' if exists else 'arrow',
                   state='normal' if exists else 'disabled',
@@ -339,7 +356,7 @@ class SettingsTab:
         tk.Frame(banner, bg=app.RED, width=4).pack(side='left', fill='y')
         inner = tk.Frame(banner, bg=app.BG4, padx=12, pady=6)
         inner.pack(side='left', fill='x', expand=True)
-        lbl = tk.Label(inner, text=f"⚠  {text}", font=app.SANSS, bg=app.BG4,
+        lbl = tk.Label(inner, text=f"⚠  {text}", font=self._sanss, bg=app.BG4,
                         fg=app.RED, justify='left', anchor='w')
         lbl.pack(fill='x', anchor='w')
         banner.bind('<Configure>', lambda e: lbl.configure(wraplength=max(e.width - 24, 100)))
@@ -376,13 +393,13 @@ class SettingsTab:
         dr = tk.Frame(body, bg=app.BG3)
         dr.pack(fill='x')
         self._vars['logs_root'] = tk.StringVar(value=app.cfg.get('logs_root', ''))
-        tk.Entry(dr, textvariable=self._vars['logs_root'], font=app.SANS, bg=app.BG4, fg=app.FG,
+        tk.Entry(dr, textvariable=self._vars['logs_root'], font=self._sans, bg=app.BG4, fg=app.FG,
             relief='flat', insertbackground=app.ACC).pack(side='left', fill='x', expand=True, ipady=4)
-        tk.Button(dr, text="📁  Browse", font=app.SANS, bg=app.BG4, fg=app.ACC,
+        tk.Button(dr, text="📁  Browse", font=self._sans, bg=app.BG4, fg=app.ACC,
             relief='flat', padx=8, pady=4, cursor='hand2',
             command=self._browse_dir).pack(side='left', padx=(6, 0))
         self._logs_root_warn = tk.Label(
-            body, text="", font=app.SANSS, bg=app.BG3, fg=app.YEL,
+            body, text="", font=self._sanss, bg=app.BG3, fg=app.YEL,
             wraplength=420, justify='left', anchor='w')
         self._logs_root_warn.pack(fill='x', pady=(6, 0))
         body.bind('<Configure>', lambda e: self._logs_root_warn.configure(wraplength=max(e.width - 8, 100)))
@@ -395,9 +412,9 @@ class SettingsTab:
         _, body = self._card(left, '🔄', 'Manual Update Check')
         tk.Label(body, text="P2P Monitor does not auto-update.\n"
                              "Updates are checked manually only and are not auto-installed.",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2, justify='left', anchor='w'
+                 font=self._sanss, bg=app.BG3, fg=app.FG2, justify='left', anchor='w'
                  ).pack(anchor='w', pady=(0, 8))
-        tk.Button(body, text="🔄  Check for Updates", font=app.SANSB,
+        tk.Button(body, text="🔄  Check for Updates", font=self._sansb,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=14, pady=6,
             cursor='hand2', command=app._check_for_update).pack(anchor='w')
         self._row_bool(body, "Pre-release / Beta Updates", 'beta_updates', default=False,
@@ -409,7 +426,7 @@ class SettingsTab:
                               "paint detection and matching.")
         snap_row = tk.Frame(body, bg=app.BG3)
         snap_row.pack(fill='x')
-        self._snap_lbl = tk.Label(snap_row, text="", font=app.SANSS, bg=app.BG3, fg=app.GREEN)
+        self._snap_lbl = tk.Label(snap_row, text="", font=self._sanss, bg=app.BG3, fg=app.GREEN)
 
         def _do_snap():
             self._snap_lbl.configure(text="⏳ Snapping...", fg=app.YEL)
@@ -423,7 +440,7 @@ class SettingsTab:
                         fg=app.GREEN if ok else app.RED)
                 app.after(0, _done)
             threading.Thread(target=_snap, daemon=True).start()
-        tk.Button(snap_row, text="🎯  Snap Paint Reference", font=app.SANSB,
+        tk.Button(snap_row, text="🎯  Snap Paint Reference", font=self._sansb,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=14, pady=6,
             cursor='hand2', command=_do_snap).pack(side='left')
         self._snap_lbl.pack(side='left', padx=12)
@@ -459,15 +476,15 @@ class SettingsTab:
         self._row_text(fields_col, "Server ID:",          'bot_server_id')
         self._row_text(fields_col, "Discord Mention ID:", 'mention_id')
 
-        self._bot_setup_lbl = tk.Label(status_col, text="", font=app.SANSS, bg=app.BG3,
+        self._bot_setup_lbl = tk.Label(status_col, text="", font=self._sanss, bg=app.BG3,
                                        fg=app.FG2, wraplength=220, justify='left', anchor='w')
         self._bot_setup_lbl.pack(anchor='w', pady=(0, 8))
         btn_row = tk.Frame(status_col, bg=app.BG3)
         btn_row.pack(anchor='w')
-        tk.Button(btn_row, text="🤖  Run Bot Setup", font=app.SANSB,
+        tk.Button(btn_row, text="🤖  Run Bot Setup", font=self._sansb,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,
             cursor='hand2', command=self._manual_bot_setup).pack(side='left')
-        tk.Button(btn_row, text="📖  Show Setup Guide", font=app.SANS,
+        tk.Button(btn_row, text="📖  Show Setup Guide", font=self._sans,
             bg=app.BG3, fg=app.FG2, relief='flat', padx=8, pady=6,
             cursor='hand2', command=self._show_setup_guide_modal).pack(side='left', padx=(8, 0))
 
@@ -504,7 +521,7 @@ class SettingsTab:
         self._row_text(wh_right, "Deaths Webhook:",    'webhook_deaths',  width_label=15)
         self._row_text(wh_right, "Level Up Webhook:",  'webhook_levelup', width_label=15)
 
-        tk.Button(body, text="⚡  Test Webhooks", font=app.SANSB,
+        tk.Button(body, text="⚡  Test Webhooks", font=self._sansb,
             bg=app.BG4, fg=app.ACC, relief='flat', padx=12, pady=6,
             cursor='hand2', command=self._test_webhooks).pack(anchor='w', pady=(8, 0))
 
@@ -525,15 +542,15 @@ class SettingsTab:
             ("Stops",   'monitor_script_stop'),
         ]:
             v = tk.BooleanVar(value=bool(app.cfg.get(ev_attr, True)))
-            tk.Checkbutton(script_row, text=ev_lbl, variable=v, font=app.SANS,
+            tk.Checkbutton(script_row, text=ev_lbl, variable=v, font=self._sans,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left', padx=(0, 12))
+                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0).pack(side='left', padx=(0, 12))
             self._vars[ev_attr] = v
         ping_se_var = tk.BooleanVar(value=bool(app.cfg.get('ping_script_event', True)))
         tk.Checkbutton(script_row, text="Ping for script events", variable=ping_se_var,
-            font=app.SANS, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
+            font=self._sans, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
             activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
-            cursor='hand2').pack(side='left', padx=(24, 0))
+            cursor='hand2', pady=0).pack(side='left', padx=(24, 0))
         self._vars['ping_script_event'] = ping_se_var
 
         # ── Per-event grid ───────────────────────────────────────────────────
@@ -545,13 +562,13 @@ class SettingsTab:
         tbl.columnconfigure(2, minsize=110)
         tbl.columnconfigure(3, minsize=90)
 
-        tk.Label(tbl, text="EVENT TYPE",  font=app.SANSB, bg=app.BG3, fg=app.ACC
+        tk.Label(tbl, text="EVENT TYPE",  font=self._sansb, bg=app.BG3, fg=app.ACC
                  ).grid(row=0, column=0, sticky='w')
-        tk.Label(tbl, text="NOTIFY",      font=app.SANSB, bg=app.BG3, fg=app.ACC
+        tk.Label(tbl, text="NOTIFY",      font=self._sansb, bg=app.BG3, fg=app.ACC
                  ).grid(row=0, column=1, sticky='w', padx=(8, 0))
-        tk.Label(tbl, text="SCREENSHOT",  font=app.SANSB, bg=app.BG3, fg=app.ACC
+        tk.Label(tbl, text="SCREENSHOT",  font=self._sansb, bg=app.BG3, fg=app.ACC
                  ).grid(row=0, column=2, sticky='w', padx=(8, 0))
-        tk.Label(tbl, text="PING",        font=app.SANSB, bg=app.BG3, fg=app.ACC
+        tk.Label(tbl, text="PING",        font=self._sansb, bg=app.BG3, fg=app.ACC
                  ).grid(row=0, column=3, sticky='w', padx=(8, 0))
 
         EVENT_ROWS = [
@@ -564,42 +581,42 @@ class SettingsTab:
             ("Level Ups", 'monitor_levelups', 'ss_event_levelup', 'ping_levelup'),
         ]
         for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
-            tk.Label(tbl, text=label, font=app.SANS, bg=app.BG3, fg=app.FG,
+            tk.Label(tbl, text=label, font=self._sans, bg=app.BG3, fg=app.FG,
                      anchor='w').grid(row=r, column=0, sticky='w', pady=2)
 
             notify_var = tk.BooleanVar(value=bool(app.cfg.get(notify_attr, True)))
-            tk.Checkbutton(tbl, variable=notify_var, font=app.SANS,
+            tk.Checkbutton(tbl, variable=notify_var, font=self._sans,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
                 ).grid(row=r, column=1, padx=(16, 0), pady=2)
             self._vars[notify_attr] = notify_var
 
             ss_var = tk.BooleanVar(value=bool(app.cfg.get(ss_attr, False)))
-            tk.Checkbutton(tbl, variable=ss_var, font=app.SANS,
+            tk.Checkbutton(tbl, variable=ss_var, font=self._sans,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
                 ).grid(row=r, column=2, padx=(16, 0), pady=2)
             self._vars[ss_attr] = ss_var
 
             ping_default = app.cfg.get(ping_attr, ping_attr in ('ping_error', 'ping_death'))
             ping_var = tk.BooleanVar(value=bool(ping_default))
-            tk.Checkbutton(tbl, variable=ping_var, font=app.SANS,
+            tk.Checkbutton(tbl, variable=ping_var, font=self._sans,
                 bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2'
+                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
                 ).grid(row=r, column=3, padx=(16, 0), pady=2)
             self._vars[ping_attr] = ping_var
 
         lvl_row = tk.Frame(body, bg=app.BG3)
         lvl_row.pack(fill='x', pady=(6, 0))
-        tk.Label(lvl_row, text="Notify every N levels:", font=app.SANS,
+        tk.Label(lvl_row, text="Notify every N levels:", font=self._sans,
                  bg=app.BG3, fg=app.FG2).pack(side='left')
         lev_var = tk.IntVar(value=int(app.cfg.get('levelup_every', 5)))
-        tk.Spinbox(lvl_row, from_=1, to=99, textvariable=lev_var, width=6, font=app.SANS,
+        tk.Spinbox(lvl_row, from_=1, to=99, textvariable=lev_var, width=6, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                    ).pack(side='left', padx=(8, 0))
         self._vars['levelup_every'] = lev_var
         tk.Label(lvl_row, text="  (total level milestones are always posted)",
-            font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(6, 0))
+            font=self._sanss, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(6, 0))
 
         # ── Hide paint overlay ───────────────────────────────────────────────
         _, body = self._card(inner, '🖌', 'Hide paint overlay during screenshot')
@@ -624,9 +641,9 @@ class SettingsTab:
             cell = tk.Frame(hp_table, bg=app.BG3)
             cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=2)
             var = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
-            tk.Checkbutton(cell, text=lbl, variable=var, font=app.SANSS,
+            tk.Checkbutton(cell, text=lbl, variable=var, font=self._sanss,
                 bg=app.BG3, fg=app.FG2, activebackground=app.BG3, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2').pack(side='left')
+                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0).pack(side='left')
             self._vars[key] = var
 
     # ── Page 4: Daily Summary ────────────────────────────────────────────────
@@ -641,14 +658,14 @@ class SettingsTab:
         row.pack(fill='x')
         left = tk.Frame(row, bg=app.BG2)
         left.pack(side='left', fill='x', expand=True)
-        tk.Label(left, text=icon, font=(app.SANS[0], 13), bg=app.BG2, fg=app.ACC
+        tk.Label(left, text=icon, font=(self._sans[0], 13), bg=app.BG2, fg=app.ACC
                  ).pack(side='left', anchor='n', padx=(0, 10))
         text_col = tk.Frame(left, bg=app.BG2)
         text_col.pack(side='left', fill='x', expand=True)
-        tk.Label(text_col, text=title, font=app.SANSB, bg=app.BG2, fg=app.FG,
+        tk.Label(text_col, text=title, font=self._sansb, bg=app.BG2, fg=app.FG,
                  anchor='w', justify='left').pack(fill='x', anchor='w')
         if subtitle:
-            tk.Label(text_col, text=subtitle, font=app.SANSS, bg=app.BG2, fg=app.FG2,
+            tk.Label(text_col, text=subtitle, font=self._sanss, bg=app.BG2, fg=app.FG2,
                      anchor='w', justify='left').pack(fill='x', anchor='w')
         control_col = tk.Frame(row, bg=app.BG2)
         control_col.pack(side='right')
@@ -665,9 +682,9 @@ class SettingsTab:
         def _ctrl_bool(attr, default):
             def build(parent_):
                 var = tk.BooleanVar(value=bool(app.cfg.get(attr, default)))
-                tk.Checkbutton(parent_, variable=var, font=app.SANS,
+                tk.Checkbutton(parent_, variable=var, font=self._sans,
                     bg=app.BG2, fg=app.FG, activebackground=app.BG2, activeforeground=app.ACC,
-                    selectcolor=app.BG3, relief='flat', cursor='hand2').pack()
+                    selectcolor=app.BG3, relief='flat', cursor='hand2', pady=0).pack()
                 self._vars[attr] = var
             return build
 
@@ -677,7 +694,7 @@ class SettingsTab:
 
         def _build_summary_time(parent_):
             var = tk.StringVar(value=str(app.cfg.get('summary_time', '22:00')))
-            tk.Entry(parent_, textvariable=var, font=app.SANS, bg=app.BG4, fg=app.FG,
+            tk.Entry(parent_, textvariable=var, font=self._sans, bg=app.BG4, fg=app.FG,
                       relief='flat', insertbackground=app.ACC, width=10
                      ).pack(ipady=4)
             self._vars['summary_time'] = var
@@ -695,7 +712,7 @@ class SettingsTab:
 
         def _build_ss_interval(parent_):
             var = tk.IntVar(value=int(app.cfg.get('screenshot_minutes', 60)))
-            tk.Spinbox(parent_, from_=5, to=1440, textvariable=var, width=8, font=app.SANS,
+            tk.Spinbox(parent_, from_=5, to=1440, textvariable=var, width=8, font=self._sans,
                        bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat').pack()
             self._vars['screenshot_minutes'] = var
         self._settings_row(card, '⏱', "Screenshot interval (minutes)",
@@ -718,23 +735,23 @@ class SettingsTab:
         self._row_bool(body, "Respect breaks on relaunch",
                        'auto_restart_respect_breaks', default=True)
 
-        tk.Label(body, text="Restart Delay", font=app.SANSB, bg=app.BG3, fg=app.FG
+        tk.Label(body, text="Restart Delay", font=self._sansb, bg=app.BG3, fg=app.FG
                  ).pack(anchor='w', pady=(6, 0))
         tk.Label(body, text="Restart delay (random within window, ignored when respecting breaks):",
-                 font=app.SANSS, bg=app.BG3, fg=app.FG2).pack(anchor='w', pady=(0, 6))
+                 font=self._sanss, bg=app.BG3, fg=app.FG2).pack(anchor='w', pady=(0, 6))
         delay_row = tk.Frame(body, bg=app.BG3)
         delay_row.pack(fill='x')
-        tk.Label(delay_row, text="Min minutes:", font=app.SANS, bg=app.BG3, fg=app.FG2
+        tk.Label(delay_row, text="Min minutes:", font=self._sans, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
         ar_min_var = tk.IntVar(value=int(app.cfg.get('auto_restart_min_minutes', 1)))
-        tk.Spinbox(delay_row, from_=0, to=1440, textvariable=ar_min_var, width=6, font=app.SANS,
+        tk.Spinbox(delay_row, from_=0, to=1440, textvariable=ar_min_var, width=6, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                    ).pack(side='left', padx=(6, 20))
         self._vars['auto_restart_min_minutes'] = ar_min_var
-        tk.Label(delay_row, text="Max minutes:", font=app.SANS, bg=app.BG3, fg=app.FG2
+        tk.Label(delay_row, text="Max minutes:", font=self._sans, bg=app.BG3, fg=app.FG2
                  ).pack(side='left')
         ar_max_var = tk.IntVar(value=int(app.cfg.get('auto_restart_max_minutes', 30)))
-        tk.Spinbox(delay_row, from_=1, to=1440, textvariable=ar_max_var, width=6, font=app.SANS,
+        tk.Spinbox(delay_row, from_=1, to=1440, textvariable=ar_max_var, width=6, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                    ).pack(side='left', padx=(6, 0))
         self._vars['auto_restart_max_minutes'] = ar_max_var
@@ -748,18 +765,18 @@ class SettingsTab:
 
         intv_row = tk.Frame(body, bg=app.BG3)
         intv_row.pack(fill='x', pady=(4, 4))
-        tk.Label(intv_row, text="Check interval:", font=app.SANS,
+        tk.Label(intv_row, text="Check interval:", font=self._sans,
                  bg=app.BG3, fg=app.FG2).pack(side='left')
         intv_h_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_hours', 6)))
-        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=app.SANS,
+        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                    ).pack(side='left', padx=(8, 2))
-        tk.Label(intv_row, text="h", font=app.SANS, bg=app.BG3, fg=app.FG2).pack(side='left')
+        tk.Label(intv_row, text="h", font=self._sans, bg=app.BG3, fg=app.FG2).pack(side='left')
         intv_m_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_minutes', 0)))
-        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=app.SANS,
+        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=self._sans,
                    bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
                    ).pack(side='left', padx=(6, 2))
-        tk.Label(intv_row, text="m   (min: 1m | default: 6h 0m)", font=app.SANSS,
+        tk.Label(intv_row, text="m   (min: 1m | default: 6h 0m)", font=self._sanss,
                  bg=app.BG3, fg=app.FG2).pack(side='left', padx=(2, 0))
         self._vars['update_check_interval_hours']   = intv_h_var
         self._vars['update_check_interval_minutes'] = intv_m_var
@@ -884,7 +901,7 @@ class SettingsTab:
 
         header = tk.Frame(win, bg=app.BG2, padx=16, pady=12)
         header.pack(fill='x')
-        tk.Label(header, text="ⓘ  Bot Setup Instructions & Permissions", font=app.SANSB,
+        tk.Label(header, text="ⓘ  Bot Setup Instructions & Permissions", font=self._sansb,
                  bg=app.BG2, fg=app.FG).pack(anchor='w')
 
         body_outer = tk.Frame(win, bg=app.BG2, padx=16)
@@ -911,7 +928,7 @@ class SettingsTab:
         canvas.bind('<Enter>', _on_enter)
         canvas.bind('<Leave>', _on_leave)
 
-        tk.Label(inner, justify='left', anchor='w', font=app.SANSS, bg=app.BG3, fg=app.FG2,
+        tk.Label(inner, justify='left', anchor='w', font=self._sanss, bg=app.BG3, fg=app.FG2,
             text="Setup:\n"
                  "1. discord.com/developers/home → New Application → Bot → Reset Token → copy it → paste in Bot Token above\n"
                  "2. Privileged Gateway Intents → enable MESSAGE CONTENT INTENT\n"
@@ -933,7 +950,7 @@ class SettingsTab:
 
         footer = tk.Frame(win, bg=app.BG2, padx=16, pady=12)
         footer.pack(fill='x', side='bottom')
-        tk.Button(footer, text="Close", font=app.SANSB, bg=app.BG4, fg=app.ACC,
+        tk.Button(footer, text="Close", font=self._sansb, bg=app.BG4, fg=app.ACC,
                   relief='flat', padx=14, pady=6, cursor='hand2',
                   command=win.destroy).pack(side='right')
 

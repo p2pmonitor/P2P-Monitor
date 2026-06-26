@@ -54,15 +54,26 @@ class MonitorTab:
 
     def on_tab_shown(self):
         """Called when the Monitor tab is selected. Active Accounts/
-        Highlights otherwise only ever refresh reactively (debounced,
-        after a live event arrives via App._debounced_refresh_tick) —
-        during a quiet period with no new events, that card could keep
-        showing whatever was true at construction time indefinitely, even
-        though Status, which queries the same underlying watcher state on
-        demand via its own on_tab_shown(), would show the truth
-        immediately. This makes Monitor do the same on-demand query Status
-        already does, from the exact same source (get_account_rows())."""
+        Highlights/Max Progress otherwise only ever refresh reactively —
+        Active Accounts/Highlights debounced after a live event (via
+        App._debounced_refresh_tick), and Max Progress only at Monitor's
+        own construction plus whenever Goals & Maxing's "Refresh WOM"
+        button is clicked (it calls refresh_max_progress() directly) —
+        there was no path that re-pulled the WOM cache just from switching
+        into Monitor. During a quiet period with no new events and no
+        manual WOM refresh, both cards could keep showing whatever was
+        true at construction time indefinitely (Max Progress in
+        particular: a WOM cache that gets populated by something other
+        than this exact app instance's own startup moment — e.g. a cache
+        file that already existed from an earlier session — would only
+        ever show up after that explicit Refresh WOM click), even though
+        Status, which queries the same underlying watcher state on demand
+        via its own on_tab_shown(), would show the truth immediately. This
+        makes Monitor do the same on-demand refresh Status already does."""
+        if self.app.cfg.get('debug', False):
+            self.app._log('🔍 Monitor.on_tab_shown() fired — refreshing highlights + max progress')
         self.refresh_highlights()
+        self.refresh_max_progress()
 
     # ── Build ──────────────────────────────────────────────────────────────────
     def _build(self, f):
@@ -293,14 +304,21 @@ class MonitorTab:
         def _do():
             best, last99 = None, None
             try:
-                from py.wom import load_wom_cache, compute_account_summary, determine_last_99
+                from py.wom import load_wom_cache, compute_account_summary, determine_last_99, WOM_CACHE_FILE
                 try:
                     cache = load_wom_cache()
                 except Exception:
                     cache = {'accounts': {}}
-                for account, entry in cache.get('accounts', {}).items():
+                accounts_in_cache = cache.get('accounts', {})
+                if app.cfg.get('debug', False):
+                    self.app._log(f'🔍 Max Progress: WOM_CACHE_FILE={WOM_CACHE_FILE} '
+                                   f'exists={WOM_CACHE_FILE.exists()} '
+                                   f'accounts_in_cache={list(accounts_in_cache.keys())}')
+                for account, entry in accounts_in_cache.items():
                     skills = entry.get('skills') or {}
                     if not skills:
+                        if app.cfg.get('debug', False):
+                            self.app._log(f'🔍 Max Progress: {account} has no skills in cache, skipping')
                         continue
                     try:
                         summary = compute_account_summary(account, app.cfg, skills)
@@ -321,9 +339,16 @@ class MonitorTab:
                         continue
                     ttm = summary.get('time_to_max_hours')
                     if not ttm or ttm <= 0:
+                        if app.cfg.get('debug', False):
+                            self.app._log(f'🔍 Max Progress: {account} has no usable '
+                                           f'time_to_max_hours ({ttm}), not a candidate')
                         continue
                     if best is None or ttm < best['time_to_max_hours']:
                         best = summary
+
+                if app.cfg.get('debug', False):
+                    self.app._log(f'🔍 Max Progress: decided best='
+                                   f'{best.get("account") if best else None}')
 
                 if best:
                     account = best['account']
