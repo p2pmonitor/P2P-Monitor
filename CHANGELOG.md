@@ -1,5 +1,68 @@
 # Changelog
 
+## v2.0.0
+### Stable release
+
+**1. Status tab: the actual blank Mute button bug, found and fixed.** Root
+cause confirmed directly in the live code: `_flash_row()` (the brief
+highlight when a row updates) forces every child widget's background to
+`app.ACC`, including both action buttons. `_restore_row_bg()` deliberately
+excluded `mute_btn` from the generic restore loop (its background is
+always `app.BG4` regardless of mute state, never the generic row
+background) — but nothing ever restored it afterward at all. Left at
+`bg=app.ACC` with `fg=app.ACC` in the unmuted state, foreground equals
+background, which is exactly what made the text disappear. `ss_btn`
+(Screenshot) was never returned from `_build_row()` in the first place,
+so it couldn't even be referenced for the same fix. Fixed both: `_build_row()`
+now returns `screenshot_btn` too, and `_restore_row_bg()` explicitly
+restores both buttons to `app.BG4` after excluding them from the generic
+loop. Reproduced the exact bug mechanism in an isolated test (forces the
+flash, confirms both buttons really do land on `app.ACC`, confirms the
+fix brings them back to `app.BG4` with foreground no longer equal to
+background) before trusting it was fixed.
+
+**2. Privacy/identifying-info sweep.** Full repo sweep for real account
+names, usernames, Discord IDs/webhook URLs, and file paths containing a
+real name — checked code, comments, README, and the entire CHANGELOG
+history. Found and fixed one: a real account name used as an example in
+a beta.21 CHANGELOG entry, replaced with a generic placeholder. Webhook
+URL patterns found are all dynamically-constructed code (f-strings
+referencing config values), not hardcoded real tokens. No Discord
+snowflake IDs, email addresses, or real Windows usernames found anywhere
+— the few `C:\Users\...` references in README/CHANGELOG were already
+generic placeholders (`<you>`/`<user>`).
+
+**3. README accuracy pass.** Fixed a stale claim that directly
+contradicted a real, shipped behavior change: "filterable by date range
+(up to 7 days)" — the 7-day cap was removed several versions ago. Added
+two entirely missing feature sections: Stats Overview (daily levels
+chart, skill/account breakdowns, filters) and Goals & Maxing (the Wise
+Old Man integration — time-to-max, time-to-99, Last 99 Achieved with
+Combat correctly excluded, editable XP rates) — both substantial,
+already-shipped feature areas that had no README coverage at all before
+this pass.
+
+**4. Version: beta tag dropped.** `VERSION` is now `"2.0.0"`. Checked the
+self-updater's own version-comparison logic (`_ver_tuple()`) before
+making this change — its regex already treats the `-beta.N` suffix as
+optional and explicitly ranks a stable version above any beta of the
+same major.minor.patch, so no code changes were needed there; this was
+purely a string change.
+
+**Validated:** `python3 -m compileall -q p2p_monitor.py py ui` clean;
+`pyflakes` zero new warnings. 153 checks across 25 test scripts (1 new
+this pass, reproducing the exact mute-button bug mechanism and
+confirming the fix). Full repeat of the existing regression suite after
+every change in this entry.
+
+**Files changed:** `p2p_monitor.py` (version: stable, no beta suffix),
+`ui/status_tab.py` (the mute-button fix), `README.md` (stale 7-day
+reference, new Stats/Goals & Maxing sections), `CHANGELOG.md` (this
+entry, plus the one redacted account name from a prior entry).
+`update_manifest.txt`/`install.sh` unchanged — no new files added.
+
+---
+
 ## v2.0.0-beta.22
 ### Status alignment (real fix this time), Settings Windows/Linux font split, Max Progress diagnostics
 
@@ -235,7 +298,7 @@ every time, with minsize still enforced as the resize floor.
 
 **3. Highlights row format.** Previously inconsistent: Latest Task/Last
 Level Up/Latest Drop never showed an account at all, while Last Error/
-Last 99 Achieved buried it inside the time line ("AccountName • 2d ago").
+Last 99 Achieved buried it inside the time line ("SomeAccount • 2d ago").
 Every highlight tile now consistently shows tile name → account → info →
 time as four separate lines, account included on every tile (data was
 always there — `app._highlights[key]['account']` is populated for every

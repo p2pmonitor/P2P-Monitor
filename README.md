@@ -71,9 +71,21 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Level 99 detection: special "🎆 Level 99! 🎆" embed title, always notifies regardless of the level-up interval
 - Repeated related failures (e.g. multiple farming lock failures at once) are grouped into one alert instead of spamming separate messages
 
+### Stats — levels overview
+- Daily Levels Gained chart, Levels by Skill breakdown, and Top Accounts — filterable by account, skill, and date range (today, 7/30 days, 1 year, all time, or a custom range)
+- Built entirely from local event history — no external API calls
+
+### Stats — Goals & Maxing (Wise Old Man integration)
+- Per-account and all-accounts skill progress, pulled from the [Wise Old Man](https://wiseoldman.net) API (`Refresh WOM` button) and cached locally between refreshes
+- Time-to-max estimate per account, computed from current XP and per-skill XP/hr rates
+- Closest-to-99 and time-remaining estimate per skill
+- "Last 99 Achieved" — combines local event history with the WOM cache; Combat is intentionally excluded since it's a derived/composite level, not a real trainable skill
+- XP/hr rates are editable defaults (`Edit XP Rates`), globally or per account — not fetched from WOM, since WOM does not report personal rates
+- If your DreamBot account name differs from your WOM username, set the override in the account's Goals & Maxing page
+
 ### Event history
 - Persists every event to a local JSONL file per account
-- History tab shows a 24-hour rolling view, filterable by date range (up to 7 days)
+- History tab shows a 24-hour rolling view by default, with a custom date-range filter (any range, no maximum) plus quick presets (today, 7 days, 30 days, all time)
 - **Runtime Stats** button per account: shows total running time, active play time, break time, and break % — filterable by all-time, today, 7 days, or 30 days
 - Backfill: on startup, re-reads DreamBot log files to populate history without re-pinging Discord
 

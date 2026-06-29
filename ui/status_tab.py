@@ -323,7 +323,7 @@ class StatusTab:
 
         return {'frame': row, 'task': task_lbl, 'activity': activity_lbl,
                 'uptime': uptime_lbl, 'break_time': break_lbl, 'badge': badge,
-                'mute_btn': mute_btn}
+                'mute_btn': mute_btn, 'screenshot_btn': ss_btn}
 
     # ── Actions ────────────────────────────────────────────────────────────────────
     def _on_mute_click(self, account):
@@ -368,14 +368,28 @@ class StatusTab:
         w = self._row_widgets.get(account)
         if not w:
             return
+        app = self.app
         try:
             w['frame'].configure(bg=bg)
             for child in w['frame'].winfo_children():
                 try:
-                    if child not in (w['badge'], w['mute_btn']):
+                    if child not in (w['badge'], w['mute_btn'], w.get('screenshot_btn')):
                         child.configure(bg=bg)
                 except tk.TclError:
                     pass
+
+            # Restore action buttons after flash so their text never stays
+            # invisible — _flash_row() forces every child's bg to app.ACC,
+            # and these two were deliberately excluded from the loop above
+            # (their background is always app.BG4 regardless of mute
+            # state, never the generic row bg), but nothing previously
+            # restored them afterward at all. mute_btn's fg can itself be
+            # app.ACC (unmuted state) — left at bg=app.ACC, that's
+            # foreground-equals-background, which is what made the text
+            # disappear.
+            w['mute_btn'].configure(bg=app.BG4)
+            if w.get('screenshot_btn'):
+                w['screenshot_btn'].configure(bg=app.BG4)
         except Exception:
             pass
 
