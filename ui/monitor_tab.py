@@ -253,20 +253,26 @@ class MonitorTab:
         card = self._card(parent, "MAX PROGRESS", '🏆')
         tk.Label(card, text="Closest to max", font=app.SANSS, bg=app.BG3, fg=app.FG2
                  ).pack(anchor='w')
+
         self._mp_account_lbl = tk.Label(card, text="No WOM data yet", font=(app.SANS[0], 12, 'bold'),
                                          bg=app.BG3, fg=app.FG, cursor='hand2', anchor='w',
                                          wraplength=172, justify='left')
         self._mp_account_lbl.pack(anchor='w', pady=(1, 2), fill='x')
+
         self._mp_99_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.FG2,
                                     anchor='w', wraplength=172, justify='left')
         self._mp_99_lbl.pack(anchor='w', fill='x')
+
         self._mp_time_lbl = tk.Label(card, text="", font=app.SANSS, bg=app.BG3, fg=app.ACC,
                                       anchor='w', wraplength=172, justify='left')
         self._mp_time_lbl.pack(anchor='w', pady=(0, 2), fill='x')
+
         self._mp_bar_bg = tk.Frame(card, bg=app.BG4, height=5)
         self._mp_bar_bg.pack(fill='x', pady=(0, 3))
+
         self._mp_bar_fill = tk.Frame(self._mp_bar_bg, bg=app.GREEN, height=5, width=0)
         self._mp_bar_fill.place(x=0, y=0)
+
         self._mp_note_lbl = tk.Label(card, text="No WOM data yet", font=app.SANSS,
                                       bg=app.BG3, fg=app.FG2, anchor='w')
         self._mp_note_lbl.pack(anchor='w', fill='x')
@@ -285,64 +291,61 @@ class MonitorTab:
     def refresh_max_progress(self):
         """
         Reads ONLY the on-disk WOM cache — never calls the WOM API. The
-        actual file read + computation runs on a background thread (cheap
-        in practice, but file I/O has no business on the Tk main thread
-        regardless). "Closest to max" = the cached account with the
-        lowest nonzero computed time-to-max; an account with no usable
-        rate data anywhere just isn't a candidate.
+        actual file read + computation runs on a background thread.
 
-        For the winning account's "Last 99", uses
-        py.wom.determine_last_99() the same way Goals & Maxing does:
-        a real history levelup event wins if one exists, falling back to
-        WOM cache data (labeled "from WOM cache", since cache only knows
-        a skill IS at 99, never when) — never the bare "any cached skill
-        at/above the 99 XP threshold" check this used before. The history
-        read for just this one account happens inside this same
-        already-backgrounded thread, so it adds no new main-thread risk.
+        "Closest to max" still means the cached account with the lowest
+        nonzero computed time-to-max.
+
+        The card then displays that winning account's next 99, using
+        compute_account_summary()['closest_99'].
         """
         app = self.app
+
         def _do():
-            best, last99 = None, None
+            best = None
+
             try:
-                from py.wom import load_wom_cache, compute_account_summary, determine_last_99, WOM_CACHE_FILE
+                from py.wom import load_wom_cache, compute_account_summary, WOM_CACHE_FILE
+
                 try:
                     cache = load_wom_cache()
                 except Exception:
                     cache = {'accounts': {}}
+
                 accounts_in_cache = cache.get('accounts', {})
+
                 if app.cfg.get('debug', False):
                     self.app._log(f'🔍 Max Progress: WOM_CACHE_FILE={WOM_CACHE_FILE} '
                                    f'exists={WOM_CACHE_FILE.exists()} '
                                    f'accounts_in_cache={list(accounts_in_cache.keys())}')
+
                 for account, entry in accounts_in_cache.items():
                     skills = entry.get('skills') or {}
+
                     if not skills:
                         if app.cfg.get('debug', False):
                             self.app._log(f'🔍 Max Progress: {account} has no skills in cache, skipping')
                         continue
+
                     try:
                         summary = compute_account_summary(account, app.cfg, skills)
                     except Exception as e:
                         # One malformed/legacy-shaped cache entry must never
-                        # take down every other account's computation — this
-                        # loop previously had no try/except here at all, so a
-                        # single bad entry would crash this whole background
-                        # thread silently (daemon thread, uncaught exception
-                        # just kills it), leaving the UI stuck on its initial
-                        # "No WOM data yet" state forever even though the
-                        # cache file itself was read successfully. That's
-                        # indistinguishable from "no cache" in the UI, which
-                        # is the reported symptom.
+                        # take down every other account's computation.
                         if app.cfg.get('debug', False):
                             self.app._log(f'⚠ Max Progress: skipping {account}, '
                                            f'compute_account_summary failed: {e}')
                         continue
+
                     ttm = summary.get('time_to_max_hours')
+
                     if not ttm or ttm <= 0:
                         if app.cfg.get('debug', False):
                             self.app._log(f'🔍 Max Progress: {account} has no usable '
                                            f'time_to_max_hours ({ttm}), not a candidate')
                         continue
+
+                    # Keep original behavior: choose the account closest to max.
                     if best is None or ttm < best['time_to_max_hours']:
                         best = summary
 
@@ -350,30 +353,20 @@ class MonitorTab:
                     self.app._log(f'🔍 Max Progress: decided best='
                                    f'{best.get("account") if best else None}')
 
-                if best:
-                    account = best['account']
-                    try:
-                        from py.stats import load_levelup_rows
-                        from py.history import _parse_ts
-                        rows99 = [{'value': r['skill'], 'activity': '99', '_ts_epoch': _parse_ts(r['time'])}
-                                  for r in load_levelup_rows(accounts=[account]) if r['level'] == 99]
-                    except Exception:
-                        rows99 = []
-                    acc_skills = cache.get('accounts', {}).get(account, {}).get('skills') or {}
-                    last99 = determine_last_99(rows99, acc_skills)
             except Exception as e:
                 # Outermost safety net: whatever happened, the UI must still
-                # get an update (falling back to "no data") rather than the
-                # thread just vanishing and the card staying stuck forever.
+                # get an update rather than the thread silently vanishing.
                 if app.cfg.get('debug', False):
                     self.app._log(f'⚠ Max Progress: refresh failed unexpectedly: {e}')
-                best, last99 = None, None
+                best = None
 
-            app.after(0, lambda: self._apply_max_progress(best, last99))
+            app.after(0, lambda: self._apply_max_progress(best))
+
         threading.Thread(target=_do, daemon=True).start()
 
-    def _apply_max_progress(self, best, last99=None):
+    def _apply_max_progress(self, best):
         app = self.app
+
         if not best:
             self._mp_account_lbl.configure(text="No WOM data yet", fg=app.FG2)
             self._mp_99_lbl.configure(text="")
@@ -381,27 +374,35 @@ class MonitorTab:
             self._mp_bar_fill.place_configure(width=0)
             self._mp_note_lbl.configure(text="Open Stats → Goals & Maxing")
             return
+
         from py.wom import format_hours_compact
+
+        # This remains the account closest to max.
         self._mp_account_lbl.configure(text=best['account'], fg=app.ACC)
-        if last99:
-            source_text = self._ago(last99['ts']) if last99['ts'] else 'from WOM cache'
-            self._mp_99_lbl.configure(text=f"Last 99: {last99['skill']}  •  {source_text}")
+
+        # This is the winning/closest next 99 for that same account.
+        next99 = best.get('closest_99')
+
+        if next99:
+            self._mp_99_lbl.configure(text=f"Next 99: {next99['skill']}")
+            self._mp_time_lbl.configure(text=f"ETA: {format_hours_compact(next99['hours_to_99'])}")
         else:
-            self._mp_99_lbl.configure(text="Last 99: —")
-        ttm = best['time_to_max_hours']
-        self._mp_time_lbl.configure(text=f"Time left: {format_hours_compact(ttm)}")
+            self._mp_99_lbl.configure(text="Next 99: —")
+            self._mp_time_lbl.configure(text="ETA: —")
+
         # Progress bar: rough share of total levels already at 99, just a
         # quick visual cue, not a precise XP-weighted progress metric.
         achieved = sum(1 for e in best['per_skill'] if e['status'] == 'achieved')
         eligible = sum(1 for e in best['per_skill'] if e['status'] in ('achieved', 'active'))
         frac = (achieved / eligible) if eligible else 0
+
         try:
             bar_w = self._mp_bar_bg.winfo_width() or 200
         except Exception:
             bar_w = 200
-        self._mp_bar_fill.place_configure(width=max(2, int(bar_w * frac)))
-        self._mp_note_lbl.configure(text="WOM cached")
 
+        self._mp_bar_fill.place_configure(width=max(2, int(bar_w * frac)))
+        self._mp_note_lbl.configure(text=f"Time to max: {format_hours_compact(best['time_to_max_hours'])}")
     # ── Stat strip ────────────────────────────────────────────────────────────────
     def _build_stat_strip(self, parent):
         app = self.app
