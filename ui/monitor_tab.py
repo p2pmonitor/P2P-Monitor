@@ -390,11 +390,44 @@ class MonitorTab:
             self._mp_99_lbl.configure(text="Next 99: —")
             self._mp_time_lbl.configure(text="ETA: —")
 
-        # Progress bar: rough share of total levels already at 99, just a
-        # quick visual cue, not a precise XP-weighted progress metric.
-        achieved = sum(1 for e in best['per_skill'] if e['status'] == 'achieved')
-        eligible = sum(1 for e in best['per_skill'] if e['status'] in ('achieved', 'active'))
-        frac = (achieved / eligible) if eligible else 0
+        # Progress bar: time-based max progress.
+        #
+        # Uses the same per-skill rates already resolved by compute_account_summary().
+        # That means defaults, global overrides, and account overrides are all respected.
+        #
+        # Formula:
+        #   total_theoretical_time = sum(1 -> 99 hours for every active/achieved skill)
+        #   remaining_time         = best['time_to_max_hours']
+        #   progress               = 1 - remaining_time / total_theoretical_time
+        try:
+            from py.wom import LEVEL_99_XP
+
+            total_theoretical_hours = 0.0
+
+            for e in best['per_skill']:
+                # Match Time-to-Max behavior: only skills that are part of the
+                # active maxing plan count. Excluded combat skills stay excluded.
+                if e['status'] not in ('active', 'achieved'):
+                    continue
+
+                xp_hr = e.get('xp_hr') or 0
+                if xp_hr <= 0:
+                    continue
+
+                # Full theoretical 1 -> 99 time for this skill using the
+                # resolved rate for this account.
+                total_theoretical_hours += LEVEL_99_XP / xp_hr
+
+            remaining_hours = best.get('time_to_max_hours') or 0
+
+            if total_theoretical_hours > 0:
+                frac = 1 - (remaining_hours / total_theoretical_hours)
+                frac = max(0, min(1, frac))
+            else:
+                frac = 0
+
+        except Exception:
+            frac = 0
 
         try:
             bar_w = self._mp_bar_bg.winfo_width() or 200

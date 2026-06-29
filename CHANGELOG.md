@@ -1,5 +1,8 @@
 # Changelog
 
+## v2.0.2
+### Fixed progress bar under Max Progress
+
 ## v2.0.1
 ### Updated WOM default XP rates for more accurate time to max. Also changed Max progress tile to be next 99 instead of last 99.
 
