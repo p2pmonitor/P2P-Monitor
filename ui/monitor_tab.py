@@ -638,8 +638,8 @@ class MonitorTab:
     # which has padx=12): dot + time render before the first stop; \t jumps
     # to ACCOUNT, EVENT, MESSAGE. Header labels are placed at matching x
     # offsets so the column titles line up with the content.
-    _LOG_TABS       = ('88', '215', '305')
-    _LOG_HDR_XS     = ((30, 'TIME'), (100, 'ACCOUNT'), (227, 'EVENT'), (317, 'MESSAGE'))
+    _LOG_TABS       = ('88', '192', '258')
+    _LOG_HDR_XS     = ((30, 'TIME'), (100, 'ACCOUNT'), (204, 'EVENT'), (270, 'MESSAGE'))
     LOG_BADGES      = {
         'error': 'ERROR', 'warn': 'WARN', 'quest': 'QUEST', 'task': 'TASK',
         'chat': 'CHAT', 'drop': 'DROP', 'death': 'DEATH', 'levelup': 'LEVEL UP',

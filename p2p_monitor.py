@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.1.0"
+VERSION      = "2.1.1"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -399,6 +399,16 @@ class App(tk.Tk):
                 t.delete('1.0', f'{line_count - 1800}.0')
             line_start = t.index('end-1c')
             ts = datetime.now().strftime('%H:%M:%S')
+            # Separator-only messages (the '=' * 60 session divider) would
+            # wrap into two ugly lines in the column layout — render them as
+            # one short muted rule instead, no dot/time/badge columns.
+            stripped = msg.strip()
+            if len(stripped) >= 10 and set(stripped) <= {'=', '-'}:
+                t.insert('end', '─' * 44 + '\n', 'ts')
+                t.tag_add('cat_other', line_start, 'end')
+                t.configure(state='disabled')
+                t.see('end')
+                return
             # ── Classify (same emoji rules as before) ──────────────────────
             if any(x in msg for x in ['❌', '🚫']):               tag = 'error'
             elif '⚠' in msg:                                        tag = 'warn'

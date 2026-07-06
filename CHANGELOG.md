@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.1.1
+
+### Fixed
+
+**1. Slash command registration no longer fails on Discord rate limits.**
+Startup could leave commands (/max, /wom, /train, /relaunch, ...) permanently
+unregistered when Discord returned HTTP 429 during the one-POST-per-command
+registration loop — each 429 was logged as a hard failure and the loop kept
+hammering the remaining commands. Registration is now a single bulk-overwrite
+call (PUT .../guilds/{guild}/commands with the full command array), which
+syncs the whole set atomically in one request and removes stale commands in
+the same call. On HTTP 429 the retry_after value is parsed from the response,
+slept out (plus 0.25-0.75s jitter, capped at 30s per wait), and the same
+request is retried — bounded at 6 attempts, never a rapid loop, with clear
+log lines ("Rate limited registering slash commands — retrying in 1.9s",
+"Slash command registration complete"). A SHA-256 fingerprint of the
+registered set (app id + guild id + full command JSON) is persisted in config
+(_slash_commands_hash) after a successful sync; when nothing has changed,
+subsequent monitor starts and internal bot reconnects skip registration
+entirely instead of re-registering an unchanged set. Non-429 errors (e.g.
+missing permissions) still fail immediately with the real error, and the
+fingerprint is only saved on success so the next start retries.
+
+**2. Event Log column spacing.**
+EVENT sits closer to ACCOUNT and MESSAGE starts further left (tab stops
+88/215/305 → 88/192/258), giving the message column ~47px more room.
+
+**3. Event Log separator lines.**
+The '=' * 60 session divider wrapped into two lines under the new column
+layout. Separator-only messages now render as a single short muted rule with
+no dot/time/badge columns.
+
+### Files changed
+p2p_monitor.py, py/discord.py, py/watcher.py, ui/monitor_tab.py,
+CHANGELOG.md
+
 ## v2.1.0
 
 ### New features

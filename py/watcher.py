@@ -306,6 +306,7 @@ class LogWatcher:
                 'on_relaunch_all': self._on_relaunch_all_cb,
                 'is_running':    lambda: self._running,
                 'get_cfg':       lambda: self.cfg,
+                'save_cfg':      self._save_cfg,
             })
             runner.bot_ready = self._bot_ready  # share the same event
             self._bot_thread = threading.Thread(target=runner.run, daemon=True)

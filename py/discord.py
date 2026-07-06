@@ -1557,21 +1557,85 @@ class GatewayRunner:
         data, _ = bot_api(token, 'GET', '/oauth2/applications/@me')
         return data.get('id') if data else None
 
+    def _commands_hash(self, app_id, server_id):
+        """Stable fingerprint of the full command set for this app + guild.
+        Any change to COMMANDS (or a different app/server) changes the hash;
+        an unchanged hash means the guild already has exactly this set."""
+        import hashlib
+        blob = json.dumps({'app': app_id, 'guild': server_id,
+                           'commands': self.COMMANDS},
+                          sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(blob.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _parse_retry_after(err_str):
+        """Extract Discord's retry_after (seconds, float) from a 429 error
+        body. Returns None if the error is not a rate limit."""
+        if not err_str or 'HTTP 429' not in err_str:
+            return None
+        import re as _re
+        m = _re.search(r'"retry_after"\s*:\s*([0-9.]+)', err_str)
+        try:
+            return float(m.group(1)) if m else 1.0
+        except (ValueError, TypeError):
+            return 1.0
+
     def _register_commands(self, token, app_id):
+        """Sync slash commands for the configured guild.
+
+        Rate-limit safe by design:
+          • One bulk-overwrite call (PUT .../commands with the full array)
+            replaces the whole command set atomically — a single request
+            instead of one POST per command, so there is nothing to hammer
+            and stale/removed commands are cleaned up in the same call.
+          • HTTP 429 is never treated as a permanent failure: retry_after is
+            parsed from the response, we sleep it out (plus a little jitter)
+            and retry the same request. No rapid retry loop — attempts are
+            bounded and each one waits Discord's own requested delay.
+          • A fingerprint of the registered set is persisted; when nothing
+            has changed since the last successful sync for this app + guild,
+            registration is skipped entirely — monitor restarts and internal
+            bot reconnects don't re-register an unchanged command set.
+        """
+        import random
+
         server_id = self.cfg.get('bot_server_id', '').strip()
         if not server_id:
             self.cb['log']("🤖 No Server ID — slash commands not registered")
             return
-        path      = f'/applications/{app_id}/guilds/{server_id}/commands'
-        ok_count  = 0
-        fail_count = 0
-        for cmd in self.COMMANDS:
-            _, err = bot_api(token, 'POST', path, cmd)
+
+        current_hash = self._commands_hash(app_id, server_id)
+        if self.cfg.get('_slash_commands_hash') == current_hash:
+            self.cb['log']("🤖 Slash commands unchanged — skipping registration")
+            return
+
+        path = f'/applications/{app_id}/guilds/{server_id}/commands'
+        max_attempts = 6
+        for attempt in range(1, max_attempts + 1):
+            _, err = bot_api(token, 'PUT', path, self.COMMANDS)
             if not err:
-                ok_count += 1
-            else:
-                fail_count += 1
-                self.cb['log'](f"🤖 Failed to register /{cmd['name']}: {err}")
-        if fail_count:
-            self.cb['log'](f"🤖 {fail_count} slash command(s) failed to register in guild {server_id}")
+                self.cfg['_slash_commands_hash'] = current_hash
+                save_cfg = self.cb.get('save_cfg')
+                if save_cfg:
+                    try:
+                        save_cfg()
+                    except Exception:
+                        pass  # hash stays in the live cfg; persists on next save
+                self.cb['log'](
+                    f"🤖 Slash command registration complete — "
+                    f"{len(self.COMMANDS)} commands synced")
+                return
+            retry_after = self._parse_retry_after(err)
+            if retry_after is None:
+                # Real failure (permissions, bad payload, …) — not a rate limit.
+                self.cb['log'](f"🤖 Slash command registration failed: {err}")
+                return
+            if attempt == max_attempts:
+                break
+            wait = min(retry_after, 30.0) + random.uniform(0.25, 0.75)
+            self.cb['log'](f"🤖 Rate limited registering slash commands — "
+                           f"retrying in {wait:.1f}s")
+            time.sleep(wait)
+        self.cb['log'](f"🤖 Slash command registration still rate limited after "
+                       f"{max_attempts} attempts — will retry on next monitor start")
 
