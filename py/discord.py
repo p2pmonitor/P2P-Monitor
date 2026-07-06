@@ -838,6 +838,137 @@ class DiscordRouter:
                 self._cb['log'](f"  🚫 Discord failed: {err}")
 
 
+# ── /stats, /max, /wom refresh backend helpers ────────────────────────────────
+# Pure py.wom-backed — reads the same cache and uses the same calculations the
+# Stats/Goals UI does. No Tkinter dependency; safe to run on executor threads.
+
+_wom_refresh_lock = threading.Lock()
+_wom_last_refresh_ts = {}          # account -> monotonic ts of last refresh
+_WOM_REFRESH_COOLDOWN_SECS = 60
+
+
+def _wom_entry_for(account):
+    """(entry, age_str) from the WOM cache for an account, or (None, '')."""
+    from py.wom import load_wom_cache
+    cache = load_wom_cache()
+    entry = (cache.get('accounts') or {}).get(account)
+    if not entry or not entry.get('skills'):
+        return None, ''
+    ts = entry.get('last_refresh_ts')
+    age = ''
+    if ts:
+        mins = max(0, int((time.time() - ts) // 60))
+        age = (f'{mins}m ago' if mins < 120 else f'{mins // 60}h ago')
+    return entry, age
+
+
+def _wom_stats_text(account, view, cfg):
+    """Build the /stats or /max reply text for one account."""
+    from py.wom import (compute_account_summary, format_hours_compact,
+                        format_days, DEFAULT_WOM_RATES)
+    entry, age = _wom_entry_for(account)
+    if entry is None:
+        return (f'⚠ No WOM data cached for **{account}** — '
+                f'run `/wom refresh account:{account}` first.')
+    skills = entry['skills']
+    stale = f' _(data from {age})_' if age else ''
+
+    if view == 'current':
+        lines = []
+        for skill in DEFAULT_WOM_RATES:
+            s = skills.get(skill)
+            if s:
+                lines.append(f'{skill:<13}{s.get("level", "?"):>3}')
+        total = entry.get('total_level')
+        body = '\n'.join(lines) or 'No skill data.'
+        total_line = f'\nTotal Level  {total}' if total else ''
+        return (f'**{account} — Current Stats**{stale}\n'
+                f'```\n{body}{total_line}\n```')
+
+    summary = compute_account_summary(account, cfg, skills)
+
+    if view == 'max':
+        ttm = summary.get('time_to_max_hours')
+        if ttm is None:
+            return (f'**{account} — Time to Max**{stale}\n'
+                    f'No active skills with usable XP rates — check WOM Goals '
+                    f'rate settings.')
+        closest = summary.get('closest_99')
+        closest_line = ''
+        if closest:
+            closest_line = (f'\nClosest 99: {closest["skill"]} '
+                            f'({format_hours_compact(closest["hours_to_99"])})')
+        return (f'**{account} — Time to Max**{stale}\n'
+                f'Estimated time to max: {format_hours_compact(ttm)} '
+                f'{format_days(ttm)}{closest_line}')
+
+    # Individual skill view
+    est = next((e for e in summary['per_skill'] if e['skill'] == view), None)
+    if est is None:
+        s = skills.get(view)
+        if not s:
+            return (f'⚠ No data for {view} on **{account}** — '
+                    f'run `/wom refresh account:{account}`.')
+        return f'**{account} — {view}**{stale}\nCurrent level: {s.get("level", "?")}'
+    head = f'**{account} — {view}**{stale}\nCurrent level: {est["level"]}'
+    if est['status'] == 'achieved':
+        return f'{head}\nAlready 99 🎉'
+    if est['status'] == 'excluded':
+        return f'{head}\nExcluded from maxing estimates ({est.get("label", "")}).'
+    if est['status'] == 'no_rate':
+        return (f'{head}\nNo XP/hr rate configured for this skill — '
+                f'set one in WOM Goals.')
+    return (f'{head}\nEstimated time to 99: '
+            f'{format_hours_compact(est["hours_to_99"])} '
+            f'{format_days(est["hours_to_99"])}')
+
+
+def _wom_refresh_run(targets, cfg, log_fn):
+    """Refresh WOM data for the given accounts — the same backend the Refresh
+    WOM button uses (py.wom.refresh_account_in_cache), with a shared in-flight
+    lock and a per-account cooldown so repeated /wom refresh calls can't stack
+    or hammer the WOM API."""
+    from py.wom import load_wom_cache, save_wom_cache, refresh_account_in_cache
+    if not _wom_refresh_lock.acquire(blocking=False):
+        return '⏳ A WOM refresh is already in progress — try again shortly.'
+    try:
+        now = time.time()
+        cooled, todo = [], []
+        for acc in targets:
+            if now - _wom_last_refresh_ts.get(acc, 0) < _WOM_REFRESH_COOLDOWN_SECS:
+                cooled.append(acc)
+            else:
+                todo.append(acc)
+        if not todo:
+            return (f'⏳ Refreshed less than a minute ago for: '
+                    f'{", ".join(cooled)} — try again shortly.')
+        cache = load_wom_cache()
+        user_map = cfg.get('wom_username_map') or {}
+        ok, failed = [], []
+        for acc in todo:
+            wom_username = user_map.get(acc, acc)
+            try:
+                result = refresh_account_in_cache(acc, wom_username, cache)
+                if result.error:
+                    failed.append(f'{acc} ({result.error})')
+                else:
+                    ok.append(acc)
+                _wom_last_refresh_ts[acc] = time.time()
+            except Exception as exc:
+                failed.append(f'{acc} ({exc})')
+        save_wom_cache(cache, log_fn=log_fn)
+        lines = ['**WOM refresh complete:**']
+        if ok:
+            lines.append(f'✅ Refreshed: {", ".join(ok)}')
+        if failed:
+            lines.append(f'❌ Failed: {"; ".join(failed)}')
+        if cooled:
+            lines.append(f'⏳ Skipped (cooldown): {", ".join(cooled)}')
+        return '\n'.join(lines)
+    finally:
+        _wom_refresh_lock.release()
+
+
 # ── GatewayRunner ──────────────────────────────────────────────────────────────
 
 class GatewayRunner:
@@ -845,11 +976,38 @@ class GatewayRunner:
     Connects to the Discord Gateway via discord.py, registers slash commands,
     and dispatches interactions back to the watcher via callbacks.
 
-    Slash commands: /ss [account], /s, /force, /launch, /relaunch
+    Slash commands: /ss [account], /s, /force, /train, /stats, /max,
+                    /wom refresh, /launch, /relaunch
 
     Callbacks: get_rows, get_accounts, on_screenshot, on_launch, on_launch_all,
                on_relaunch, on_relaunch_all, log, get_cfg, is_running
     """
+
+    # /force keeps only the non-skill actions; individual skill forcing moved
+    # to /train so every option is visible as a fixed choice (Discord caps
+    # fixed choices at 25 per option).
+    FORCE_ACTIONS = ['Stats', 'Loot', '-10m', '+10m', 'Skip', 'Quest']
+
+    # Exactly the 23 trainable skills the old /force skill set supported —
+    # same strings the script expects; no functionality added or removed.
+    TRAIN_SKILLS = [
+        'Attack', 'Strength', 'Defence', 'Range',
+        'Prayer', 'Magic', 'Runecrafting', 'Construction',
+        'Agility', 'Herblore', 'Thieving', 'Crafting', 'Fletching',
+        'Slayer', 'Hunter', 'Mining', 'Smithing', 'Fishing', 'Cooking',
+        'Firemaking', 'Woodcutting', 'Farming', 'Sailing',
+    ]
+
+    # WOM stat views: 'current' + all 24 skills (incl. Hitpoints) = 25 choices,
+    # exactly Discord's fixed-choice limit. Names match DEFAULT_WOM_RATES keys.
+    STATS_VIEWS = [
+        'current',
+        'Attack', 'Strength', 'Defence', 'Ranged', 'Hitpoints',
+        'Prayer', 'Magic', 'Runecraft', 'Construction',
+        'Agility', 'Herblore', 'Thieving', 'Crafting', 'Fletching',
+        'Slayer', 'Hunter', 'Mining', 'Smithing', 'Fishing', 'Cooking',
+        'Firemaking', 'Woodcutting', 'Farming', 'Sailing',
+    ]
 
     COMMANDS = [
         {
@@ -861,15 +1019,55 @@ class GatewayRunner:
         {'name': 's', 'description': 'Post status of all monitored accounts to #monitor'},
         {
             'name':        'force',
-            'description': 'Force a skill, action, or time adjustment for an account',
+            'description': 'Force an action or time adjustment for an account',
             'options': [
-                {'name': 'account',    'description': 'Account name',
+                {'name': 'account', 'description': 'Account name',
                  'type': 3, 'required': True,  'autocomplete': True},
-                {'name': 'adjustment', 'description': 'Action to perform',
-                 'type': 3, 'required': True,  'autocomplete': True},
-                {'name': 'amount',     'description': 'Clicks — only for -10m/+10m (1-20)',
+                {'name': 'action',  'description': 'Action to perform',
+                 'type': 3, 'required': True,
+                 'choices': [{'name': a, 'value': a} for a in FORCE_ACTIONS]},
+                {'name': 'amount',  'description': 'Clicks — only for -10m/+10m (1-20)',
                  'type': 4, 'required': False, 'min_value': 1, 'max_value': 20},
             ],
+        },
+        {
+            'name':        'train',
+            'description': 'Force-train a specific skill for an account',
+            'options': [
+                {'name': 'account', 'description': 'Account name',
+                 'type': 3, 'required': True, 'autocomplete': True},
+                {'name': 'skill',   'description': 'Skill to train',
+                 'type': 3, 'required': True,
+                 'choices': [{'name': s, 'value': s} for s in TRAIN_SKILLS]},
+            ],
+        },
+        {
+            'name':        'stats',
+            'description': 'Show WOM stats: all current levels, or time to 99 for a skill',
+            'options': [
+                {'name': 'account', 'description': 'Account name',
+                 'type': 3, 'required': True, 'autocomplete': True},
+                {'name': 'view',    'description': "'current' for all levels, or a skill for time to 99",
+                 'type': 3, 'required': True,
+                 'choices': [{'name': v, 'value': v} for v in STATS_VIEWS]},
+            ],
+        },
+        {
+            'name':        'max',
+            'description': 'Show estimated time to max for an account',
+            'options': [{'name': 'account', 'description': 'Account name',
+                         'type': 3, 'required': True, 'autocomplete': True}],
+        },
+        {
+            'name':        'wom',
+            'description': 'Wise Old Man data',
+            'options': [{
+                'type': 1, 'name': 'refresh',
+                'description': 'Refresh WOM data for all accounts or one account',
+                'options': [{'name': 'account',
+                             'description': 'Account name, or "All"',
+                             'type': 3, 'required': True, 'autocomplete': True}],
+            }],
         },
         {
             'name':        'launch',
@@ -935,7 +1133,7 @@ class GatewayRunner:
                         f"/interactions/{interaction.id}/{interaction.token}/callback",
                         {'type': 8, 'data': {'choices': choices[:25]}})
 
-            if cmd in ('ss', 'force'):
+            if cmd in ('ss', 'force', 'train', 'stats', 'max'):
                 for opt in interaction.data.get('options', []):
                     if opt.get('name') == 'account' and opt.get('focused'):
                         typed    = opt.get('value', '').lower()
@@ -947,23 +1145,20 @@ class GatewayRunner:
                                     if typed in a.lower()]
                         _respond(choices)
                         return
-                    if opt.get('name') == 'adjustment' and opt.get('focused'):
-                        typed   = opt.get('value', '').lower()
-                        all_adjustments = [
-                            'Stats', 'Loot',
-                            '-10m', '+10m',
-                            'Skip', 'Quest',
-                            'Attack', 'Strength', 'Defence', 'Range',
-                            'Agility', 'Herblore', 'Thieving',
-                            'Mining', 'Smithing', 'Fishing', 'Cooking',
-                            'Prayer', 'Magic', 'Runecrafting', 'Construction',
-                            'Crafting', 'Fletching', 'Slayer', 'Hunter',
-                            'Firemaking', 'Woodcutting', 'Farming', 'Sailing',
-                        ]
-                        choices = [{'name': k, 'value': k}
-                                   for k in all_adjustments if typed in k.lower()]
-                        _respond(choices)
-                        return
+
+            if cmd == 'wom':
+                # Subcommand structure: options[0] is the 'refresh' subcommand,
+                # its own options hold the focused account field.
+                for sub in interaction.data.get('options', []):
+                    for opt in sub.get('options', []) or []:
+                        if opt.get('name') == 'account' and opt.get('focused'):
+                            typed    = opt.get('value', '').lower()
+                            accounts = cb['get_accounts']()
+                            choices  = [{'name': 'All accounts', 'value': 'All'}]
+                            choices += [{'name': a, 'value': a} for a in accounts
+                                        if typed in a.lower()]
+                            _respond(choices)
+                            return
 
             if cmd in ('launch', 'relaunch'):
                 for opt in interaction.data.get('options', []):
@@ -1048,10 +1243,10 @@ class GatewayRunner:
                     await interaction.followup.send(reply, ephemeral=True)
 
                 elif cmd == 'force':
-                    account    = opts.get('account', '').strip()
-                    adjustment = opts.get('adjustment', '').strip()
-                    accounts   = cb['get_accounts']()
-                    matched    = next((a for a in accounts if a.lower() == account.lower()), None)
+                    account = opts.get('account', '').strip()
+                    action  = (opts.get('action') or opts.get('adjustment') or '').strip()
+                    accounts = cb['get_accounts']()
+                    matched  = next((a for a in accounts if a.lower() == account.lower()), None)
                     if not matched:
                         await interaction.response.send_message(
                             f"No account matching '{account}'. "
@@ -1059,54 +1254,129 @@ class GatewayRunner:
                             ephemeral=True)
                         return
 
-                    valid_adjustments = [
-                        'Stats', 'Loot', '-10m', '+10m', 'Skip', 'Quest',
-                        'Attack', 'Strength', 'Defence', 'Range', 'Agility',
-                        'Herblore', 'Thieving', 'Mining', 'Smithing', 'Fishing',
-                        'Cooking', 'Prayer', 'Magic', 'Runecrafting', 'Construction',
-                        'Crafting', 'Fletching', 'Slayer', 'Hunter',
-                        'Firemaking', 'Woodcutting', 'Farming', 'Sailing',
-                    ]
-                    if adjustment not in valid_adjustments:
+                    if action not in GatewayRunner.FORCE_ACTIONS:
                         await interaction.response.send_message(
-                            f"Unknown action '{adjustment}'. "
-                            f"Use autocomplete to pick a valid option.",
+                            f"Unknown action '{action}'. "
+                            f"Valid: {', '.join(GatewayRunner.FORCE_ACTIONS)}. "
+                            f"(Skill training moved to /train.)",
                             ephemeral=True)
                         return
 
                     await interaction.response.defer(ephemeral=True)
                     token_val = cfg_ref.get('bot_token', '').strip()
 
-                    if adjustment in ('-10m', '+10m'):
+                    if action in ('-10m', '+10m'):
                         # Time adjustment — click N times
                         amount = int(opts.get('amount', 1))
                         threading.Thread(
                             target=cb['on_force'],
-                            args=(matched, adjustment, amount), daemon=True).start()
+                            args=(matched, action, amount), daemon=True).start()
                         await interaction.followup.send(
-                            f"⏱ Clicking {adjustment} × {amount} for {matched}",
+                            f"⏱ Clicking {action} × {amount} for {matched}",
                             ephemeral=True)
 
-                    elif adjustment in ('Stats', 'Loot'):
+                    elif action in ('Stats', 'Loot'):
                         # Panel toggle — open, screenshot, post to monitor thread, close
                         tid = cfg.get('bot_thread_ids', {}).get(matched, {}).get('monitor')
                         dest = tid if tid else str(interaction.channel_id)
                         threading.Thread(
                             target=cb['on_force_panel'],
-                            args=(matched, adjustment, dest, token_val),
+                            args=(matched, action, dest, token_val),
                             daemon=True).start()
                         await interaction.followup.send(
-                            f"📊 Opening {adjustment} panel for {matched} — screenshot incoming",
+                            f"📊 Opening {action} panel for {matched} — screenshot incoming",
                             ephemeral=True)
 
                     else:
-                        # Skill / action — single click, no response needed
+                        # Skip / Quest — single click, no response needed
                         threading.Thread(
                             target=cb['on_force_skill'],
-                            args=(matched, adjustment), daemon=True).start()
+                            args=(matched, action), daemon=True).start()
                         await interaction.followup.send(
-                            f"🎯 Forcing {adjustment} for {matched}",
+                            f"🎯 Forcing {action} for {matched}",
                             ephemeral=True)
+
+                elif cmd == 'train':
+                    # Same behavior the old /force skill choices had — moved to
+                    # its own command so all options fit Discord's choice limit.
+                    account = opts.get('account', '').strip()
+                    skill   = opts.get('skill', '').strip()
+                    accounts = cb['get_accounts']()
+                    matched  = next((a for a in accounts if a.lower() == account.lower()), None)
+                    if not matched:
+                        await interaction.response.send_message(
+                            f"No account matching '{account}'. "
+                            f"Monitored: {', '.join(accounts) or 'none'}",
+                            ephemeral=True)
+                        return
+                    if skill not in GatewayRunner.TRAIN_SKILLS:
+                        await interaction.response.send_message(
+                            f"Unknown skill '{skill}'.", ephemeral=True)
+                        return
+                    await interaction.response.defer(ephemeral=True)
+                    threading.Thread(
+                        target=cb['on_force_skill'],
+                        args=(matched, skill), daemon=True).start()
+                    await interaction.followup.send(
+                        f"🎯 Forcing {skill} for {matched}", ephemeral=True)
+
+                elif cmd in ('stats', 'max'):
+                    account = opts.get('account', '').strip()
+                    view    = opts.get('view', '').strip() if cmd == 'stats' else 'max'
+                    accounts = cb['get_accounts']()
+                    matched  = next((a for a in accounts if a.lower() == account.lower()), None)
+                    if not matched:
+                        matched = next((a for a in accounts
+                                        if account.lower() in a.lower()), None)
+                    if not matched:
+                        await interaction.response.send_message(
+                            f"No account matching '{account}'. "
+                            f"Monitored: {', '.join(accounts) or 'none'}",
+                            ephemeral=True)
+                        return
+                    await interaction.response.defer(ephemeral=True)
+                    import asyncio as _asyncio
+                    loop = _asyncio.get_event_loop()
+                    text = await loop.run_in_executor(
+                        None, lambda: _wom_stats_text(matched, view, cfg))
+                    await interaction.followup.send(text, ephemeral=True)
+
+                elif cmd == 'wom':
+                    # Subcommand: options[0] is 'refresh'; nested options hold account.
+                    subs = interaction.data.get('options', []) or []
+                    sub  = subs[0] if subs else {}
+                    if (sub.get('name') or '').lower() != 'refresh':
+                        await interaction.response.send_message(
+                            'Unknown subcommand.', ephemeral=True)
+                        return
+                    sub_opts = {o['name']: o.get('value', '')
+                                for o in (sub.get('options') or [])}
+                    account_arg = (sub_opts.get('account') or '').strip()
+                    if not account_arg:
+                        await interaction.response.send_message(
+                            'Please specify an account name or "All".', ephemeral=True)
+                        return
+                    accounts = cb['get_accounts']()
+                    if account_arg.lower() == 'all':
+                        targets = list(accounts)
+                    else:
+                        m = next((a for a in accounts
+                                  if a.lower() == account_arg.lower()), None) or \
+                            next((a for a in accounts
+                                  if account_arg.lower() in a.lower()), None)
+                        targets = [m] if m else []
+                    if not targets:
+                        await interaction.response.send_message(
+                            f"No account matching '{account_arg}'. "
+                            f"Monitored: {', '.join(accounts) or 'none'}",
+                            ephemeral=True)
+                        return
+                    await interaction.response.defer(ephemeral=True)
+                    import asyncio as _asyncio
+                    loop = _asyncio.get_event_loop()
+                    text = await loop.run_in_executor(
+                        None, lambda: _wom_refresh_run(targets, cfg, cb['log']))
+                    await interaction.followup.send(text, ephemeral=True)
 
                 elif cmd == 'launch':
                     account_arg = opts.get('account', '').strip()
@@ -1184,25 +1454,29 @@ class GatewayRunner:
 
                     if account_arg.lower() == 'all':
                         results = await loop.run_in_executor(None, on_relaunch_all)
-                        relaunched = sum(1 for r in results if r.ok)
+                        queued     = sum(1 for r in results if r.ok and r.action == 'queued')
+                        relaunched = sum(1 for r in results if r.ok and r.action != 'queued')
                         skipped    = sum(1 for r in results if r.action == 'skipped')
                         failed     = sum(1 for r in results if not r.ok and r.action == 'failed')
-                        lines_out  = ['**Relaunch all complete:**']
+                        lines_out  = ['**Relaunch all:**']
                         for r in results:
-                            icon = ('✅' if r.ok else ('⚠️' if r.action == 'skipped' else '❌'))
+                            icon = ('⏳' if r.ok and r.action == 'queued' else
+                                    '✅' if r.ok else
+                                    ('⚠️' if r.action == 'skipped' else '❌'))
                             lines_out.append(f'{icon} **{r.account}**: {r.message}')
-                        lines_out.append(f'\n✅ {relaunched} relaunched  '
+                        lines_out.append(f'\n⏳ {queued + relaunched} queued/started  '
                                          f'⚠️ {skipped} skipped  ❌ {failed} failed')
                         msg = '\n'.join(lines_out)
                         if len(msg) > 1900:
-                            msg = (f'**Relaunch all complete:**\n'
-                                   f'✅ {relaunched} relaunched  ⚠️ {skipped} skipped  '
-                                   f'❌ {failed} failed\n'
+                            msg = (f'**Relaunch all:**\n'
+                                   f'⏳ {queued + relaunched} queued/started  '
+                                   f'⚠️ {skipped} skipped  ❌ {failed} failed\n'
                                    f'_(Detail truncated — see monitor log)_')
                         await interaction.followup.send(msg, ephemeral=True)
                     else:
                         result = await loop.run_in_executor(None, lambda: on_relaunch(account_arg))
-                        icon = ('🔄' if result.ok and result.action == 'relaunched' else
+                        icon = ('⏳' if result.ok and result.action == 'queued' else
+                                '🔄' if result.ok and result.action == 'relaunched' else
                                 '✅' if result.ok else
                                 '⚠️' if result.action == 'skipped' else '❌')
                         await interaction.followup.send(f'{icon} {result.message}', ephemeral=True)

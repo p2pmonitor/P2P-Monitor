@@ -210,12 +210,20 @@ class SettingsTab:
         canvas.configure(yscrollcommand=sb.set)
         inner = tk.Frame(canvas, bg=app.BG2)
         win = canvas.create_window((0, 0), window=inner, anchor='nw')
-        state = {'sb_visible': False}
+        state = {'sb_visible': False, 'last_metrics': None}
 
         def _sync(_e=None):
-            canvas.configure(scrollregion=canvas.bbox('all'))
+            # Skip redundant work: <Configure> fires for every child widget
+            # layout pass (the Event Notifications page has ~35 checkbuttons),
+            # and recomputing/reflowing each time caused a visible blank-flash
+            # on Linux when the page was raised. Only act on a real change.
             content_h = inner.winfo_reqheight()
             visible_h = canvas.winfo_height()
+            metrics = (content_h, visible_h)
+            if metrics == state['last_metrics']:
+                return
+            state['last_metrics'] = metrics
+            canvas.configure(scrollregion=canvas.bbox('all'))
             needs_scroll = (content_h - visible_h) > _SCROLL_TOLERANCE_PX and visible_h > 1
             if needs_scroll and not state['sb_visible']:
                 sb.pack(side='right', fill='y')
@@ -618,6 +626,20 @@ class SettingsTab:
         tk.Label(lvl_row, text="  (total level milestones are always posted)",
             font=self._sanss, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(6, 0))
 
+        skip_row = tk.Frame(body, bg=app.BG3)
+        skip_row.pack(fill='x', pady=(4, 0))
+        tk.Label(skip_row, text="Skip level notifications below:", font=self._sans,
+                 bg=app.BG3, fg=app.FG2).pack(side='left')
+        skip_var = tk.IntVar(value=int(app.cfg.get('levelup_skip_below', 1)))
+        tk.Spinbox(skip_row, from_=1, to=99, textvariable=skip_var, width=6, font=self._sans,
+                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat',
+                   highlightthickness=0
+                   ).pack(side='left', padx=(8, 0))
+        self._vars['levelup_skip_below'] = skip_var
+        tk.Label(skip_row, text="  (Discord only — e.g. 50 suppresses levels 1–49; "
+                                "still recorded in History and the Event Log)",
+            font=self._sanss, bg=app.BG3, fg=app.FG2).pack(side='left', padx=(6, 0))
+
         # ── Hide paint overlay ───────────────────────────────────────────────
         _, body = self._card(inner, '🖌', 'Hide paint overlay during screenshot')
         hp_table = tk.Frame(body, bg=app.BG3)
@@ -943,8 +965,14 @@ class SettingsTab:
                  "Slash commands (registered automatically on first run):\n"
                  "  /ss [account]                    — screenshot(s) → account monitor thread\n"
                  "  /s                               — status of all accounts → #monitor channel\n"
-                 "  /force <account> <action> [amt]  — force a skill, action, or time adjustment;\n"
+                 "  /force <account> <action> [amt]  — Stats, Loot, -10m, +10m, Skip, Quest;\n"
                  "                                      amt (1-20) only applies to -10m / +10m\n"
+                 "  /train <account> <skill>         — force-train a specific skill\n"
+                 "  /stats <account> <view>          — current levels, or time to 99 for a skill\n"
+                 "  /max <account>                   — estimated time to max\n"
+                 "  /wom refresh <account|All>       — refresh Wise Old Man data\n"
+                 "  /launch <account|all>            — launch closed clients only\n"
+                 "  /relaunch <account|all>          — restart clients (honors Respect Break)\n"
                  "Tip: /ss and /force inside an account thread target that account only."
             ).pack(anchor='w', fill='x')
 

@@ -1,5 +1,183 @@
 # Changelog
 
+## v2.1.0
+
+### New features
+
+**1. Skip level notifications below N (Settings → Event Notifications).**
+New setting directly under "Notify every N levels". Default 1 preserves
+current behavior; setting e.g. 50 suppresses Discord level-up messages for
+levels 1–49, including the startup catch-up relay. Suppression is
+Discord-only — the level-up is still logged to the Event Log and recorded in
+History (implemented as a `_suppress_discord` annotation consumed by the
+Discord dispatch leg in `handle_event()`, never a dropped event). Level 99
+and Total Level milestones are never suppressed; an unparsed level preserves
+existing behavior rather than incorrectly suppressing. Key:
+`levelup_skip_below`.
+
+**2. New Discord slash commands, restructured to fit Discord's 25-choice
+limit.**
+- `/force <account> <action> [amount]` now offers only its six non-skill
+  actions (Stats, Loot, -10m, +10m, Skip, Quest) as fixed, always-visible
+  choices instead of autocomplete.
+- `/train <account> <skill>` — the 23 skill options previously buried in
+  `/force`, moved verbatim to their own command. Same backend
+  (`on_force_skill`), same strings the script expects; no functionality
+  added or removed.
+- `/stats <account> <view>` — `current` returns all 24 skill levels + total
+  level in a code block; a skill name returns estimated time to 99 for that
+  skill (e.g. "Estimated time to 99: ~16h"). 25 choices exactly.
+- `/max <account>` — estimated time to max plus the closest 99, using the
+  same `py/wom.py` calculations the Stats tab uses.
+- `/wom refresh <account|All>` — calls the same
+  `wom.refresh_account_in_cache()` backend as the Refresh WOM button, with a
+  shared in-flight lock and a 60s per-account cooldown so repeated calls
+  cannot stack or hammer the WOM API. All of these read/write the WOM cache
+  directly — no Tk dependency in the Discord path.
+
+**3. Relaunch safeguard system (new `py/relaunch.py`, RelaunchManager).**
+All `/relaunch` requests now flow through one coordinator:
+- Startup confirmation: an attempt only counts as successful when the
+  watcher detects the script's start line — a spawned process is never
+  treated as success.
+- Retry/backoff: unconfirmed attempts retry at 5, 10, 20, 30, then 60-minute
+  (cap) intervals, with Discord + monitor notifications on each failure and
+  on eventual success. A Script Started from any source (manual start,
+  auto-restart) clears the pending state.
+- Sequential worker: exactly one launch/confirmation attempt at a time;
+  accounts waiting out a retry delay or a break window never occupy the
+  worker, so one stuck account can't block the rest of a `/relaunch all`.
+- Persistence: pending relaunch/retry state — including the absolute
+  `resume_at` timestamp of an armed break-end or retry timer — is saved to
+  `~/.p2p_monitor/pending_relaunches.json`. On the next start, a future
+  `resume_at` re-arms a timer for exactly the remaining delay (a restart
+  during a 30-minute backoff waits out the remainder, it does not attempt
+  immediately); an entry without usable timing waits ~30 seconds for
+  startup catch-up to reconstruct live break state, then routes through the
+  normal request logic — so a restart during a break can never relaunch
+  mid-break.
+- Respect Break correctness: break state is evaluated before the
+  running-client check, so an account that is on break with its client
+  already closed waits for the break's end instead of launching
+  immediately mid-break.
+- Auto-restart integration: once the existing auto-restart gates
+  (manual-stop detection, game-update window, suppress window,
+  respect-break delay — all unchanged) allow a restart, the actual launch
+  now routes through the RelaunchManager too, so auto-restarts get the same
+  confirmation, retry/backoff, persisted state, geometry restore, and
+  one-at-a-time safety. Falls back to the previous direct launcher call if
+  the manager is unavailable.
+- Shutdown safety: stopping the monitor while a queued relaunch is waiting
+  on break-length parsing aborts before the destructive close — a stopped
+  monitor never closes a client afterward.
+- Process safety unchanged: ownership always validated via window title
+  before terminating; never kills by generic process name.
+- Duplicate-launch guard: if window discovery finds nothing but the
+  account's saved PID is still alive (observed in the field as a transient
+  discovery failure against a genuinely running client), the manager
+  neither closes by PID (killing blind) nor launches a second client for
+  the same account. It dumps the visible DreamBot window titles to
+  debug.jsonl, notifies clearly, and retries on the normal backoff — a
+  transient failure self-heals on the next attempt instead of leaving the
+  account offline or duplicated.
+
+**3b. Linux window matching: case-insensitive, with ownership guard and
+refusal diagnostics.**
+`xdotool search --name` patterns are case-sensitive POSIX regexes, and the
+matcher lowercased only the search needle — so any DreamBot title showing
+the account name with capital letters silently failed discovery on Linux
+(a latent failure feeding screenshots, relaunch, and auto-restart alike).
+The pattern is now built per-character (`[aA][bB]…`) with regex
+metacharacters escaped, making matching case-insensitive and safe for
+account names containing regex specials. Each candidate window's actual
+title is then verified via `xdotool getwindowname` and must also contain
+"dreambot" (case-insensitive) — parity with the Windows matcher's existing
+guard, so a terminal or editor whose title merely mentions an account name
+can never be matched or terminated. Additionally, when a relaunch refuses
+because a saved PID is alive but no window matched, the titles of every
+visible DreamBot window at that moment are written to `debug.jsonl`
+(`launcher_dpi`/`launcher` category) so a false-negative match is provable
+from the log instead of guessed at.
+
+### Fixed
+
+**4. `/relaunch` now honors Respect Break before closing a running client.**
+Previously the respect-breaks setting only applied in the auto-restart path
+(script already stopped); `/relaunch` against a live client restarted it
+immediately. Now, with Respect Break enabled: a running, not-on-break
+account queues — the client is closed at its next break start, stays closed
+for the break, and relaunches at the break's end (mirroring
+`_compute_restart_delay`'s snapshot behavior); an account already on break
+is closed now and relaunched at break end; if the break length never parses,
+falls back to the configured random restart delay. With Respect Break
+disabled, `/relaunch` restarts immediately with no break checks or queue.
+Each account in `/relaunch all` follows its own independent break window.
+
+**5. Client window position persisted per account
+(`~/.p2p_monitor/window_geometry.json`).**
+A delayed relaunch (break-end, retry, or after the monitor itself
+restarted) previously launched the client at the default center position
+because the captured geometry only lived in memory. Geometry is now
+persisted at capture-before-close, on a ~2-minute background sweep of
+running clients (so manual window moves are remembered), and best-effort at
+monitor shutdown. Fresh launches and delayed relaunches restore from the
+persisted value; a live capture always wins when present. Saved geometry is
+re-validated on read (existing `_geometry_is_sane` checks) — invalid or
+off-range data falls back to default placement, and a good saved value is
+never overwritten with null/empty data.
+
+**6. Event Log rebuilt to the intended column/badge design.**
+The Monitor tab's Event Log now renders as TIME / ACCOUNT / EVENT / MESSAGE
+columns with a status dot per row and colored event badges (SYSTEM, TASK,
+LEVEL UP, ERROR, …), replacing the raw terminal-style text lines. Still a
+single `tk.Text` under the hood — pixel tab stops for columns, background
+tags for badges, `lmargin2` so wrapped messages stay aligned under the
+MESSAGE column — so the existing 2000-line prune, elide-based category
+filter, and debounced search all work unchanged. Leading emoji are dropped
+from messages (the badge carries the type) and the `[account]` token becomes
+the ACCOUNT column.
+
+**7. Stats donut: 'Other' excluded from the ring.**
+The bucketed "Other (17 skills)" slice dominated the donut and drowned out
+the top skills the chart exists to show. Wedges now cover only the named
+top skills; Other remains visible as its own row in the skill-bar list, the
+center total still counts it (the total is real, only the slice is hidden),
+and a small "top skills" caption sits under TOTAL when the exclusion is
+active.
+
+**8. History tab: Severity visible by default; single scrollbar.**
+Two fixes: (a) column widths — the persisted `hist_col_widths` restore
+re-applied the Activity/Details column's *rendered* stretched width from a
+wide window as a fixed request, pushing Severity off-screen; the stretch
+column is no longer restored from saved values, fixed columns are clamped
+to sane ranges, all columns got minwidths, and the defaults were resized so
+all five columns fit the 960px minimum window width. (b) the per-account
+tree no longer has its own vertical scrollbar or 18-row height cap — each
+tree renders full-height and the History page scrolls as one surface via
+the outer canvas; wheel events over a tree are routed to that canvas
+(with 'break') so nothing double-scrolls.
+
+**9. Settings (Linux): Event Notifications flash + white outline boxes.**
+The `_scrollable_body` sync handler recomputed the scroll region on every
+child `<Configure>` — ~35 checkbuttons' worth of layout passes when the
+page was raised, a visible blank-flash on Linux. It now no-ops unless the
+measured content/viewport heights actually changed. The "white outlined
+boxes" were Linux Tk's default focus-highlight rings (light
+highlightbackground at highlightthickness ≥ 1) around classic widgets;
+`option_add('*<class>.highlightThickness', 0)` at App init removes them for
+Checkbutton/Radiobutton/Spinbox/Entry/Button/Listbox app-wide — a no-op on
+Windows, which renders these invisibly.
+
+**10. Settings → Discord help dialog updated** to the v2.1.0 slash-command
+set (/force actions-only, /train, /stats, /max, /wom refresh, /launch,
+/relaunch) — the old text still described /force as covering skills.
+
+### Files changed
+p2p_monitor.py, py/watcher.py, py/launcher.py, py/discord.py,
+py/relaunch.py (new), py/platform_ops.py, ui/monitor_tab.py,
+ui/stats_tab.py, ui/history_tab.py, ui/settings_tab.py, README.md,
+CHANGELOG.md, update_manifest.txt, install.sh
+
 ## v2.0.2
 ### Fixed progress bar under Max Progress
 

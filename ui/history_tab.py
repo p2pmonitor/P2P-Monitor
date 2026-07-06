@@ -540,24 +540,55 @@ class HistoryTab:
             widgets['body_outer'].pack(fill='x', pady=(0, 10))
 
     # ── Per-account event tree ───────────────────────────────────────────────────
-    COL_DEFAULTS = {'time': 110, 'type': 110, 'value': 220, 'activity': 420, 'severity': 90}
+    # Defaults sized so all five columns — Severity included — fit within the
+    # monitor's minimum launch width (960px) without resizing or dragging.
+    COL_DEFAULTS  = {'time': 105, 'type': 80, 'value': 180, 'activity': 300, 'severity': 80}
+    COL_MINWIDTHS = {'time': 70,  'type': 55, 'value': 90,  'activity': 120, 'severity': 70}
 
     def _build_event_tree(self, parent, acc, entries):
         app = self.app
         saved_widths = app.cfg.get('hist_col_widths', {})
         cols = ('time', 'type', 'value', 'activity', 'severity')
+        # Full-height tree: the History page scrolls as ONE surface via the
+        # outer canvas — the tree gets no scrollbar of its own (the previous
+        # capped-height tree + inner scrollbar produced the confusing double
+        # scrollbar). Height is display rows; 300 is a sanity ceiling.
         tree = ttk.Treeview(parent, columns=cols, show='headings',
-                             height=min(max(len(entries), 3), 18))
+                             height=min(max(len(entries), 3), 300))
         for col, lbl in [('time', 'Time'), ('type', 'Type'), ('value', 'Task'),
                           ('activity', 'Activity / Details'), ('severity', 'Severity')]:
-            tree.heading(col, text=lbl, command=lambda c=col: self._on_sort(c))
-            tree.column(col, width=saved_widths.get(col, self.COL_DEFAULTS[col]),
+            # Restore saved widths with clamps: the stretch column (activity)
+            # is never restored from a saved value — persisting its *rendered*
+            # width from a wide window and re-applying it as a fixed request on
+            # a narrower one is exactly what pushed Severity off-screen.
+            if col == 'activity':
+                width = self.COL_DEFAULTS[col]
+            else:
+                try:
+                    width = int(saved_widths.get(col, self.COL_DEFAULTS[col]))
+                except (ValueError, TypeError):
+                    width = self.COL_DEFAULTS[col]
+                width = max(self.COL_MINWIDTHS[col], min(width, self.COL_DEFAULTS[col] * 2))
+            tree.column(col, width=width, minwidth=self.COL_MINWIDTHS[col],
                         stretch=(col == 'activity'), anchor='w')
+            tree.heading(col, text=lbl, command=lambda c=col: self._on_sort(c))
 
-        scr = ttk.Scrollbar(parent, orient='vertical', command=tree.yview)
-        tree.configure(yscrollcommand=scr.set)
-        scr.pack(side='right', fill='y')
         tree.pack(fill='x', expand=True)
+
+        # Route wheel events over the tree to the outer History canvas — one
+        # scrolling surface. 'break' stops the Treeview's own class binding
+        # (and the bind_all canvas handler) from also firing.
+        outer_canvas = getattr(self, '_scroll_canvas', None)
+        if outer_canvas is not None:
+            def _wheel(delta_units):
+                try:
+                    outer_canvas.yview_scroll(delta_units, 'units')
+                except Exception:
+                    pass
+                return 'break'
+            tree.bind('<MouseWheel>', lambda e: _wheel(-1 * (e.delta // 120)))
+            tree.bind('<Button-4>',   lambda e: _wheel(-1))
+            tree.bind('<Button-5>',   lambda e: _wheel(1))
 
         for etype in ('task', 'quest_completed', 'chat', 'error', 'drop', 'death',
                       'levelup', 'script_event', 'slayer_task', 'slayer_complete',

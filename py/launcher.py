@@ -100,6 +100,101 @@ def _get_pid(account: str) -> Optional[int]:
     return _load_pid_state().get(account)
 
 
+# ── Persisted window geometry (per account) ────────────────────────────────────
+# Last known-good client window geometry per account, saved to disk so a
+# delayed relaunch (break-end relaunch, retry after failure, or a relaunch
+# after the monitor itself restarted) can still restore the window to where
+# the user had it — the in-memory capture in relaunch_account() only survives
+# within a single close→relaunch cycle. Saved geometry is a FALLBACK: a live
+# capture taken just before closing always wins. A missing/invalid saved
+# geometry simply means the existing default placement is used, and a good
+# saved geometry is never overwritten with null/empty data.
+
+_GEOMETRY_FILE = Path.home() / '.p2p_monitor' / 'window_geometry.json'
+_geometry_lock = threading.Lock()
+
+
+def _load_geometry_state() -> dict:
+    try:
+        if _GEOMETRY_FILE.exists():
+            data = json.loads(_GEOMETRY_FILE.read_text())
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_account_geometry(account: str, geom) -> None:
+    """Persist (x, y, w, h) for an account. Silently ignores None/invalid
+    geometry — never clobbers a previously-saved good value with bad data."""
+    if not _geometry_is_sane(geom):
+        return
+    x, y, w, h = geom
+    with _geometry_lock:
+        state = _load_geometry_state()
+        state[account] = {'x': int(x), 'y': int(y), 'w': int(w), 'h': int(h),
+                          'ts': time.time()}
+        try:
+            _GEOMETRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _GEOMETRY_FILE.write_text(json.dumps(state, indent=2))
+        except Exception:
+            pass
+
+
+def get_saved_account_geometry(account: str):
+    """Return the persisted (x, y, w, h) for an account, or None. The value
+    is re-validated on read; off-screen/invalid data returns None so callers
+    fall back to default placement rather than guessing."""
+    try:
+        e = _load_geometry_state().get(account)
+        if not isinstance(e, dict):
+            return None
+        geom = (e.get('x'), e.get('y'), e.get('w'), e.get('h'))
+        if not all(isinstance(v, (int, float)) for v in geom):
+            return None
+        geom = tuple(int(v) for v in geom)
+        return geom if _geometry_is_sane(geom) else None
+    except Exception:
+        return None
+
+
+_geometry_sweep_in_flight = threading.Event()
+
+
+def persist_running_geometries(cfg: dict, accounts) -> None:
+    """Best-effort sweep: capture and persist the current window geometry of
+    every running, non-minimized client. Called periodically by the watcher
+    and once at monitor shutdown, so manual window moves are remembered.
+    Guarded so overlapping sweeps never stack."""
+    if _geometry_sweep_in_flight.is_set():
+        return
+    _geometry_sweep_in_flight.set()
+    try:
+        from py.platform_ops import (get_window_geometry_for_restore,
+                                     is_window_minimized)
+        for account in list(accounts or []):
+            try:
+                result = discover_account_process(account)
+            except Exception:
+                continue
+            if not result:
+                continue
+            wid = result.get('window_id')
+            if not wid:
+                continue
+            try:
+                if is_window_minimized(wid):
+                    continue
+                geom = get_window_geometry_for_restore(wid)
+                if geom:
+                    save_account_geometry(account, geom)
+            except Exception:
+                continue
+    finally:
+        _geometry_sweep_in_flight.clear()
+
+
 # ── Public PID cache API (used by watcher, screenshot callback) ────────────────
 
 def get_account_pid(account: str) -> Optional[int]:
@@ -136,7 +231,7 @@ class LaunchResult:
     """
     ok:      bool
     account: str
-    action:  str   # 'launched' | 'relaunched' | 'skipped' | 'failed'
+    action:  str   # 'launched' | 'relaunched' | 'skipped' | 'failed' | 'queued'
     message: str
     pid:     Optional[int] = None
     details: Optional[dict] = field(default=None)
@@ -630,9 +725,14 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
     _log(f'✅ [{account}] Launcher process started (PID {immediate_pid}). '
          f'Waiting for client window...')
 
+    # Fresh launches have no live capture to restore from — fall back to the
+    # persisted last-known-good geometry, if any (see save_account_geometry).
+    saved_geometry = get_saved_account_geometry(account)
+
     threading.Thread(
         target=_discover_and_cache,
         args=(account, immediate_pid, log_fn, cfg),
+        kwargs={'restore_geometry': saved_geometry},
         daemon=True,
     ).start()
 
@@ -739,6 +839,9 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
                     if captured_geometry:
                         _dbg_log(f'📐 [{account}] Captured window position {captured_geometry} '
                                  f'before closing.', extra={'geometry': captured_geometry})
+                        # Persist to disk too, so a delayed relaunch (break-end,
+                        # retry, or after a monitor restart) can still restore it.
+                        save_account_geometry(account, captured_geometry)
                         try:
                             _capture_dpi_log(f'Capture-time dpi_diag={get_dpi_diagnostics(existing_wid)}')
                         except Exception:
@@ -755,6 +858,18 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
         saved_pid = _get_pid(account)
         if saved_pid and is_pid_running(saved_pid):
             # Ownership unconfirmed — window didn't match. Refuse.
+            # Diagnostic: record exactly what the matcher could see, so a
+            # false-negative title match is provable from debug.jsonl
+            # instead of guessed at after the fact.
+            try:
+                from py.platform_ops import list_dreambot_window_titles
+                _dbg_log(f'🔍 [{account}] Ownership refusal diagnostics — '
+                         f'saved PID {saved_pid} alive, no window matched.',
+                         extra={'saved_pid': saved_pid,
+                                'visible_dreambot_windows':
+                                    list_dreambot_window_titles()})
+            except Exception:
+                pass
             return LaunchResult(ok=False, account=account, action='skipped',
                                 message=(
                                     f'A process with saved PID {saved_pid} is running, '
@@ -776,6 +891,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
         threading.Thread(
             target=_discover_and_cache,
             args=(account, immediate_pid, log_fn, cfg),
+            kwargs={'restore_geometry': get_saved_account_geometry(account)},
             daemon=True,
         ).start()
         return LaunchResult(ok=True, account=account, action='launched',

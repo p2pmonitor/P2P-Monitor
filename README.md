@@ -34,15 +34,17 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Launcher tab stores DreamBot launch presets per account
 - `/launch <account>` starts a client only if that account is not already open
 - `/launch all` starts all configured presets that are currently closed and skips already-open clients
-- `/relaunch <account>` force-restarts that account’s DreamBot client even if it is already open
-- `/relaunch all` force-restarts all configured launcher presets with a small stagger
-- When relaunching an account whose client is already open (Discord or the Launcher tab), its window position/size is captured before closing and restored after the new client window appears, where the OS/window manager supports it — best-effort, never blocks the relaunch if it fails
+- `/relaunch <account>` restarts that account's DreamBot client — if **Respect breaks** is enabled and the client is running, the relaunch is queued and executes during the account's own break window (closed at break start, relaunched at break end) instead of interrupting an active session; with the setting off it restarts immediately
+- `/relaunch all` restarts all configured launcher presets one at a time, each account following its own break/retry state independently
+- Relaunch success is confirmed by the script's start message, never by process spawn alone; unconfirmed attempts retry automatically with increasing delays (5/10/20/30, capped at 60 minutes), and pending relaunches are remembered across monitor restarts
+- Client window position/size is captured before closing and persisted per account, so it is restored even when the relaunch happens much later (break-end relaunch, retry, or after the monitor itself restarted) — best-effort, never blocks the relaunch if it fails
 - Launcher command preview shows the exact Java/DreamBot command that will be used
 
 ### Auto restart after Script Stopped
 - Optional auto-restart when P2P Master AI logs `Script Stopped`
 - Skips auto-restart when the stop was manually initiated from the Control Bar
 - Can respect active break state so accounts are not restarted during a break
+- Once auto-restart decides a relaunch is allowed, the launch itself uses the same safeguard as `/relaunch`: Script Started confirmation, automatic retry with backoff if startup isn't confirmed, restart-surviving pending state, and window-position restore
 - Supports random min/max restart delay
 - A selected `0` minute restart delay is treated as about **10 seconds**, not a true instant restart
 - Pending auto-restart is cancelled if the script starts again before the timer fires
@@ -69,6 +71,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Mention ID field accepts `123456789`, `<@123456789>`, or `<@!123456789>` — all normalise automatically
 - Self-healing: automatically detects and recovers from deleted Discord threads, channels, and webhooks — no restart needed
 - Level 99 detection: special "🎆 Level 99! 🎆" embed title, always notifies regardless of the level-up interval
+- **Skip level notifications below N** (Settings → Event Notifications) — Discord-only suppression of low-level level-up messages. Default `1` relays everything (current behavior); `50` suppresses Discord messages for levels 1–49, including the startup catch-up. Suppressed level-ups are still recorded in History and shown in the Event Log, and level 99 / Total Level milestones always post.
 - Repeated related failures (e.g. multiple farming lock failures at once) are grouped into one alert instead of spamming separate messages
 
 ### Stats — levels overview
@@ -288,15 +291,27 @@ Slash commands are available when using Discord bot mode.
 |---|---|
 | `/ss [account]` | Screenshot → post to account thread |
 | `/s` | Post live status of all accounts |
-| `/force <account> <action> [amount]` | Force a skill, action, or time adjustment |
+| `/force <account> <action> [amount]` | Force a non-skill action: Stats, Loot, -10m, +10m, Skip, Quest |
+| `/train <account> <skill>` | Force-train a specific skill (the skill options previously under `/force`) |
+| `/stats <account> <view>` | WOM stats — `current` shows all 24 skill levels; a skill name shows estimated time to 99 for that skill |
+| `/max <account>` | Estimated time to max for that account (same calculation as the Stats tab) |
+| `/wom refresh <account or All>` | Refresh Wise Old Man data — same backend as the Refresh WOM button, with a short cooldown |
 | `/launch <account>` | Launch an account only if its DreamBot client is currently closed |
 | `/launch all` | Launch all configured presets that are currently closed |
-| `/relaunch <account>` | Force-restart an account’s DreamBot client, even if it is already open |
-| `/relaunch all` | Force-restart all configured launcher presets with a small stagger |
+| `/relaunch <account>` | Restart an account's DreamBot client — honors Respect Break (see below) |
+| `/relaunch all` | Restart all configured launcher presets, one at a time |
+
+`/stats` and `/max` read the cached Wise Old Man data. If no data is cached yet (or it looks stale), run `/wom refresh` first.
 
 `/launch` is safe and non-destructive. It skips already-open clients.
 
-`/relaunch` is intentionally destructive. It closes and reopens the matching DreamBot client so it can load the latest script/client state.
+`/relaunch` is intentionally destructive — it closes and reopens the matching DreamBot client so it can load the latest script/client state. How it behaves depends on the **Respect breaks** setting (Settings → Restarts & Updates):
+
+- **Respect breaks off:** the client is closed and restarted immediately. No queue, no break checks.
+- **Respect breaks on, account not on break:** the relaunch is queued. The client stays open until its next break starts, is closed for the duration of that break, and relaunches at the break's end.
+- **Respect breaks on, account already on break:** the client is closed now and relaunches at the break's end.
+
+Every relaunch is confirmed by watching for the script's start message — a spawned process alone never counts as success. If startup is not confirmed within a few minutes (for example, DreamBot/Java is mid-update), the relaunch retries automatically with increasing delays (5, 10, 20, 30, then every 60 minutes) until it succeeds or the script is started another way. Pending relaunches survive a monitor restart. `/relaunch all` processes accounts one at a time; an account waiting out a retry delay or its break window never blocks the others.
 
 ---
 

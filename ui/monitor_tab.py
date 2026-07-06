@@ -634,6 +634,19 @@ class MonitorTab:
     ]
     ALL_CATEGORIES = [c for _, c in FILTER_OPTIONS if c]
 
+    # Pixel tab stops for the Event Log's columns (inside the Text widget,
+    # which has padx=12): dot + time render before the first stop; \t jumps
+    # to ACCOUNT, EVENT, MESSAGE. Header labels are placed at matching x
+    # offsets so the column titles line up with the content.
+    _LOG_TABS       = ('88', '215', '305')
+    _LOG_HDR_XS     = ((30, 'TIME'), (100, 'ACCOUNT'), (227, 'EVENT'), (317, 'MESSAGE'))
+    LOG_BADGES      = {
+        'error': 'ERROR', 'warn': 'WARN', 'quest': 'QUEST', 'task': 'TASK',
+        'chat': 'CHAT', 'drop': 'DROP', 'death': 'DEATH', 'levelup': 'LEVEL UP',
+        'slayer_complete': 'SLAYER', 'slayer_skip': 'SLAYER',
+        'script_event': 'SYSTEM', 'ok': 'SYSTEM', 'info': 'INFO', 'ts': 'INFO',
+    }
+
     def _build_event_log(self, parent):
         app = self.app
         card = tk.Frame(parent, bg=app.BG3, padx=14, pady=12)
@@ -641,56 +654,102 @@ class MonitorTab:
 
         hdr = tk.Frame(card, bg=app.BG3)
         hdr.pack(fill='x', pady=(0, 8))
-        tk.Label(hdr, text="📜", font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
+        tk.Label(hdr, text="📈", font=(app.SANS[0], 12), bg=app.BG3, fg=app.ACC
                  ).pack(side='left', padx=(0, 6))
         tk.Label(hdr, text="EVENT LOG", font=app.SANSB, bg=app.BG3, fg=app.FG
                  ).pack(side='left')
+
+        # Right-side controls, mockup order left→right: filter | search | clear
+        tk.Button(hdr, text="🗑 Clear Log", font=app.SANSS, bg=app.BG4, fg=app.FG2,
+            relief='flat', padx=8, pady=3, cursor='hand2', highlightthickness=0,
+            command=self._clear_log).pack(side='right')
+
+        self._search_var = tk.StringVar(value="")
+        search_entry = tk.Entry(hdr, textvariable=self._search_var, font=app.SANSS,
+                                 bg=app.BG4, fg=app.FG, relief='flat', insertbackground=app.ACC,
+                                 width=16, highlightthickness=0)
+        search_entry.pack(side='right', padx=(0, 8), ipady=3)
+        self._search_placeholder(search_entry)
+        self._search_var.trace_add('write', lambda *_: self._debounce_search())
 
         self._filter_var = tk.StringVar(value="All Events")
         filter_cb = ttk.Combobox(hdr, textvariable=self._filter_var, state='readonly',
                                   font=app.SANSS, width=10,
                                   values=[lbl for lbl, _ in self.FILTER_OPTIONS])
-        filter_cb.pack(side='right')
+        filter_cb.pack(side='right', padx=(0, 8))
         filter_cb.bind('<<ComboboxSelected>>', lambda e: self._apply_category_filter())
 
-        self._search_var = tk.StringVar(value="")
-        search_entry = tk.Entry(hdr, textvariable=self._search_var, font=app.SANSS,
-                                 bg=app.BG4, fg=app.FG, relief='flat', insertbackground=app.ACC,
-                                 width=14)
-        search_entry.pack(side='right', padx=(0, 8), ipady=3)
-        self._search_placeholder(search_entry)
-        self._search_var.trace_add('write', lambda *_: self._debounce_search())
-
-        tk.Button(hdr, text="🗑 Clear Log", font=app.SANSS, bg=app.BG4, fg=app.FG2,
-            relief='flat', padx=8, pady=3, cursor='hand2',
-            command=self._clear_log).pack(side='right', padx=(0, 8))
+        # Column header strip — TIME / ACCOUNT / EVENT / MESSAGE, aligned to
+        # the Text widget's tab stops below.
+        col_hdr = tk.Frame(card, bg=app.BG, height=24)
+        col_hdr.pack(fill='x')
+        col_hdr.pack_propagate(False)
+        for x, label in self._LOG_HDR_XS:
+            tk.Label(col_hdr, text=label, font=(app.SANS[0], 8, 'bold'),
+                     bg=app.BG, fg=app.FG2).place(x=x, y=5)
+        tk.Frame(card, bg=app.BG4, height=1).pack(fill='x')
 
         lf = tk.Frame(card, bg=app.BG)
         lf.pack(fill='both', expand=True)
-        app._log_text = tk.Text(lf, bg=app.BG, fg=app.FG, font=app.MONO, relief='flat',
+        app._log_text = tk.Text(lf, bg=app.BG, fg=app.FG, font=app.SANSS, relief='flat',
             wrap='word', state='disabled', insertbackground=app.ACC, height=12, width=40,
-            selectbackground=app.BG3, padx=12, pady=8, spacing1=2)
+            selectbackground=app.BG3, padx=12, pady=8, spacing1=4,
+            tabs=self._LOG_TABS, highlightthickness=0)
         scr = ttk.Scrollbar(lf, command=app._log_text.yview)
         scr.pack(side='right', fill='y')
         app._log_text.pack(fill='both', expand=True)
         app._log_text.configure(yscrollcommand=scr.set)
+
+        # Message-text colors: neutral by default (the badge carries the event
+        # type); only genuinely alarming rows stay tinted.
         for tag, col in [
             ('info',            app.FG2),
             ('ts',              app.FG2),
             ('warn',            app.ACC2),
-            ('ok',              app.GREEN),
-            ('quest',           app.PUR),
-            ('task',            app.ACC),
-            ('chat',            app.YEL),
+            ('ok',              app.FG2),
+            ('quest',           app.FG),
+            ('task',            app.FG),
+            ('chat',            app.FG),
             ('error',           app.RED),
-            ('drop',            app.GREEN),
+            ('drop',            app.FG),
             ('death',           app.RED),
-            ('levelup',         app.ACC2),
-            ('slayer_complete', app.PUR),
-            ('slayer_skip',     app.RED),
+            ('levelup',         app.FG),
+            ('slayer_complete', app.FG),
+            ('slayer_skip',     app.FG),
             ('script_event',    app.FG2),
         ]:
             app._log_text.tag_configure(tag, foreground=col)
+
+        # Column-piece tags
+        app._log_text.tag_configure('col_time',    foreground=app.FG2)
+        app._log_text.tag_configure('col_account', foreground=app.FG2)
+        app._log_text.tag_configure('dot_ok',      foreground=app.GREEN)
+        app._log_text.tag_configure('dot_warn',    foreground=app.YEL)
+        app._log_text.tag_configure('dot_err',     foreground=app.RED)
+        # Continuation lines of wrapped messages align under the MESSAGE column
+        try:
+            app._log_text.tag_configure('row', lmargin2=int(self._LOG_TABS[-1]))
+        except Exception:
+            pass
+
+        # Event badge pills — colored background, dark text (mockup style)
+        for tag, bg, fg in [
+            ('badge_error',           app.RED,   app.BG),
+            ('badge_warn',            app.YEL,   app.BG),
+            ('badge_quest',           app.PUR,   app.BG),
+            ('badge_task',            app.BG4,   app.ACC),
+            ('badge_chat',            app.YEL,   app.BG),
+            ('badge_drop',            app.GREEN, app.BG),
+            ('badge_death',           app.RED,   app.BG),
+            ('badge_levelup',         app.GREEN, app.BG),
+            ('badge_slayer_complete', app.PUR,   app.BG),
+            ('badge_slayer_skip',     app.PUR,   app.BG),
+            ('badge_script_event',    app.ACC,   app.BG),
+            ('badge_ok',              app.BG4,   app.FG2),
+            ('badge_info',            app.BG4,   app.FG2),
+        ]:
+            app._log_text.tag_configure(tag, background=bg, foreground=fg,
+                                        font=(app.SANS[0], 8, 'bold'))
         # Whole-line category tags used by the event-type filter (elide-based
         # show/hide). Configured once here; App._log() just adds membership.
         for cat in self.ALL_CATEGORIES:

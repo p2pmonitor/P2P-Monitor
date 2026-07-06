@@ -74,7 +74,7 @@ DEFAULT_WOM_RATES = {
     "Crafting": {"xp_hr": 180000, "mode": "active", "label": "Cutting rubies"},
     "Fletching": {"xp_hr": 160000, "mode": "active", "label": "Stringing longbows"},
     "Slayer": {"xp_hr": 15000, "mode": "active", "label": "General Slayer progression"},
-    "Hunter": {"xp_hr": 25000, "mode": "mixed", "label": "Birdhouses"},
+    "Hunter": {"xp_hr": 55000, "mode": "passive", "label": "Birdhouses"},
     "Mining": {"xp_hr": 50000, "mode": "active", "label": "Motherlode Mine"},
     "Smithing": {"xp_hr": 170000, "mode": "active", "label": "Blast Furnace gold bars"},
     "Fishing": {"xp_hr": 55000, "mode": "active", "label": "Tempoross \u2192 barb fishing"},
@@ -82,7 +82,7 @@ DEFAULT_WOM_RATES = {
     "Firemaking": {"xp_hr": 250000, "mode": "active", "label": "Wintertodt"},
     "Woodcutting": {"xp_hr": 60000, "mode": "active", "label": "Willows \u2192 redwoods"},
     "Farming": {"xp_hr": 72000, "mode": "passive", "label": "Hourly snape grass + best herb runs"},
-    "Sailing": {"xp_hr": 60000, "mode": "experimental", "label": "Mercenary Shipwrecks"},
+    "Sailing": {"xp_hr": 60000, "mode": "active", "label": "Mercenary Shipwrecks"},
 }
 
 

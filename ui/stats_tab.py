@@ -963,10 +963,19 @@ class StatsTab:
                     c.create_text(cx, cy, text='No data', fill=app.FG2, font=app.SANSS)
                     return
 
-                total = sum(v for _, v in grouped) or 1
+                # 'Other' is excluded from the wedges — with 17+ bucketed
+                # skills it always dominates the ring and drowns out the top
+                # skills the chart exists to show. It stays visible as its own
+                # row in the skill-bar list next to the donut, and the center
+                # total still counts it (the total is real, only the slice is
+                # hidden).
+                total  = sum(v for _, v in grouped) or 1
+                named  = [(n, v) for n, v in grouped if not n.startswith('Other')]
+                wedges = named if named else grouped
+                wedge_total = sum(v for _, v in wedges) or 1
                 start = 90.0
-                for i, (name, val) in enumerate(grouped):
-                    extent = -360.0 * (val / total)
+                for i, (name, val) in enumerate(wedges):
+                    extent = -360.0 * (val / wedge_total)
                     color = self._color_for_skill_slot(i, name)
                     c.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
                                  fill=color, outline=app.BG3, width=2, style=tk.PIESLICE)
@@ -978,6 +987,9 @@ class StatsTab:
                 c.create_text(cx, cy - 7, text=str(total), fill=app.FG,
                               font=(app.SANS[0], 15, 'bold'))
                 c.create_text(cx, cy + 9, text='TOTAL', fill=app.FG2, font=app.SANSS)
+                if named and len(named) != len(grouped):
+                    c.create_text(cx, cy + 22, text='top skills', fill=app.FG2,
+                                  font=(app.SANS[0], 7))
             except Exception as e:
                 self._show_donut_error(str(e))
         finally:

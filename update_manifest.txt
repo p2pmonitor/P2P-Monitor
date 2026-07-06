@@ -24,6 +24,7 @@ py/screenshot.py
 py/paint.py
 py/watcher.py
 py/launcher.py
+py/relaunch.py
 py/inferno.py
 py/wom.py
 ui/__init__.py

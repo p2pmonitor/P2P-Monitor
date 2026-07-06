@@ -228,16 +228,108 @@ def find_window_ids_by_name(name):
         return []
 
 
+def _ci_regex_pattern(text):
+    """Build a case-insensitive POSIX extended regex from a literal string.
+    xdotool's --name pattern is a case-SENSITIVE regex with no -i flag, so
+    each letter becomes a [xX] class and regex metacharacters are escaped —
+    an account named 'MyAccount' matches a title showing 'myaccount',
+    'MYACCOUNT', or any mix, and names containing regex specials can't
+    break or over-match the pattern."""
+    out = []
+    for ch in text:
+        if ch.isalpha():
+            out.append(f'[{ch.lower()}{ch.upper()}]')
+        elif ch in r'\^$.[]|()*+?{}':
+            out.append('\\' + ch)
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
 def _find_window_ids_linux(name):
+    """Find window IDs whose title contains 'name' (case-insensitive).
+
+    Ownership guard (parity with the Windows matcher): each candidate's
+    actual title is read back via `xdotool getwindowname` and must also
+    contain 'dreambot' (case-insensitive) — so a terminal or editor whose
+    title merely mentions the account name can never be matched (and
+    therefore never terminated). If the title read-back itself fails for a
+    candidate, the candidate is dropped: ownership could not be verified.
+    """
     try:
         result = subprocess.run(
-            ['xdotool', 'search', '--name', name.lower()],
+            ['xdotool', 'search', '--name', _ci_regex_pattern(name)],
             capture_output=True, text=True, timeout=5
         )
         wids = result.stdout.strip().split()
-        return wids if wids else []
+        if not wids:
+            return []
+        verified = []
+        needle = (name or '').lower()
+        for wid in wids:
+            try:
+                r = subprocess.run(['xdotool', 'getwindowname', wid],
+                                   capture_output=True, text=True, timeout=5)
+                title = (r.stdout or '').strip().lower()
+            except Exception:
+                continue
+            if 'dreambot' in title and needle in title:
+                verified.append(wid)
+        return verified
     except Exception:
         return []
+
+
+def list_dreambot_window_titles():
+    """Diagnostic helper: return [(window_id, title), ...] for every visible
+    window whose title contains 'dreambot' (case-insensitive). Used only for
+    debug logging when relaunch ownership validation refuses — shows exactly
+    what the matcher could see at that moment. Never raises."""
+    out = []
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype  = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetWindowTextW.restype  = ctypes.c_int
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype  = ctypes.c_bool
+
+            titles = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lp):
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        n = user32.GetWindowTextLengthW(hwnd)
+                        if n > 0:
+                            buf = ctypes.create_unicode_buffer(n + 1)
+                            user32.GetWindowTextW(hwnd, buf, n + 1)
+                            t = buf.value or ''
+                            if 'dreambot' in t.lower():
+                                titles.append((str(int(hwnd)), t))
+                except Exception:
+                    pass
+                return True
+            user32.EnumWindows(_enum, 0)
+            out = titles
+        else:
+            r = subprocess.run(
+                ['xdotool', 'search', '--name', _ci_regex_pattern('dreambot')],
+                capture_output=True, text=True, timeout=5)
+            for wid in r.stdout.strip().split():
+                try:
+                    t = subprocess.run(['xdotool', 'getwindowname', wid],
+                                       capture_output=True, text=True, timeout=5)
+                    out.append((wid, (t.stdout or '').strip()))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
 
 
 def _find_window_ids_windows(name):

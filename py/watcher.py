@@ -191,6 +191,7 @@ class LogWatcher:
         self._on_launch_all_cb  = on_launch_all_cb
         self._on_relaunch_cb     = on_relaunch_cb      # passed through to GatewayRunner
         self._on_relaunch_all_cb = on_relaunch_all_cb  # passed through to GatewayRunner
+        self.relaunch_mgr        = None                # created in start()
         self._running  = False
         self._thread   = None
         self._bot_thread = None
@@ -281,6 +282,9 @@ class LogWatcher:
             'set_account_pid':  self._set_account_pid_cb,
         })
         self._ss_svc.start()
+        from py.relaunch import RelaunchManager
+        self.relaunch_mgr = RelaunchManager(self)
+        self.relaunch_mgr.start()
         self._thread  = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         if cfg.get('bot_token'):
@@ -310,6 +314,12 @@ class LogWatcher:
 
     def stop(self):
         self._running = False
+        mgr = getattr(self, 'relaunch_mgr', None)
+        if mgr is not None:
+            try:
+                mgr.stop()   # persists pending relaunch state to disk
+            except Exception:
+                pass
         # Cancel any pending auto-restart timers before tearing down
         with self._accounts_lock:
             for state in self._accounts.values():
@@ -1283,6 +1293,18 @@ class LogWatcher:
                 self._prune_screenshots()
                 self._prune_dedupe()
                 self.on_status()
+            # Persist running client window positions every ~2 minutes so a
+            # delayed relaunch / monitor restart can restore them (item:
+            # window geometry forgotten after delayed relaunch). Runs on its
+            # own daemon thread — window enumeration never blocks this loop.
+            if now - getattr(self, '_last_geom_sweep', 0) >= 120:
+                self._last_geom_sweep = now
+                accounts_snapshot = list(self._accounts.keys())
+                if accounts_snapshot:
+                    from py.launcher import persist_running_geometries
+                    threading.Thread(
+                        target=persist_running_geometries,
+                        args=(self.cfg, accounts_snapshot), daemon=True).start()
             time.sleep(interval)
 
     # ── Startup catchup ────────────────────────────────────────────────────────
@@ -1950,14 +1972,17 @@ class LogWatcher:
                         self._router.post_event(account, 'death',
                             _ping(death_payload(mention, account, task_context=task_ctx), 'death'), url=url)
                 elif etype == 'levelup':
-                    level     = int(activity) if activity.isdigit() else 0
-                    total_lvl = ev.get('_total_level')
-                    is_99     = ev.get('_is_99', False)
-                    url = self._router.resolve_url(account, 'levelup')
-                    if url:
-                        self._router.post_event(account, 'levelup',
-                            _ping(levelup_payload(mention, account, value, level,
-                                            total_level=total_lvl, is_99=is_99), 'levelup'), url=url)
+                    if ev.get('_suppress_discord'):
+                        pass  # below "Skip level notifications below N" — Discord only
+                    else:
+                        level     = int(activity) if activity.isdigit() else 0
+                        total_lvl = ev.get('_total_level')
+                        is_99     = ev.get('_is_99', False)
+                        url = self._router.resolve_url(account, 'levelup')
+                        if url:
+                            self._router.post_event(account, 'levelup',
+                                _ping(levelup_payload(mention, account, value, level,
+                                                total_level=total_lvl, is_99=is_99), 'levelup'), url=url)
                 elif etype == 'script_event':
                     ar_detail = ''
                     if value == 'stop':
@@ -2106,6 +2131,19 @@ class LogWatcher:
                          f'monitor-initiated relaunch started during delay.')
                 return
             self.log(f'🔄 [{account}] Auto restart launching now...')
+            # Normal path: route the actual attempt through the RelaunchManager
+            # so auto-restarts get Script Started confirmation, retry/backoff,
+            # persisted pending state, geometry restore, and the one-active-
+            # launch-at-a-time worker. All auto-restart gates above are
+            # unchanged — the manager only handles the launch itself.
+            mgr = getattr(self, 'relaunch_mgr', None)
+            if mgr is not None:
+                try:
+                    mgr.request_auto_restart_launch(account)
+                    return
+                except Exception as _mgr_exc:
+                    self.log(f'⚠ [{account}] RelaunchManager unavailable '
+                             f'({_mgr_exc}) — falling back to direct relaunch.')
             try:
                 result = relaunch_account(self.cfg, account, log_fn=self.log)
                 if not result.ok:
@@ -2203,6 +2241,13 @@ class LogWatcher:
                 bl_ms = parse_break_length_ms(lines, idx + 1, max_search=3)
                 if bl_ms is not None:
                     state._break_length_ms = bl_ms    # persist for break-end scheduling
+                # A relaunch queued behind Respect Break executes at this
+                # account's own break window — close now, relaunch at break end.
+                if self.relaunch_mgr is not None:
+                    try:
+                        self.relaunch_mgr.on_break_started(folder)
+                    except Exception as _rm_exc:
+                        self._dbg(f'[relaunch] on_break_started failed for {folder}: {_rm_exc}')
             elif _is_break_over(b.lower()):
                 # Real completed break — not 'Break over -> Startup'
                 state.on_break = False
@@ -2380,6 +2425,19 @@ class LogWatcher:
                 state.notified_levels[skill] = level
                 if not should_notify or self._is_muted(folder):
                     continue
+                # "Skip level notifications below N" — Discord-only suppression.
+                # The level-up is still logged to the Event Log and recorded in
+                # History below; only the Discord relay is skipped. Level 99 and
+                # Total Level milestones are never suppressed. An unparsed level
+                # (level == 0) preserves existing behavior rather than
+                # incorrectly suppressing.
+                try:
+                    skip_below = max(1, int(self.cfg.get('levelup_skip_below', 1)))
+                except (ValueError, TypeError):
+                    skip_below = 1
+                if (skip_below > 1 and level and level < skip_below
+                        and not is_99 and skill != 'Total Level'):
+                    ev = dict(ev, _suppress_discord=True)
                 prefix = "🎆" if is_99 else "🎉"
                 self.log(f"{prefix} [{folder}] Level up: {skill} → {level}")
 
@@ -2393,6 +2451,13 @@ class LogWatcher:
                     except Exception as _ar_exc:
                         self._dbg(f'[auto_restart] scheduling error for {folder}: {_ar_exc}')
                 elif value == 'start':
+                    # Confirm any in-flight queued relaunch — Script Started is
+                    # the manager's success condition (never process spawn).
+                    if self.relaunch_mgr is not None:
+                        try:
+                            self.relaunch_mgr.on_script_started(folder)
+                        except Exception as _rm_exc:
+                            self._dbg(f'[relaunch] on_script_started failed for {folder}: {_rm_exc}')
                     # Cancel pending restart if script started before timer fired
                     if state._pending_restart_timer is not None:
                         state._pending_restart_timer.cancel()

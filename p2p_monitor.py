@@ -28,6 +28,7 @@ File structure:
 
 import os
 import platform as _plat
+import re
 import shutil
 import sys
 import threading
@@ -62,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.0.2"
+VERSION      = "2.1.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -104,6 +105,7 @@ DEFAULT_CFG = {
     "monitor_script_start": True, "monitor_script_pause": True,
     "monitor_script_resume": True, "monitor_script_stop": True,
     "levelup_every": 5,
+    "levelup_skip_below": 1,
     "debug": False,
     "enable_usage_stats": True,
     "usage_stats_url": "https://stats.p2pmonitor.workers.dev",
@@ -205,6 +207,14 @@ class App(tk.Tk):
         self._tray_icon = None
         self.minsize(960, 680)
         self.configure(bg=self.BG)
+        # Linux Tk draws a light focus-highlight ring (highlightthickness=1
+        # with a bright default highlightbackground) around classic widgets —
+        # the "white outlined boxes" visible around Settings controls. Windows
+        # renders these invisibly, so zeroing them globally is a no-op there
+        # and removes the outlines on Linux without touching per-widget code.
+        for cls in ('Checkbutton', 'Radiobutton', 'Spinbox', 'Entry',
+                    'Button', 'Listbox'):
+            self.option_add(f'*{cls}.highlightThickness', 0)
         self.cfg     = load_config(DEFAULT_CFG)
         _corrections = sanitize_config(
             self.cfg, DEFAULT_CFG,
@@ -389,7 +399,7 @@ class App(tk.Tk):
                 t.delete('1.0', f'{line_count - 1800}.0')
             line_start = t.index('end-1c')
             ts = datetime.now().strftime('%H:%M:%S')
-            t.insert('end', f"[{ts}] ", 'ts')
+            # ── Classify (same emoji rules as before) ──────────────────────
             if any(x in msg for x in ['❌', '🚫']):               tag = 'error'
             elif '⚠' in msg:                                        tag = 'warn'
             elif any(x in msg for x in ['🏆', '📜']):              tag = 'quest'
@@ -403,7 +413,39 @@ class App(tk.Tk):
             elif '🖥️' in msg:                                        tag = 'script_event'
             elif any(x in msg for x in ['💓', '🟢', '🗡️']):        tag = 'ok'
             else:                                                    tag = 'info'
-            t.insert('end', msg + '\n', tag)
+
+            # ── Split into (account, message) columns ──────────────────────
+            # Typical shapes: "🎉 [Account] Level up: …", "⚠ [Account] …",
+            # "▶ Starting P2P Monitor…", "🤖 Gateway connected…". The leading
+            # symbol cluster is dropped (the EVENT badge conveys the type);
+            # a [bracketed] token right after it becomes the ACCOUNT column.
+            body = msg.strip()
+            m = re.match(r'^([^\w\s\[]+(?:\uFE0F)?)\s*(.*)$', body)
+            if m:
+                body = m.group(2).strip()
+            account = ''
+            m = re.match(r'^\[([^\]\n]{1,32})\]\s*(.*)$', body)
+            if m:
+                account, body = m.group(1), m.group(2).strip()
+            if len(account) > 16:
+                account = account[:15] + '…'
+            body = body or msg.strip()
+
+            from ui.monitor_tab import MonitorTab
+            badge = MonitorTab.LOG_BADGES.get(tag, 'INFO')
+            dot_tag = ('dot_err' if tag in ('error', 'death')
+                       else 'dot_warn' if tag == 'warn' else 'dot_ok')
+
+            t.insert('end', '● ', dot_tag)
+            t.insert('end', ts, 'col_time')
+            t.insert('end', '\t')
+            t.insert('end', account or '—', 'col_account')
+            t.insert('end', '\t')
+            t.insert('end', f' {badge} ', f'badge_{tag}')
+            t.insert('end', '\t')
+            t.insert('end', body + '\n', tag)
+            # Wrapped continuation lines align under the MESSAGE column
+            t.tag_add('row', line_start, 'end')
             # Whole-line event-category tag — used only by the Monitor tab's
             # "All Events" filter dropdown (elide-based show/hide on the Text
             # widget). Purely additive: derived from the same `tag` already
@@ -546,10 +588,11 @@ class App(tk.Tk):
                 self.cfg, account, log_fn=self._log),
             on_launch_all_cb=lambda: _launcher.launch_all(
                 self.cfg, log_fn=self._log),
-            on_relaunch_cb=lambda account: _launcher.smart_launch(
-                self.cfg, account, log_fn=self._log),
-            on_relaunch_all_cb=lambda: _launcher.relaunch_all(
-                self.cfg, log_fn=self._log),
+            # /relaunch flows through the RelaunchManager so Respect Break is
+            # honored BEFORE a running client is closed, and every attempt gets
+            # startup confirmation + retry/backoff (see py/relaunch.py).
+            on_relaunch_cb=lambda account: self.watcher.relaunch_mgr.request_relaunch(account),
+            on_relaunch_all_cb=lambda: self.watcher.relaunch_mgr.request_relaunch_all(),
         )
         self.watcher.start(self.cfg)
 
@@ -1412,6 +1455,19 @@ class App(tk.Tk):
 
     def _do_quit(self):
         self._save_window_size()
+        # Best-effort: persist current client window positions before exiting,
+        # so a relaunch after the monitor restarts can restore them. Bounded
+        # join — never delays shutdown more than a couple of seconds.
+        try:
+            if self.watcher and getattr(self.watcher, '_accounts', None):
+                from py.launcher import persist_running_geometries
+                t = threading.Thread(target=persist_running_geometries,
+                                     args=(self.cfg, list(self.watcher._accounts.keys())),
+                                     daemon=True)
+                t.start()
+                t.join(timeout=2.5)
+        except Exception:
+            pass
         if self.watcher:
             self.watcher.stop()
         save_config(self.cfg)
