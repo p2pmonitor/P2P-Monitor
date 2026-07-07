@@ -338,36 +338,6 @@ def discover_account_process(account: str) -> Optional[dict]:
     return find_account_window_and_pid(account)  # None or dict; raises ValueError if ambiguous
 
 
-def validate_account_pid(account: str, pid: int) -> bool:
-    """
-    Validate that 'pid' belongs to the DreamBot client for 'account'.
-
-    Strict contract — returns True ONLY when:
-        1. The PID is still alive, AND
-        2. A DreamBot window for 'account' is found, AND
-        3. The window-resolved PID equals 'pid'.
-
-    Returns False in all other cases:
-        - PID is dead
-        - No matching DreamBot window found for 'account'
-        - Multiple windows matched (ambiguous)
-        - Window-resolved PID does not equal 'pid'
-
-    "PID is alive" alone is not sufficient — it does not prove that the process
-    belongs to this account. No command-line fallback is applied in beta.1.
-    """
-    from py.platform_ops import is_pid_running
-    if not is_pid_running(pid):
-        return False
-    try:
-        info = discover_account_process(account)
-    except ValueError:
-        return False  # multiple windows — ambiguous, refuse
-    if not info:
-        return False  # no matching window found; cannot confirm ownership
-    return info.get('pid') == pid
-
-
 def _discover_with_timeout(account: str, timeout: int = 30, poll: int = 2) -> Optional[dict]:
     """
     Poll for the real DreamBot client window PID, with a timeout.
@@ -991,34 +961,3 @@ def launch_all(cfg: dict, log_fn=None) -> list:
     return results
 
 
-def relaunch_all(cfg: dict, log_fn=None) -> list:
-    """
-    Relaunch (close-if-open then launch) every account that has a launcher preset.
-    Uses smart_launch — running accounts are closed and relaunched; closed accounts
-    are launched fresh. This is the destructive counterpart to launch_all.
-
-    - Staggers launches: 5 seconds between each account.
-    - Continues on individual failures.
-    - Returns list[LaunchResult].
-    """
-    def _log(msg):
-        if log_fn:
-            log_fn(msg)
-
-    presets = list_presets(cfg)
-    if not presets:
-        return [LaunchResult(ok=False, account='(all)', action='failed',
-                             message='No launcher presets configured.')]
-
-    results = []
-    for i, preset in enumerate(presets):
-        account = preset.get('account', '').strip()
-        if not account:
-            continue
-        if i > 0:
-            _log('⏳ [relaunch_all] Stagger: waiting 5s before next account...')
-            time.sleep(5)
-        _log(f'🔄 [relaunch_all] Processing: {account}')
-        results.append(smart_launch(cfg, account, log_fn=log_fn))
-
-    return results

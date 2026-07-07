@@ -1,5 +1,84 @@
 # Changelog
 
+## v2.1.3
+
+### Fixed
+
+**1. Slash commands re-registered on every monitor start.**
+The _slash_commands_hash fingerprint (added in v2.1.1 so unchanged command
+sets skip registration) was being deleted at every startup by
+sanitize_config's unknown-key pruning — it was never added to DEFAULT_CFG,
+so each launch re-synced all commands ("Slash command registration complete
+— 9 commands synced" on every start). Harmless in practice (a single
+rate-limit-safe bulk PUT), but it defeated the skip-when-unchanged design.
+The key is now declared in DEFAULT_CFG; after one successful sync, later
+starts log "Slash commands unchanged — skipping registration". Verified by
+a sanitize_config regression test: the hash survives, junk keys are still
+pruned.
+
+**2. Multi-type drops merge again (Valuable + Collection).**
+A single drop that is both a valuable drop and a collection-log entry was
+producing two separate events — two Event Log rows and two Discord pings —
+instead of one "Drop (Valuable + Collection)". Cause: the drop merger keyed
+on the raw item text, and DreamBot writes the same item differently per
+line ("Eternal gem (7,480,942 coins)" on the valuable line, "Eternal gem"
+on the collection line), so the keys never matched. This has been the case
+since the merger was written — Untradeable + Collection pairs merged fine
+because their names are identical, which is why it appeared to have
+"worked before". The grouping key now strips the trailing "(N coins)"
+suffix and case for matching; the displayed item keeps the coin-valued
+form, and the merged label renders as "Valuable + Collection". Items whose
+names legitimately contain parentheses are unaffected (suffix must match
+"(N coins)" exactly), and the pet/collection consumption path is unchanged.
+
+**3. Backfill checkpoint writes consolidated.**
+Each backfill checkpoint previously wrote offsets.json twice back-to-back
+(plain marker + structured meta). set_last_seen now accepts optional
+file_key/line_index and writes both in a single merge-only pass;
+set_last_seen_meta was removed. Behavior is byte-for-byte equivalent —
+same keys, same values, same self-invalidation on live-loop updates — and
+the full v2.1.2 backfill test suite (idempotency, skip-proof resume,
+stale-meta fallback) passes unchanged.
+
+### Removed (dead code — full audit sweep, all verified zero callers)
+
+- launcher.smart_launch and launcher.relaunch_all — orphaned when v2.1.0
+  routed /relaunch through the RelaunchManager; relaunch_all's only
+  remaining references were its own log strings, and smart_launch was only
+  called by relaunch_all. A stale launcher_tab docstring reference was
+  updated.
+- The scanned-logs mechanism (history.record_log_scanned,
+  history.get_scanned_logs, and the rotation-handler call that fed it) —
+  write-only state nothing ever read. Existing scanned entries in
+  offsets.json are simply ignored.
+- watcher._base_log_name — its sole caller was the removed
+  record_log_scanned block.
+- launcher.validate_account_pid, paint.click_at_offset,
+  platform_ops.is_account_process_running, platform_ops.get_process_cmdline,
+  util.get_window_geom (plus its module-docstring mention) — zero callers.
+- The unused psutil import fallback block in watcher.py (neither _psutil
+  nor _PSUTIL_AVAILABLE was ever referenced).
+- Unused locals: EnumDisplayMonitors callback params renamed to
+  _hmon/_hdc (signature is ctypes-required, values unused); the unused
+  force_full parameter removed from HistoryTab.load().
+
+The intentional availability probes (import discord in the two _ensure
+checks, PIL ImageGrab/ImageChops on the Windows screenshot path) are NOT
+dead code and were left in place.
+
+### Changed
+
+**Launcher tab Relaunch dialog labeled as a manual override.** The
+already-running dialog now states that Relaunch here closes and restarts
+immediately, ignoring Respect Break, and points to Discord /relaunch for
+break-aware queuing. (A Queue-for-Break option in this dialog is a
+candidate for a future minor release.)
+
+### Files changed
+p2p_monitor.py, py/watcher.py, py/history.py, py/launcher.py,
+py/platform_ops.py, py/paint.py, py/reader.py, py/util.py,
+ui/launcher_tab.py, ui/history_tab.py, CHANGELOG.md
+
 ## v2.1.2
 
 ### Fixed

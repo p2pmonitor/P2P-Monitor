@@ -13,7 +13,7 @@ simplification of the mockup, same call made for Settings/Monitor/Status.
 
 Preserves exactly (same public names, same signatures, same callers in
 p2p_monitor.py / ui/status_tab.py):
-  - load(force_full=False)   — reload cache from disk, rebuild display
+  - load()                   — reload cache from disk, rebuild display
   - append_entry(account, entry) — live append + debounced rebuild
   - focus_account(account)   — collapse all, expand+scroll to one account
   - on_tab_shown()           — reload on tab switch
@@ -200,7 +200,7 @@ class HistoryTab:
         self._search_debounce_id = self.app.after(250, self._apply_filters)
 
     # ── Public API (called by App / Status tab) — unchanged signatures ─────────
-    def load(self, force_full=False):
+    def load(self):
         """Reload cache from disk and rebuild the display."""
         self._debounce_id = None
         if self._filter_date:

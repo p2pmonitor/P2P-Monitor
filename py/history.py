@@ -42,19 +42,20 @@ def get_last_seen_meta(account):
     return meta if isinstance(meta, dict) else None
 
 
-def set_last_seen_meta(account, line, file_key, line_index):
-    offsets = load_offsets()
-    offsets[f'{account}__last_seen_meta'] = {
-        'line': line, 'file_key': file_key, 'line_index': int(line_index)}
-    save_offsets(offsets)
-
-
-def set_last_seen(account, line):
+def set_last_seen(account, line, file_key=None, line_index=None):
     """Store the last log line seen by backfill for this account.
     Merges only the __last_seen key into the existing offsets file rather than
     doing a full load+save cycle — avoids unnecessary disk reads on every poll tick.
-    """
+
+    When file_key and line_index are provided (backfill checkpoints), the
+    structured __last_seen_meta checkpoint is written in the SAME merge/write
+    — one disk write per checkpoint, not two. When they are omitted (live
+    poll loop), any existing meta is left untouched on disk; it self-
+    invalidates on read because its stored 'line' no longer matches the
+    updated marker (see get_last_seen_meta)."""
     key = f'{account}__last_seen'
+    meta_key = f'{account}__last_seen_meta'
+    write_meta = file_key is not None and line_index is not None
     try:
         data = {}
         if OFFSETS_FILE.exists():
@@ -65,9 +66,12 @@ def set_last_seen(account, line):
                         data = loaded
             except Exception:
                 pass
-        if data.get(key) == line:
+        if data.get(key) == line and not write_meta:
             return  # already current — skip the write entirely
         data[key] = line
+        if write_meta:
+            data[meta_key] = {'line': line, 'file_key': file_key,
+                              'line_index': int(line_index)}
         OFFSETS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(OFFSETS_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f)
@@ -220,47 +224,7 @@ def append_history(account, etype, value, activity='', timestamp=None, log_fn=No
         if debug and log_fn:
             log_fn(f'[DEBUG] append_history write failed for {account}: {e}')
 
-def record_log_scanned(account, log_filename, log_fn=None, debug=False):
-    """Record that a log file has been fully backfilled for this account."""
-    try:
-        account_history_dir(account).mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        if debug and log_fn:
-            log_fn(f'[DEBUG] record_log_scanned mkdir failed for {account}: {e}')
-        return
-    rec = {'type': 'scan', 'file': log_filename}
-    try:
-        with open(history_file(account), 'a', encoding='utf-8') as f:
-            f.write(json.dumps(rec) + '\n')
-    except Exception as e:
-        if debug and log_fn:
-            log_fn(f'[DEBUG] record_log_scanned write failed for {account}/{log_filename}: {e}')
-
 # ── Read ───────────────────────────────────────────────────────────────────────
-def get_scanned_logs(account, log_fn=None, debug=False):
-    """Return set of filenames already fully backfilled for this account."""
-    acc_dir = account_history_dir(account)
-    if not acc_dir.exists():
-        return set()
-    scanned = set()
-    files = list(acc_dir.glob('history*.jsonl'))
-    for hf in files:
-        try:
-            with open(hf, 'r', encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    try:
-                        rec = json.loads(line.strip())
-                        if rec.get('type') == 'scan':
-                            fname = rec.get('file', '')
-                            if fname:
-                                scanned.add(fname)
-                    except Exception:
-                        pass
-        except Exception as e:
-            if debug and log_fn:
-                log_fn(f'[DEBUG] get_scanned_logs read failed for {hf}: {e}')
-    return scanned
-
 def _dedup_history_file(hf, log_fn=None, debug=False, account=None):
     """
     Read a history JSONL file, remove duplicate entries (same time+type+value+activity),

@@ -30,7 +30,7 @@ checkpoint but the UI never called:
 - Window-position capture/restore on relaunch lives entirely in
   py/launcher.py/py/platform_ops.py (relaunch_account/set_window_geometry)
   — this file has no direct involvement in that beyond calling
-  smart_launch(), which dispatches into it.
+  the Launcher tab's explicit launch/relaunch operations.
 
 Per-account in-flight guard: a Launch button disables itself the moment
 it's clicked and stays disabled until that account's launch/relaunch
@@ -423,6 +423,12 @@ class LauncherTab:
         msg_lbl = tk.Label(popup, text=message, font=app.SANS, bg=app.BG2, fg=app.FG,
                             wraplength=360, justify='left', padx=16, pady=12, anchor='w')
         msg_lbl.pack(fill='x')
+        tk.Label(popup, text='Relaunch here is an immediate manual override — '
+                             'it closes and restarts now, ignoring Respect '
+                             'Break. Use Discord /relaunch to queue around '
+                             'break windows.',
+                 font=app.SANSS, bg=app.BG2, fg=app.FG2, wraplength=360,
+                 justify='left', padx=16, anchor='w').pack(fill='x', pady=(0, 4))
 
         btn_row = tk.Frame(popup, bg=app.BG2, padx=16)
         btn_row.pack(fill='x', pady=(0, 14))

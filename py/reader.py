@@ -339,15 +339,32 @@ def slice_drops(lines):
                         break
                 raw.append(('pet', pet_name))
                 break
-    grouped = {}
+    # Merge the same item's types into one drop event. The grouping key is
+    # NORMALIZED, not the raw string — DreamBot logs the same item
+    # differently per line ("Valuable drop: Eternal gem (7,480,942 coins)"
+    # vs "New item added to your collection log: Eternal gem"), and keying
+    # on the raw text left those as two separate events (two pings) instead
+    # of one "Valuable + Collection". The trailing "(N coins)" suffix and
+    # case are stripped for matching only; the DISPLAYED item keeps the
+    # richest form seen (the one carrying the coin value).
+    def _drop_key(item):
+        return re.sub(r'\s*\([\d,]+\s*coins?\)\s*$', '', item,
+                      flags=re.IGNORECASE).strip().lower()
+
+    grouped = {}   # key -> {'item': display_str, 'types': [dtype, ...]}
     order = []
     for dtype, item in raw:
-        if item not in grouped:
-            grouped[item] = []
-            order.append(item)
-        if dtype not in grouped[item]:
-            grouped[item].append(dtype)
-    return [(item, grouped[item]) for item in order]
+        key = _drop_key(item)
+        if key not in grouped:
+            grouped[key] = {'item': item, 'types': []}
+            order.append(key)
+        entry = grouped[key]
+        if dtype not in entry['types']:
+            entry['types'].append(dtype)
+        # Prefer the coin-valued display form when both appear
+        if '(' in item and '(' not in entry['item']:
+            entry['item'] = item
+    return [(grouped[k]['item'], grouped[k]['types']) for k in order]
 
 def slice_slayer_tasks(lines):
     """Returns list of (monster, count). Deduped within the batch, but allows

@@ -16,20 +16,14 @@ from py.config  import save_config
 from py.util    import now_str, write_debug_entry, reset_debug_log
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
-from py.history import (append_history, record_log_scanned,
+from py.history import (append_history,
                         get_last_seen, set_last_seen,
-                        get_last_seen_meta, set_last_seen_meta,
+                        get_last_seen_meta,
                         load_history_for, load_offsets, save_offsets)
 from py.paint        import do_force, do_force_skill, do_force_panel
 from py.platform_ops import (get_open_log_handles, find_window_ids_by_name,
                              normalize_path, capture_window_image)
 
-try:
-    import psutil as _psutil
-    _PSUTIL_AVAILABLE = True
-except ImportError:
-    _psutil = None
-    _PSUTIL_AVAILABLE = False
 from py.discord import (post_discord, bot_api, bot_setup_discord, bot_ensure_thread,
                         verify_bot_channels,
                         GatewayRunner, DiscordRouter, DROP_ICONS,
@@ -1595,15 +1589,6 @@ class LogWatcher:
 
     # ── Backfill ───────────────────────────────────────────────────────────────
     @staticmethod
-    def _base_log_name(fname):
-        """Strip rotation suffix from log filename.
-        logfile-X.log.1 -> logfile-X.log
-        logfile-X.log   -> logfile-X.log
-        """
-        import re as _re
-        return _re.sub(r'\.\d+$', '', fname)
-
-    @staticmethod
     def _log_file_sort_key(f):
         """Sort key for log files — extracts unix timestamp from filename.
         logfile-1777318301710.log.1 → 1777318301710
@@ -1861,9 +1846,8 @@ class LogWatcher:
                         # resume exact even though this mid-file line's text
                         # may repeat later in the file.
                         if chunks_done % 5 == 0:
-                            set_last_seen(account, chunk[-1])
-                            set_last_seen_meta(account, chunk[-1], file_key,
-                                               base_idx + lines_consumed - 1)
+                            set_last_seen(account, chunk[-1], file_key=file_key,
+                                          line_index=base_idx + lines_consumed - 1)
                             self._last_seen_cache[account] = chunk[-1]
                         chunk = []
                 if chunk:
@@ -1874,9 +1858,8 @@ class LogWatcher:
                 # persisted NOW (per file), not just at the very end.
                 if lines:
                     new_last_seen = lines[-1]
-                    set_last_seen(account, new_last_seen)
-                    set_last_seen_meta(account, new_last_seen, file_key,
-                                       base_idx + len(lines) - 1)
+                    set_last_seen(account, new_last_seen, file_key=file_key,
+                                  line_index=base_idx + len(lines) - 1)
                     self._last_seen_cache[account] = new_last_seen
 
                 total_entries += entries_this_file
@@ -1941,13 +1924,6 @@ class LogWatcher:
                     self._offsets[path] = 0
                     offset = 0
                     self.log(f"🔄 Log rotated: {os.path.basename(path)}")
-                    # Record base name as scanned so backfill skips .log.1
-                    # — all content up to this offset was already seen live
-                    try:
-                        account = os.path.basename(os.path.dirname(path))
-                        record_log_scanned(account, self._base_log_name(os.path.basename(path)))
-                    except Exception:
-                        pass
             if size <= offset:
                 return
             with open(path, 'r', encoding='utf-8', errors='replace') as f:

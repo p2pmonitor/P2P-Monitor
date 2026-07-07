@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.1.2"
+VERSION      = "2.1.3"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -106,6 +106,11 @@ DEFAULT_CFG = {
     "monitor_script_resume": True, "monitor_script_stop": True,
     "levelup_every": 5,
     "levelup_skip_below": 1,
+    # Internal: fingerprint of the last successfully-registered slash command
+    # set. Must live in DEFAULTS — sanitize_config deletes any key not present
+    # here, which was silently forcing a full command re-registration on
+    # every monitor start (v2.1.3 fix).
+    "_slash_commands_hash": "",
     "debug": False,
     "enable_usage_stats": True,
     "usage_stats_url": "https://stats.p2pmonitor.workers.dev",

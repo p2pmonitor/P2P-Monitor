@@ -2,7 +2,7 @@
 util.py — Shared utilities for P2P Monitor
 Formatting helpers and break-length parsing used across py/ and ui/ layers.
 
-Note: xdotool/X11 helpers (get_display_env, xdotool, get_window_geom) remain
+Note: xdotool/X11 helpers (get_display_env, xdotool) remain
 here as Linux backend implementation details. They are internal helpers used
 by py/platform_ops.py Linux backends only — callers outside platform_ops
 should not import them directly.
@@ -92,20 +92,6 @@ def xdotool(args, env=None, timeout=3):
         return r.stdout.strip()
     except Exception:
         return ''
-
-
-def get_window_geom(wid, env=None):
-    """Returns (x, y, w, h) for a window ID, or None on failure."""
-    if env is None:
-        env = get_display_env()
-    try:
-        out = xdotool(['getwindowgeometry', '--shell', wid], env)
-        d   = dict(line.split('=', 1) for line in out.splitlines() if '=' in line)
-        geom = (int(d.get('X', 0)), int(d.get('Y', 0)),
-                int(d.get('WIDTH', 0)), int(d.get('HEIGHT', 0)))
-        return geom if geom[2] and geom[3] else None
-    except Exception:
-        return None
 
 
 # ── Break length parser (shared by reader.py and watcher.py) ───────────────────

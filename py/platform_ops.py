@@ -147,29 +147,6 @@ def _get_open_log_handles_windows():
 
 # ── Process detection ──────────────────────────────────────────────────────────
 
-def is_account_process_running(account, jar_path=''):
-    """
-    Return True if a DreamBot window for the given account is already open.
-
-    Uses find_window_ids_by_name which we know works on both platforms:
-      - Linux: xdotool search --name
-      - Windows: EnumWindows + title matching (requires "dreambot" AND account name)
-
-    This is more reliable than psutil cmdline inspection which can fail due to
-    process access restrictions on both Linux and Windows.
-
-    jar_path param kept for API compatibility but not used — window detection
-    is sufficient and more reliable.
-
-    Returns: bool
-    """
-    try:
-        wids = find_window_ids_by_name(account)
-        return len(wids) > 0
-    except Exception:
-        return False
-
-
 def open_path(path):
     """
     Open a file or folder in the OS default file manager / application.
@@ -1344,7 +1321,7 @@ def _click_at_windows(x, y):
                     ctypes.c_double
                 )
 
-                def _monitor_cb(hmon, hdc, lprect, data):
+                def _monitor_cb(_hmon, _hdc, lprect, data):
                     r = lprect.contents
                     monitors.append((r.left, r.top, r.right, r.bottom))
                     return True
@@ -1788,28 +1765,6 @@ def _find_windows_for_pid_windows(pid: int) -> list:
         return matches
     except Exception:
         return []
-
-
-def get_process_cmdline(pid: int) -> 'Optional[list]':
-    """
-    Return the command-line argument list for the process with the given PID.
-
-    Prefers psutil; falls back to /proc/<pid>/cmdline on Linux.
-    Returns None on any failure.
-    """
-    try:
-        import psutil
-        return psutil.Process(pid).cmdline()
-    except Exception:
-        pass
-    if sys.platform.startswith('linux'):
-        try:
-            raw = Path(f'/proc/{pid}/cmdline').read_bytes()
-            parts = raw.split(b'\x00')
-            return [p.decode(errors='replace') for p in parts if p]
-        except Exception:
-            pass
-    return None
 
 
 def terminate_process_tree(pid: int, timeout: int = 10) -> None:

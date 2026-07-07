@@ -121,30 +121,6 @@ def _click(x, y, env=None):
     """Move mouse to absolute screen coords and click. env param kept for compat."""
     click_at(x, y)
 
-def click_at_offset(account, offset_x, offset_y):
-    """
-    Find the DreamBot window for account, focus it, click at the given offset
-    from the bottom-left corner, then restore the previously focused window.
-    Returns (True, '') on success or (False, error_msg) on failure.
-    """
-    wid = _find_window(account)
-    if not wid:
-        return False, f"No window found for account: {account}"
-
-    restore_wid = get_focused_window()
-    try:
-        raise_and_focus_window(wid)
-        time.sleep(0.3)
-        click_x, click_y = _get_client_click_pos(wid, offset_x, offset_y)
-        if click_x is None:
-            return False, f"Could not get window geometry for: {account}"
-        _click(click_x, click_y)
-    finally:
-        if restore_wid and restore_wid != wid:
-            raise_and_focus_window(restore_wid)
-
-    return True, ''
-
 # ── Force: single skill/action click ──────────────────────────────────────────
 def do_force_skill(account, action, log=None, window_lock=None):
     """
