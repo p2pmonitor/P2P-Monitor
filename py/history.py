@@ -30,6 +30,25 @@ def get_last_seen(account):
     return offsets.get(f'{account}__last_seen')
 
 
+def get_last_seen_meta(account):
+    """Structured backfill checkpoint written alongside last_seen:
+    {'line': <marker text>, 'file_key': <filename-timestamp sort key>,
+     'line_index': <absolute index of the marker line in that file>}.
+    Only valid while its 'line' still equals the current last_seen marker —
+    a live-loop marker update (which writes no meta) silently invalidates it,
+    and resume falls back to a first-occurrence text scan."""
+    offsets = load_offsets()
+    meta = offsets.get(f'{account}__last_seen_meta')
+    return meta if isinstance(meta, dict) else None
+
+
+def set_last_seen_meta(account, line, file_key, line_index):
+    offsets = load_offsets()
+    offsets[f'{account}__last_seen_meta'] = {
+        'line': line, 'file_key': file_key, 'line_index': int(line_index)}
+    save_offsets(offsets)
+
+
 def set_last_seen(account, line):
     """Store the last log line seen by backfill for this account.
     Merges only the __last_seen key into the existing offsets file rather than

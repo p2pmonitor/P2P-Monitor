@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.1.1"
+VERSION      = "2.1.2"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -418,10 +418,11 @@ class App(tk.Tk):
             elif any(x in msg for x in ['📒','💎','💰','🐾','🎁']): tag = 'drop'
             elif '💀' in msg:                                        tag = 'death'
             elif any(x in msg for x in ['🎉', '🎆']):              tag = 'levelup'
-            elif '✅' in msg and 'Slayer complete' in msg:           tag = 'slayer_complete'
+            elif '✅' in msg and 'Task complete' in msg:             tag = 'slayer_complete'
             elif '⏭️' in msg:                                        tag = 'slayer_skip'
+            elif '🗡️' in msg:                                        tag = 'slayer_task'
             elif '🖥️' in msg:                                        tag = 'script_event'
-            elif any(x in msg for x in ['💓', '🟢', '🗡️']):        tag = 'ok'
+            elif any(x in msg for x in ['💓', '🟢']):               tag = 'ok'
             else:                                                    tag = 'info'
 
             # ── Split into (account, message) columns ──────────────────────
@@ -463,6 +464,10 @@ class App(tk.Tk):
             category = {
                 'error': 'error', 'warn': 'error', 'quest': 'quest', 'task': 'task',
                 'chat': 'chat', 'drop': 'drop', 'death': 'death', 'levelup': 'levelup',
+                # Slayer rows carry the SLAYER badge but belong to the Tasks
+                # filter — they must not fall through to Other.
+                'slayer_task': 'task', 'slayer_complete': 'task',
+                'slayer_skip': 'task',
                 'script_event': 'system',
             }.get(tag, 'other')
             t.tag_add(f'cat_{category}', line_start, 'end')

@@ -18,6 +18,7 @@ from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
 from py.reader  import LOG_TS_RE
 from py.history import (append_history, record_log_scanned,
                         get_last_seen, set_last_seen,
+                        get_last_seen_meta, set_last_seen_meta,
                         load_history_for, load_offsets, save_offsets)
 from py.paint        import do_force, do_force_skill, do_force_panel
 from py.platform_ops import (get_open_log_handles, find_window_ids_by_name,
@@ -1628,19 +1629,62 @@ class LogWatcher:
         Never fires Discord or screenshots — append_history only.
         """
         account = os.path.basename(folder)
+        # ── Single-flight guard ─────────────────────────────────────────────
+        # Only one backfill per account per session — insurance against any
+        # concurrent spawn path double-appending the same unmarked span.
+        with self._backfill_lock:
+            if not hasattr(self, '_backfill_active'):
+                self._backfill_active = set()
+            if account in self._backfill_active:
+                self._dbg(f'[backfill] {account}: already running — skipping duplicate spawn')
+                return
+            self._backfill_active.add(account)
         try:
             last_seen = get_last_seen(account)
             log_files = _get_log_files(folder)
             if not log_files:
                 return
 
+            # ── Idempotent-append preload ───────────────────────────────────
+            # Existing history keys (time,type,value,activity): any event we
+            # are about to append that already exists is skipped up front, so
+            # a replayed span (stale marker, interrupted previous backfill…)
+            # is a no-op instead of a duplicate. _dedup_history_file remains
+            # as a rare repair net, not the normal startup path.
+            existing_keys = set()
+            try:
+                from py.history import history_file as _hist_file
+                _hf = _hist_file(account)
+                if _hf.exists():
+                    with open(_hf, 'r', encoding='utf-8', errors='replace') as fh:
+                        for _line in fh:
+                            try:
+                                _e = json.loads(_line)
+                                existing_keys.add((_e.get('time', ''), _e.get('type', ''),
+                                                   _e.get('value', ''), _e.get('activity', '')))
+                            except Exception:
+                                continue
+            except Exception as e:
+                self._dbg(f'[backfill] {account}: could not preload history keys: {e}')
+
             # Sort all files by unix timestamp embedded in filename — correct
             # chronological order regardless of .log/.log.1/.log.2 suffix
             log_files = sorted(log_files, key=self._log_file_sort_key)
 
             total_entries  = 0
+            skipped_existing = 0
             new_last_seen  = None
             found_last     = (last_seen is None)  # if no marker, process everything
+            # Diagnostics for debug.jsonl (category 'backfill')
+            diag = {'account': account,
+                    'marker_present': last_seen is not None,
+                    'marker_found': last_seen is None,   # trivially "found" when absent
+                    'marker_file': None,
+                    'first_processed_file': None,
+                    'first_processed_line': None,
+                    'appended_per_file': {},
+                    'resume_mode': None,
+                    'files_skipped_before_marker': 0}
 
             bf_last_task     = ''
             bf_last_activity = ''
@@ -1661,19 +1705,55 @@ class LogWatcher:
                 # Strip newlines
                 lines = [l.rstrip('\n\r') for l in lines]
 
-                # Find last_seen line in this file if not yet found
+                # ── Resume-point matching ───────────────────────────────────
+                # Direction of safety: with idempotent appends in place, a
+                # REPLAY is a harmless no-op (existing keys are skipped), but
+                # a SKIP silently loses events forever. So resume must never
+                # land later than the true checkpoint:
+                #   1. Fast path — a structured checkpoint (file identity +
+                #      absolute line index) written with every marker persist.
+                #      Valid only if its stored line still matches both the
+                #      current marker AND the line at that index (a live-loop
+                #      marker update, or any file surprise, invalidates it).
+                #   2. Fallback — FIRST-occurrence text scan. DreamBot logs
+                #      contain thousands of exact duplicate lines, so a
+                #      later duplicate of a mid-file checkpoint line must
+                #      never be trusted: first occurrence can only resume
+                #      at-or-before the true position (bounded replay,
+                #      absorbed by the idempotent preload), never after it.
                 if not found_last and last_seen:
-                    for i, line in enumerate(lines):
-                        if line == last_seen:
-                            found_last = True
-                            lines = lines[i+1:]  # process only lines after marker
-                            break
-                    else:
+                    resume_idx = None
+                    meta = get_last_seen_meta(account)
+                    if (meta and meta.get('line') == last_seen
+                            and meta.get('file_key') == self._log_file_sort_key(f)):
+                        mi = meta.get('line_index', -1)
+                        if isinstance(mi, int) and 0 <= mi < len(lines) \
+                                and lines[mi] == last_seen:
+                            resume_idx = mi
+                            diag['resume_mode'] = 'checkpoint'
+                    if resume_idx is None:
+                        for i, line in enumerate(lines):
+                            if line == last_seen:
+                                resume_idx = i
+                                diag['resume_mode'] = 'first_occurrence'
+                                break
+                    if resume_idx is None:
                         # Marker not in this file — skip entire file
+                        diag['files_skipped_before_marker'] += 1
                         continue
+                    found_last = True
+                    diag['marker_found'] = True
+                    diag['marker_file'] = f.name
+                    base_idx = resume_idx + 1        # absolute index of lines[0] below
+                    lines = lines[resume_idx + 1:]   # process only lines after marker
+                else:
+                    base_idx = 0
 
                 if not lines:
                     continue
+                if diag['first_processed_file'] is None:
+                    diag['first_processed_file'] = f.name
+                    diag['first_processed_line'] = lines[0][:160]
 
                 # Process lines in chunks
                 CHUNK = 500
@@ -1693,7 +1773,8 @@ class LogWatcher:
                 bf_recent_tail = []
 
                 def _process_chunk(chunk):
-                    nonlocal entries_this_file, bf_last_task, bf_last_activity, bf_recent_tail
+                    nonlocal entries_this_file, bf_last_task, bf_last_activity, \
+                             bf_recent_tail, skipped_existing
                     if not chunk:
                         return
                     try:
@@ -1722,6 +1803,12 @@ class LogWatcher:
                             if not v2 and bf_last_activity:
                                 ev['activity'] = bf_last_activity
 
+                        key = (ev.get('ts', ''), ev.get('type', ''),
+                               ev.get('value', ''), ev.get('activity', ''))
+                        if key in existing_keys:
+                            skipped_existing += 1
+                            continue
+                        existing_keys.add(key)
                         append_history(account,
                                        ev.get('type', ''),
                                        ev.get('value', ''),
@@ -1738,6 +1825,12 @@ class LogWatcher:
                     try:
                         _bf_ui, bf_inferno_disc = bf_inferno.feed(chunk)
                         for inf_ev in bf_inferno_disc:
+                            key = (inf_ev.get('ts', ''), 'task', 'Inferno',
+                                   inf_ev.get('value', ''))
+                            if key in existing_keys:
+                                skipped_existing += 1
+                                continue
+                            existing_keys.add(key)
                             append_history(
                                 account,
                                 'task',
@@ -1749,23 +1842,51 @@ class LogWatcher:
                     except Exception as ie:
                         self._dbg(f'Inferno backfill error [{account}]: {ie}')
 
+                chunks_done = 0
+                lines_consumed = 0        # count of `lines` entries fed to chunks
+                file_key = self._log_file_sort_key(f)
                 for line in lines:
                     chunk.append(line)
+                    lines_consumed += 1
                     if len(chunk) >= CHUNK:
                         _process_chunk(chunk)
+                        chunks_done += 1
+                        # Persist the marker every ~2,500 lines so a monitor
+                        # restart mid-backfill resumes here instead of
+                        # replaying the whole span from the old marker (the
+                        # observed cause of the duplicate history entries —
+                        # previously the marker was only written once, after
+                        # the entire backfill finished). The structured meta
+                        # (file identity + absolute line index) makes the
+                        # resume exact even though this mid-file line's text
+                        # may repeat later in the file.
+                        if chunks_done % 5 == 0:
+                            set_last_seen(account, chunk[-1])
+                            set_last_seen_meta(account, chunk[-1], file_key,
+                                               base_idx + lines_consumed - 1)
+                            self._last_seen_cache[account] = chunk[-1]
                         chunk = []
                 if chunk:
                     _process_chunk(chunk)
 
                 # Always update last_seen to the final line of this file,
-                # regardless of whether it produced parseable events
+                # regardless of whether it produced parseable events —
+                # persisted NOW (per file), not just at the very end.
                 if lines:
                     new_last_seen = lines[-1]
+                    set_last_seen(account, new_last_seen)
+                    set_last_seen_meta(account, new_last_seen, file_key,
+                                       base_idx + len(lines) - 1)
+                    self._last_seen_cache[account] = new_last_seen
 
                 total_entries += entries_this_file
+                if entries_this_file:
+                    diag['appended_per_file'][f.name] = entries_this_file
 
+            dupes = 0
             if total_entries:
-                # Dedup after backfill — cleans any duplicates from previous sessions
+                # Dedup after backfill — now a rare repair net (appends are
+                # idempotent), not the normal startup path.
                 try:
                     from py.history import _dedup_history_file, history_file
                     hf = history_file(account)
@@ -1777,15 +1898,34 @@ class LogWatcher:
                 except Exception as e:
                     self._dbg(f'History dedup failed [{account}]: {e}')
 
-            # Update last-seen marker
+            # Update last-seen marker (already persisted incrementally per
+            # file/chunk above — this is a final safety write)
             if new_last_seen:
                 set_last_seen(account, new_last_seen)
+                self._last_seen_cache[account] = new_last_seen
+
+            # Structured diagnostics — one entry per backfill run, so the next
+            # duplicate report is answerable from debug.jsonl alone.
+            try:
+                from py.util import write_debug_entry
+                diag.update({'entries_appended': total_entries,
+                             'skipped_existing': skipped_existing,
+                             'dupes_removed': dupes})
+                write_debug_entry('backfill', diag)
+            except Exception:
+                pass
 
             if self._on_backfill_done:
                 self._on_backfill_done()
 
         except Exception as e:
             self.log(f'  ⚠ Backfill error [{account}]: {e}')
+        finally:
+            with self._backfill_lock:
+                try:
+                    self._backfill_active.discard(account)
+                except Exception:
+                    pass
 
     # ── File polling ───────────────────────────────────────────────────────────
     def _check_file(self, path):
@@ -2331,19 +2471,19 @@ class LogWatcher:
                 state.last_task     = value
                 state.last_activity = activity
                 display = value or activity or '?'
-                self.log(f"📋 [{folder}] Task: {display}" + (f" / {activity}" if activity and value else ""))
+                self.log(f"📋 [{folder}] {display}" + (f" / {activity}" if activity and value else ""))
 
             elif etype == 'slayer_task':
                 state.last_task     = 'Slayer'
                 state.last_activity = f"{activity} {value}"
-                self.log(f"🗡️ [{folder}] New Slayer task: {activity} {value}")
+                self.log(f"🗡️ [{folder}] New Task: {activity} {value}")
 
             elif etype == 'slayer_complete':
                 td, pe, tp = ev.get('_slayer_complete', (None, None, None))
                 pts = f"+{pe:,} pts (total: {tp:,})" if pe else "no points yet"
                 ev  = dict(ev, activity=pts)
                 activity = pts
-                self.log(f"✅ [{folder}] Slayer complete: {value} — {pts}")
+                self.log(f"✅ [{folder}] Task complete: {value} — {pts}")
 
             elif etype == 'slayer_skip':
                 # Fallback to last known monster if cancel fired in a different poll
@@ -2352,13 +2492,13 @@ class LogWatcher:
                     if len(parts) == 2 and parts[0].isdigit():
                         value = parts[1]
                         ev    = dict(ev, value=value)
-                self.log(f"⏭️ [{folder}] Slayer skipped: {value} — {activity}")
+                self.log(f"⏭️ [{folder}] Skipped: {value} — {activity}")
 
             elif etype == 'quest_started':
-                self.log(f"📜 [{folder}] Quest started: {value}")
+                self.log(f"📜 [{folder}] Started: {value}")
 
             elif etype == 'quest':
-                self.log(f"🏆 [{folder}] Quest completed: {value}")
+                self.log(f"🏆 [{folder}] Completed: {value}")
 
             elif etype == 'chat':
                 self.log(f"💬 [{folder}] Chat: {value[:60]}")
@@ -2440,7 +2580,7 @@ class LogWatcher:
                         and not is_99 and skill != 'Total Level'):
                     ev = dict(ev, _suppress_discord=True)
                 prefix = "🎆" if is_99 else "🎉"
-                self.log(f"{prefix} [{folder}] Level up: {skill} → {level}")
+                self.log(f"{prefix} [{folder}] {skill} → {level}")
 
             elif etype == 'script_event':
                 # ── Auto-restart logic: runs regardless of notification/mute settings ──

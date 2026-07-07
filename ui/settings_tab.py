@@ -534,6 +534,110 @@ class SettingsTab:
             cursor='hand2', command=self._test_webhooks).pack(anchor='w', pady=(8, 0))
 
     # ── Page 3: Event Notifications ──────────────────────────────────────────
+    # ── Canvas toggle matrix (Linux) ─────────────────────────────────────────
+    # On X11, every classic Tk widget is its own X window; raising a stacked
+    # settings page triggers an Expose repaint of each one individually, and
+    # the Event Notifications page had ~45 checkbutton/label windows — the
+    # visible bottom-up "flash" on Linux. This helper renders an equivalent
+    # checkbox grid on ONE canvas (one X window, one repaint), drawn to match
+    # the existing dark-theme checkbutton look: 13px indicator square,
+    # BG2 well, accent checkmark when on, hand cursor + outline highlight on
+    # hover. It drives the SAME BooleanVars registered in self._vars, so
+    # save()/load_fields()/config behavior is completely unchanged (var
+    # traces keep the drawing in sync with external changes). Windows keeps
+    # the native checkbutton widgets — it repaints these invisibly fast and
+    # should not look different just to fix Linux.
+
+    class _CanvasToggles(tk.Canvas):
+        BOX = 13
+
+        def __init__(self, parent, app, height=24, **kw):
+            super().__init__(parent, bg=app.BG3, highlightthickness=0, bd=0,
+                             height=height, **kw)
+            self._app = app
+            self._toggles = {}     # tag -> {'var', 'box', 'check'}
+            self._n = 0
+            self._max_x = 0
+            self._max_y = 0
+
+        def add_label(self, x, y, text, font, fg, anchor='w'):
+            self.create_text(x, y, text=text, font=font, fill=fg, anchor=anchor)
+            self._track(x + 8 * len(text), y)
+
+        def add_toggle(self, x, y, var, label='', font=None, label_fg=None):
+            """Checkbox indicator at (x, y-centered) + optional label to its
+            right. Returns the x just past this toggle (for flow layouts)."""
+            app = self._app
+            tag = f'tgl{self._n}'
+            self._n += 1
+            b = self.BOX
+            box = self.create_rectangle(x, y - b // 2, x + b, y + b - b // 2,
+                                        outline=app.FG2, fill=app.BG2,
+                                        width=1, tags=(tag,))
+            check = self.create_text(x + b // 2, y, text='✓',
+                                     font=(font or app.SANS)[0:1] + (9, 'bold'),
+                                     fill=app.ACC, state='hidden', tags=(tag,))
+            end_x = x + b
+            if label:
+                t = self.create_text(x + b + 5, y, text=label, font=font,
+                                     fill=label_fg or app.FG, anchor='w',
+                                     tags=(tag,))
+                end_x = self.bbox(t)[2]
+            self._toggles[tag] = {'var': var, 'box': box, 'check': check}
+            self.tag_bind(tag, '<Button-1>', lambda e, tg=tag: self._on_click(tg))
+            self.tag_bind(tag, '<Enter>',    lambda e, tg=tag: self._on_hover(tg, True))
+            self.tag_bind(tag, '<Leave>',    lambda e, tg=tag: self._on_hover(tg, False))
+            try:
+                var.trace_add('write', lambda *_, tg=tag: self._sync(tg))
+            except Exception:
+                pass
+            self._sync(tag)
+            self._track(end_x, y)
+            return end_x
+
+        def _on_click(self, tag):
+            t = self._toggles.get(tag)
+            if t:
+                try:
+                    t['var'].set(not bool(t['var'].get()))
+                except Exception:
+                    pass  # trace redraws via _sync
+
+        def _on_hover(self, tag, entering):
+            t = self._toggles.get(tag)
+            if not t:
+                return
+            self.configure(cursor='hand2' if entering else '')
+            app = self._app
+            try:
+                checked = bool(t['var'].get())
+            except Exception:
+                checked = False
+            outline = (app.ACC if checked else app.FG) if entering \
+                      else (app.ACC if checked else app.FG2)
+            self.itemconfigure(t['box'], outline=outline)
+
+        def _sync(self, tag):
+            t = self._toggles.get(tag)
+            if not t:
+                return
+            app = self._app
+            try:
+                checked = bool(t['var'].get())
+            except Exception:
+                checked = False
+            self.itemconfigure(t['check'], state='normal' if checked else 'hidden')
+            self.itemconfigure(t['box'], outline=app.ACC if checked else app.FG2)
+
+        def _track(self, x, y):
+            self._max_x = max(self._max_x, int(x))
+            self._max_y = max(self._max_y, int(y))
+
+        def finalize(self):
+            """Size the canvas to its drawn content."""
+            self.configure(width=self._max_x + 4,
+                           height=self._max_y + self.BOX)
+
     def _build_notifications_page(self, parent):
         app = self.app
         self._page_header(parent, "Event Notifications", "Configure how and when P2P Monitor sends event notifications.")
@@ -541,44 +645,45 @@ class SettingsTab:
 
         # ── Script Events ────────────────────────────────────────────────────
         _, body = self._card(inner, '📜', 'Script Events — Notify when Script:')
-        script_row = tk.Frame(body, bg=app.BG3)
-        script_row.pack(fill='x')
-        for ev_lbl, ev_attr in [
+        use_canvas = sys.platform.startswith('linux')
+        SCRIPT_ITEMS = [
             ("Starts",  'monitor_script_start'),
             ("Pauses",  'monitor_script_pause'),
             ("Resumes", 'monitor_script_resume'),
             ("Stops",   'monitor_script_stop'),
-        ]:
-            v = tk.BooleanVar(value=bool(app.cfg.get(ev_attr, True)))
-            tk.Checkbutton(script_row, text=ev_lbl, variable=v, font=self._sans,
-                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0).pack(side='left', padx=(0, 12))
-            self._vars[ev_attr] = v
+        ]
+        script_vars = {}
+        for _lbl, ev_attr in SCRIPT_ITEMS:
+            script_vars[ev_attr] = tk.BooleanVar(value=bool(app.cfg.get(ev_attr, True)))
+            self._vars[ev_attr] = script_vars[ev_attr]
         ping_se_var = tk.BooleanVar(value=bool(app.cfg.get('ping_script_event', True)))
-        tk.Checkbutton(script_row, text="Ping for script events", variable=ping_se_var,
-            font=self._sans, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
-            activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
-            cursor='hand2', pady=0).pack(side='left', padx=(24, 0))
         self._vars['ping_script_event'] = ping_se_var
+
+        if use_canvas:
+            cv = self._CanvasToggles(body, app)
+            x = 2
+            for ev_lbl, ev_attr in SCRIPT_ITEMS:
+                x = cv.add_toggle(x, 12, script_vars[ev_attr], ev_lbl,
+                                  font=self._sans) + 12
+            cv.add_toggle(x + 24, 12, ping_se_var, "Ping for script events",
+                          font=self._sans)
+            cv.finalize()
+            cv.pack(anchor='w', fill='x')
+        else:
+            script_row = tk.Frame(body, bg=app.BG3)
+            script_row.pack(fill='x')
+            for ev_lbl, ev_attr in SCRIPT_ITEMS:
+                tk.Checkbutton(script_row, text=ev_lbl, variable=script_vars[ev_attr],
+                    font=self._sans, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
+                    activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
+                    cursor='hand2', pady=0).pack(side='left', padx=(0, 12))
+            tk.Checkbutton(script_row, text="Ping for script events", variable=ping_se_var,
+                font=self._sans, bg=app.BG3, fg=app.FG, activebackground=app.BG3,
+                activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
+                cursor='hand2', pady=0).pack(side='left', padx=(24, 0))
 
         # ── Per-event grid ───────────────────────────────────────────────────
         _, body = self._card(inner, '🔔', 'Event Types')
-        tbl = tk.Frame(body, bg=app.BG3)
-        tbl.pack(anchor='w', fill='x', pady=(4, 0))
-        tbl.columnconfigure(0, minsize=140)
-        tbl.columnconfigure(1, minsize=90)
-        tbl.columnconfigure(2, minsize=110)
-        tbl.columnconfigure(3, minsize=90)
-
-        tk.Label(tbl, text="EVENT TYPE",  font=self._sansb, bg=app.BG3, fg=app.ACC
-                 ).grid(row=0, column=0, sticky='w')
-        tk.Label(tbl, text="NOTIFY",      font=self._sansb, bg=app.BG3, fg=app.ACC
-                 ).grid(row=0, column=1, sticky='w', padx=(8, 0))
-        tk.Label(tbl, text="SCREENSHOT",  font=self._sansb, bg=app.BG3, fg=app.ACC
-                 ).grid(row=0, column=2, sticky='w', padx=(8, 0))
-        tk.Label(tbl, text="PING",        font=self._sansb, bg=app.BG3, fg=app.ACC
-                 ).grid(row=0, column=3, sticky='w', padx=(8, 0))
-
         EVENT_ROWS = [
             ("Quests",    'monitor_quests',   'ss_event_quest',   'ping_quest'),
             ("Tasks",     'monitor_tasks',    'ss_event_task',    'ping_task'),
@@ -588,31 +693,62 @@ class SettingsTab:
             ("Deaths",    'monitor_deaths',   'ss_event_death',   'ping_death'),
             ("Level Ups", 'monitor_levelups', 'ss_event_levelup', 'ping_levelup'),
         ]
-        for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
-            tk.Label(tbl, text=label, font=self._sans, bg=app.BG3, fg=app.FG,
-                     anchor='w').grid(row=r, column=0, sticky='w', pady=2)
-
-            notify_var = tk.BooleanVar(value=bool(app.cfg.get(notify_attr, True)))
-            tk.Checkbutton(tbl, variable=notify_var, font=self._sans,
-                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
-                ).grid(row=r, column=1, padx=(16, 0), pady=2)
-            self._vars[notify_attr] = notify_var
-
-            ss_var = tk.BooleanVar(value=bool(app.cfg.get(ss_attr, False)))
-            tk.Checkbutton(tbl, variable=ss_var, font=self._sans,
-                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
-                ).grid(row=r, column=2, padx=(16, 0), pady=2)
-            self._vars[ss_attr] = ss_var
-
+        grid_vars = {}
+        for label, notify_attr, ss_attr, ping_attr in EVENT_ROWS:
+            grid_vars[notify_attr] = tk.BooleanVar(value=bool(app.cfg.get(notify_attr, True)))
+            grid_vars[ss_attr]     = tk.BooleanVar(value=bool(app.cfg.get(ss_attr, False)))
             ping_default = app.cfg.get(ping_attr, ping_attr in ('ping_error', 'ping_death'))
-            ping_var = tk.BooleanVar(value=bool(ping_default))
-            tk.Checkbutton(tbl, variable=ping_var, font=self._sans,
-                bg=app.BG3, fg=app.FG, activebackground=app.BG3, activeforeground=app.FG,
-                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0
-                ).grid(row=r, column=3, padx=(16, 0), pady=2)
-            self._vars[ping_attr] = ping_var
+            grid_vars[ping_attr]   = tk.BooleanVar(value=bool(ping_default))
+            self._vars[notify_attr] = grid_vars[notify_attr]
+            self._vars[ss_attr]     = grid_vars[ss_attr]
+            self._vars[ping_attr]   = grid_vars[ping_attr]
+
+        if use_canvas:
+            # Column geometry mirrors the widget grid it replaces:
+            # label col 140px, then 90/110/90 columns with 16px checkbox inset
+            # and headers inset 8px — same layout, one X window.
+            COL0, COL1, COL2, COL3 = 0, 140, 230, 340
+            ROW_H = 24
+            cv = self._CanvasToggles(body, app)
+            y = 10
+            cv.add_label(COL0,       y, "EVENT TYPE", self._sansb, app.ACC)
+            cv.add_label(COL1 + 8,   y, "NOTIFY",     self._sansb, app.ACC)
+            cv.add_label(COL2 + 8,   y, "SCREENSHOT", self._sansb, app.ACC)
+            cv.add_label(COL3 + 8,   y, "PING",       self._sansb, app.ACC)
+            for label, notify_attr, ss_attr, ping_attr in EVENT_ROWS:
+                y += ROW_H
+                cv.add_label(COL0, y, label, self._sans, app.FG)
+                cv.add_toggle(COL1 + 16, y, grid_vars[notify_attr])
+                cv.add_toggle(COL2 + 16, y, grid_vars[ss_attr])
+                cv.add_toggle(COL3 + 16, y, grid_vars[ping_attr])
+            cv.finalize()
+            cv.pack(anchor='w', fill='x', pady=(4, 0))
+        else:
+            tbl = tk.Frame(body, bg=app.BG3)
+            tbl.pack(anchor='w', fill='x', pady=(4, 0))
+            tbl.columnconfigure(0, minsize=140)
+            tbl.columnconfigure(1, minsize=90)
+            tbl.columnconfigure(2, minsize=110)
+            tbl.columnconfigure(3, minsize=90)
+
+            tk.Label(tbl, text="EVENT TYPE",  font=self._sansb, bg=app.BG3, fg=app.ACC
+                     ).grid(row=0, column=0, sticky='w')
+            tk.Label(tbl, text="NOTIFY",      font=self._sansb, bg=app.BG3, fg=app.ACC
+                     ).grid(row=0, column=1, sticky='w', padx=(8, 0))
+            tk.Label(tbl, text="SCREENSHOT",  font=self._sansb, bg=app.BG3, fg=app.ACC
+                     ).grid(row=0, column=2, sticky='w', padx=(8, 0))
+            tk.Label(tbl, text="PING",        font=self._sansb, bg=app.BG3, fg=app.ACC
+                     ).grid(row=0, column=3, sticky='w', padx=(8, 0))
+
+            for r, (label, notify_attr, ss_attr, ping_attr) in enumerate(EVENT_ROWS, start=1):
+                tk.Label(tbl, text=label, font=self._sans, bg=app.BG3, fg=app.FG,
+                         anchor='w').grid(row=r, column=0, sticky='w', pady=2)
+                for col, attr in ((1, notify_attr), (2, ss_attr), (3, ping_attr)):
+                    tk.Checkbutton(tbl, variable=grid_vars[attr], font=self._sans,
+                        bg=app.BG3, fg=app.FG, activebackground=app.BG3,
+                        activeforeground=app.FG, selectcolor=app.BG2, relief='flat',
+                        cursor='hand2', pady=0
+                        ).grid(row=r, column=col, padx=(16, 0), pady=2)
 
         lvl_row = tk.Frame(body, bg=app.BG3)
         lvl_row.pack(fill='x', pady=(6, 0))
@@ -642,8 +778,6 @@ class SettingsTab:
 
         # ── Hide paint overlay ───────────────────────────────────────────────
         _, body = self._card(inner, '🖌', 'Hide paint overlay during screenshot')
-        hp_table = tk.Frame(body, bg=app.BG3)
-        hp_table.pack(fill='x', pady=(2, 0))
         hp_entries = [
             ("Scheduled",  'ss_hide_paint_scheduled'),
             ("Task",       'ss_hide_paint_task'),
@@ -658,15 +792,34 @@ class SettingsTab:
             ("Level Up",   'ss_hide_paint_levelup'),
         ]
         HP_COLS = 6  # 11 entries -> 2 rows (6 + 5) instead of 3 (4+4+3) — more compact
-        for i, (lbl, key) in enumerate(hp_entries):
-            row_i, col = divmod(i, HP_COLS)
-            cell = tk.Frame(hp_table, bg=app.BG3)
-            cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=2)
-            var = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
-            tk.Checkbutton(cell, text=lbl, variable=var, font=self._sanss,
-                bg=app.BG3, fg=app.FG2, activebackground=app.BG3, activeforeground=app.ACC,
-                selectcolor=app.BG2, relief='flat', cursor='hand2', pady=0).pack(side='left')
-            self._vars[key] = var
+        hp_vars = {}
+        for _lbl, key in hp_entries:
+            hp_vars[key] = tk.BooleanVar(value=bool(app.cfg.get(key, False)))
+            self._vars[key] = hp_vars[key]
+
+        if use_canvas:
+            import tkinter.font as _tkfont
+            fnt = _tkfont.Font(font=self._sanss)
+            col_w = max(fnt.measure(lbl) for lbl, _ in hp_entries) \
+                    + self._CanvasToggles.BOX + 5 + 14
+            cv = self._CanvasToggles(body, app)
+            for i, (lbl, key) in enumerate(hp_entries):
+                row_i, col = divmod(i, HP_COLS)
+                cv.add_toggle(2 + col * col_w, 12 + row_i * 24, hp_vars[key],
+                              lbl, font=self._sanss, label_fg=app.FG2)
+            cv.finalize()
+            cv.pack(anchor='w', fill='x', pady=(2, 0))
+        else:
+            hp_table = tk.Frame(body, bg=app.BG3)
+            hp_table.pack(fill='x', pady=(2, 0))
+            for i, (lbl, key) in enumerate(hp_entries):
+                row_i, col = divmod(i, HP_COLS)
+                cell = tk.Frame(hp_table, bg=app.BG3)
+                cell.grid(row=row_i, column=col, sticky='w', padx=(0, 14), pady=2)
+                tk.Checkbutton(cell, text=lbl, variable=hp_vars[key], font=self._sanss,
+                    bg=app.BG3, fg=app.FG2, activebackground=app.BG3,
+                    activeforeground=app.ACC, selectcolor=app.BG2, relief='flat',
+                    cursor='hand2', pady=0).pack(side='left')
 
     # ── Page 4: Daily Summary ────────────────────────────────────────────────
     def _settings_row(self, parent, icon, title, subtitle, build_control):

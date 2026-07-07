@@ -1,5 +1,77 @@
 # Changelog
 
+## v2.1.2
+
+### Fixed
+
+**1. Startup history duplication (append-then-dedupe on every restart).**
+Root cause: the backfill last-seen marker was persisted only once, after the
+ENTIRE backfill finished — a monitor restart mid-backfill (large rotated logs
+take a while) left the old marker in place, so the next startup replayed the
+whole span and _dedup_history_file removed the copies afterward. Fixes, all
+in _backfill_history:
+- Incremental marker persistence — last_seen is written after every file and
+  every ~2,500 lines within a file, so an interrupted backfill resumes where
+  it stopped instead of replaying.
+- Idempotent appends — existing history keys (time+type+value+activity) are
+  preloaded and any already-present event (normal or Inferno) is skipped
+  before append. Dedupe is now a rare repair net, not the startup path.
+- Single-flight guard — one backfill per account per session; a concurrent
+  duplicate spawn returns immediately.
+- Last-occurrence marker matching — DreamBot logs contain many exact
+  duplicate lines within one file (5,000+ observed); first-occurrence
+  matching could rewind the marker and replay the span in between.
+- Structured checkpoint with skip-proof resume — every marker persist also
+  writes a structured checkpoint (marker line + file identity + absolute
+  line index) to offsets.json. Resume uses it for an exact restart position;
+  if it's stale (e.g. the live loop moved the plain marker, which writes no
+  checkpoint) resume falls back to FIRST-occurrence text matching. Direction
+  of safety: a replay is a harmless no-op under the idempotent preload, but
+  a skip loses events forever — so resume can land at-or-before the true
+  checkpoint, never after it. In particular, a mid-file checkpoint whose
+  exact line text repeats later in the same file (thousands of duplicate
+  lines observed in real logs) can no longer jump forward past unprocessed
+  events.
+- Structured 'backfill' diagnostics in debug.jsonl per run: marker
+  present/found and in which file, resume mode (checkpoint vs
+  first-occurrence), first file/line processed, entries appended per file,
+  entries skipped as already-existing, dupes removed.
+
+**2. Settings → Event Notifications flash on Linux (root-caused and fixed).**
+Instrumentation showed every settings page takes a full X11 Expose repaint
+storm on tkraise — each classic Tk widget is its own X window repainting
+individually — and Event Notifications was simply the heaviest page (94
+widget windows vs 50–69), making its bottom-up progressive paint visible.
+The three checkbox groups (script events row, event-type matrix, hide-paint
+grid) are now drawn on three Canvas widgets on Linux — one X window each
+instead of ~60 — same layout, labels, dark theme, and indicator style,
+with hover highlight, hand cursor, and accent checkmark; the page dropped
+to 35 widget windows, the lightest in Settings. The canvases drive the same
+BooleanVars registered in _vars, so save()/load_fields()/config keys are
+completely unchanged. Windows keeps the native checkbutton widgets
+untouched — it repaints them invisibly fast and should not change
+appearance to fix a Linux-only issue.
+
+**3. Event Log wording — badges carry the category, messages drop the
+redundant prefix.** Display-only: History entries, Discord embeds, and
+parser behavior are unchanged.
+- "New Slayer task: 53 Suqah" → SLAYER badge, "New Task: 53 Suqah" (was
+  mislabeled SYSTEM — the 🗡 prefix was grouped with heartbeat lines in the
+  classifier; it now has its own slayer_task tag)
+- "Slayer complete: X — pts" → "Task complete: X — pts" (classifier keys
+  updated in lockstep; relaunch-success ✅ lines are unaffected)
+- "Slayer skipped: X" → "Skipped: X"
+- "Task: Farming / (H) Ranarr" → "Farming / (H) Ranarr"
+- "Level up: Fishing → 93" → "Fishing → 93" (Total Level milestones render
+  as "Total Level → 2125")
+- "Quest started/completed: X" → "Started: X" / "Completed: X"
+- Event Log filter: SLAYER rows (new task / task complete / skipped) now
+  belong to the Tasks filter category instead of falling through to Other.
+
+### Files changed
+p2p_monitor.py, py/watcher.py, py/history.py, ui/monitor_tab.py,
+ui/settings_tab.py, CHANGELOG.md
+
 ## v2.1.1
 
 ### Fixed

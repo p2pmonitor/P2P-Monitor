@@ -643,7 +643,7 @@ class MonitorTab:
     LOG_BADGES      = {
         'error': 'ERROR', 'warn': 'WARN', 'quest': 'QUEST', 'task': 'TASK',
         'chat': 'CHAT', 'drop': 'DROP', 'death': 'DEATH', 'levelup': 'LEVEL UP',
-        'slayer_complete': 'SLAYER', 'slayer_skip': 'SLAYER',
+        'slayer_complete': 'SLAYER', 'slayer_skip': 'SLAYER', 'slayer_task': 'SLAYER',
         'script_event': 'SYSTEM', 'ok': 'SYSTEM', 'info': 'INFO', 'ts': 'INFO',
     }
 
@@ -716,6 +716,7 @@ class MonitorTab:
             ('levelup',         app.FG),
             ('slayer_complete', app.FG),
             ('slayer_skip',     app.FG),
+            ('slayer_task',     app.FG),
             ('script_event',    app.FG2),
         ]:
             app._log_text.tag_configure(tag, foreground=col)
@@ -744,6 +745,7 @@ class MonitorTab:
             ('badge_levelup',         app.GREEN, app.BG),
             ('badge_slayer_complete', app.PUR,   app.BG),
             ('badge_slayer_skip',     app.PUR,   app.BG),
+            ('badge_slayer_task',     app.PUR,   app.BG),
             ('badge_script_event',    app.ACC,   app.BG),
             ('badge_ok',              app.BG4,   app.FG2),
             ('badge_info',            app.BG4,   app.FG2),
