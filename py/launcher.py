@@ -110,6 +110,37 @@ def _get_pid(account: str) -> Optional[int]:
 # geometry simply means the existing default placement is used, and a good
 # saved geometry is never overwritten with null/empty data.
 
+# ── Per-account window cache (v2.2.1) ─────────────────────────────────────────
+# account -> (window_id, pid). In-memory only — window IDs are not stable
+# across X/session restarts, and a fresh discovery per monitor session is
+# cheap. Every capture verifies the cached window by asking THAT window for
+# its PID (a direct handle query, no enumeration) and comparing against the
+# cached PID — ownership by PID, not by title, so title transients and
+# busy-server enumeration failures stop causing missed screenshots.
+_window_cache      = {}
+_window_cache_lock = threading.Lock()
+
+
+def get_account_window(account):
+    """Return cached (window_id, pid) for account, or None."""
+    with _window_cache_lock:
+        return _window_cache.get(account)
+
+
+def set_account_window(account, window_id, pid):
+    """Cache the verified (window_id, pid) pair for account."""
+    if not account or not window_id or not pid:
+        return
+    with _window_cache_lock:
+        _window_cache[account] = (str(window_id), int(pid))
+
+
+def clear_account_window(account):
+    """Drop the cached window for account (stale handle / client restart)."""
+    with _window_cache_lock:
+        _window_cache.pop(account, None)
+
+
 _GEOMETRY_FILE = Path.home() / '.p2p_monitor' / 'window_geometry.json'
 _geometry_lock = threading.Lock()
 
@@ -173,16 +204,33 @@ def persist_running_geometries(cfg: dict, accounts) -> None:
     try:
         from py.platform_ops import (get_window_geometry_for_restore,
                                      is_window_minimized)
+        from py.platform_ops import get_pid_for_window
         for account in list(accounts or []):
-            try:
-                result = discover_account_process(account)
-            except Exception:
-                continue
-            if not result:
-                continue
-            wid = result.get('window_id')
-            if not wid:
-                continue
+            # Cache-first (v2.2.1): verify the cached window by direct PID
+            # query — no enumeration. Full discovery only on cache miss, so
+            # this sweep no longer issues per-account window searches every
+            # 2 minutes (they collided with screenshot captures on a busy
+            # X server and multiplied transient lookup failures).
+            wid = None
+            cached = get_account_window(account)
+            if cached:
+                c_wid, c_pid = cached
+                if get_pid_for_window(c_wid) == c_pid:
+                    wid = c_wid
+                else:
+                    clear_account_window(account)
+            if wid is None:
+                try:
+                    result = discover_account_process(account)
+                except Exception:
+                    continue
+                if not result:
+                    continue
+                wid = result.get('window_id')
+                if not wid:
+                    continue
+                if result.get('pid'):
+                    set_account_window(account, wid, result['pid'])
             try:
                 if is_window_minimized(wid):
                     continue
@@ -537,6 +585,8 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
     if result:
         real_pid = result['pid']
         _set_pid(account, real_pid)
+        if result.get('window_id'):
+            set_account_window(account, result['window_id'], real_pid)
         write_debug_entry('launcher', {'account': account,
                            'msg': f'Client PID confirmed: {real_pid}'})
         if cfg and cfg.get('debug', False):

@@ -205,6 +205,56 @@ def find_window_ids_by_name(name):
         return []
 
 
+def find_window_ids_by_name_ex(name):
+    """Like find_window_ids_by_name, but returns (wids, reason). reason is
+    '' on success; otherwise says WHY nothing came back (no match vs
+    timeout vs enumeration failure) — see v2.2.1 changelog."""
+    try:
+        if sys.platform.startswith('linux'):
+            return _find_window_ids_linux_ex(name)
+        elif sys.platform == 'win32':
+            wids = _find_window_ids_windows(name)
+            return (wids, '') if wids else ([], 'no visible window title matched (EnumWindows)')
+        return _find_window_ids_linux_ex(name)
+    except Exception as e:
+        return [], f'window lookup failed: {e}'
+
+
+def find_windows_for_pid_ex(pid):
+    """Like find_windows_for_pid, but returns (wids, reason) — '' reason on
+    success, description of the empty result otherwise (v2.2.1)."""
+    if not pid:
+        return [], 'no cached PID'
+    try:
+        if sys.platform.startswith('linux'):
+            try:
+                result = subprocess.run(
+                    ['xdotool', 'search', '--pid', str(pid)],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except subprocess.TimeoutExpired:
+                return [], f'PID window search timed out (X busy) for PID {pid}'
+            wids = [w for w in result.stdout.strip().split() if w]
+            if not wids:
+                return [], f'no windows owned by PID {pid}'
+            matches = []
+            for wid in wids:
+                try:
+                    title = get_window_title(wid) or ''
+                    if 'dreambot' in title.lower():
+                        matches.append(wid)
+                except Exception:
+                    pass
+            if matches:
+                return matches, ''
+            return [], f'PID {pid} owns {len(wids)} window(s) but none titled DreamBot'
+        else:
+            wids = find_windows_for_pid(pid)
+            return (wids, '') if wids else ([], f'no visible DreamBot window owned by PID {pid}')
+    except Exception as e:
+        return [], f'PID window lookup failed: {e}'
+
+
 def _ci_regex_pattern(text):
     """Build a case-insensitive POSIX extended regex from a literal string.
     xdotool's --name pattern is a case-SENSITIVE regex with no -i flag, so
@@ -233,28 +283,50 @@ def _find_window_ids_linux(name):
     therefore never terminated). If the title read-back itself fails for a
     candidate, the candidate is dropped: ownership could not be verified.
     """
+    return _find_window_ids_linux_ex(name)[0]
+
+
+def _find_window_ids_linux_ex(name):
+    """Reason-carrying variant: returns (wids, reason). reason is '' when
+    results were found; otherwise a precise failure description so callers
+    can distinguish a genuinely absent window from a timed-out/failed
+    lookup — previously both collapsed into an empty list (v2.2.1)."""
     try:
         result = subprocess.run(
             ['xdotool', 'search', '--name', _ci_regex_pattern(name)],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=10
         )
         wids = result.stdout.strip().split()
         if not wids:
-            return []
+            return [], 'no window title matched'
         verified = []
+        readback_failed = 0
         needle = (name or '').lower()
         for wid in wids:
             try:
                 r = subprocess.run(['xdotool', 'getwindowname', wid],
-                                   capture_output=True, text=True, timeout=5)
+                                   capture_output=True, text=True, timeout=10)
                 title = (r.stdout or '').strip().lower()
+            except subprocess.TimeoutExpired:
+                readback_failed += 1
+                continue
             except Exception:
+                readback_failed += 1
                 continue
             if 'dreambot' in title and needle in title:
                 verified.append(wid)
-        return verified
-    except Exception:
-        return []
+        if verified:
+            return verified, ''
+        if readback_failed:
+            return [], (f'{len(wids)} candidate(s) found but title read-back '
+                        f'failed/timed out for {readback_failed} (X busy?)')
+        return [], f'{len(wids)} candidate(s) found but none verified as DreamBot+account'
+    except subprocess.TimeoutExpired:
+        return [], 'window search timed out (X busy)'
+    except FileNotFoundError:
+        return [], 'xdotool not installed'
+    except Exception as e:
+        return [], f'window search failed: {e}'
 
 
 def list_dreambot_window_titles():
@@ -1597,7 +1669,7 @@ def _get_pid_for_window_linux(window_id) -> 'Optional[int]':
     try:
         result = subprocess.run(
             ['xdotool', 'getwindowpid', str(window_id)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=10,
         )
         pid_str = result.stdout.strip()
         if pid_str and pid_str.isdigit():
@@ -1693,7 +1765,7 @@ def _find_windows_for_pid_linux(pid: int) -> list:
     try:
         result = subprocess.run(
             ['xdotool', 'search', '--pid', str(pid)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=10,
         )
         wids = [w for w in result.stdout.strip().split() if w]
         if not wids:

@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.2.1
+
+### Fixed
+
+**1. Missing screenshots — root cause fixed (both platforms).**
+Every capture re-derived the client window from scratch via enumeration
+(xdotool searches on Linux, EnumWindows on Windows), and any transiently
+slow or failed lookup collapsed into "No window found" even while the
+client sat logged in on screen. Confirmed in the field: a failure with a
+correct PID cache and the window visible, with the tell-tale ~10s ping
+delay of two back-to-back 5s search timeouts. Captures now use a cached
+(window, PID) pair verified by asking that window directly for its PID —
+one cheap handle query, no enumeration, no title dependence. Enumeration
+only runs to (re)discover after a client restart. The geometry sweep
+reuses the same cache, eliminating its per-account searches every 2
+minutes that collided with captures on a busy X server. The
+relaunch/terminate path keeps its strict full verification — kill-safety
+is unchanged.
+
+**2. Failure reasons are now precise, with a window snapshot.**
+"No window found" previously hid what actually happened. Lookup failures
+now distinguish no-match vs timed-out vs stale-cache (e.g. "title path:
+window search timed out (X busy)"), and every final capture failure
+records a snapshot of all DreamBot window titles visible at that instant
+to debug.jsonl — any remaining miss is provable, not guessable.
+
+**3. Stale cached PIDs are evicted.**
+A dead cached PID (client replaced outside the monitor) previously burned
+a wasted window search on every capture forever. Dead PIDs are now
+detected and cleared on first use.
+
+**4. Linux window-lookup timeouts raised 5s → 10s.**
+The subprocess ceiling on xdotool lookup calls treated a slow X answer as
+"no window". A ceiling, not a delay — fast answers are unaffected; with
+the window cache these calls barely run at all.
+
+**5. Scheduled screenshots wait for login.**
+"Break over" clears break state while the client is still logging in
+(20s to several minutes); scheduled shots fired into that window and
+missed. They now additionally require logged-in state, staying due and
+firing within a minute of the actual login — which also warms the window
+cache for the session.
+
 ## v2.2.0
 
 ### Added

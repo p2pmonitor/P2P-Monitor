@@ -41,13 +41,13 @@ def _get_linux_env():
     from py.util import get_display_env
     return get_display_env()
 
-from py.platform_ops import (find_window_ids_by_name, capture_window_image,
+from py.platform_ops import (capture_window_image,
                              get_focused_window,
                              is_window_minimized, restore_window,
                              raise_and_focus_window, minimize_window,
                              click_at, supports_paint_detection,
                              get_window_dpi_scale, get_window_title,
-                             find_windows_for_pid, get_pid_for_window,
+                             get_pid_for_window,
                              PAINT_BTN_X_OFFSET, PAINT_BTN_Y_OFFSET,
                              PAINT_BTN_CROP_W, PAINT_BTN_CROP_H)
 
@@ -439,6 +439,18 @@ class ScreenshotService:
                 if not path:
                     self._dbg(f"  🚫 [{account}] Screenshot failed: {err}")
                     self._warn_capture_failure(account, trigger, err)
+                    # Diagnostic snapshot (v2.2.1): record what DreamBot windows
+                    # were actually visible at this instant, so any remaining
+                    # miss is provable from debug.jsonl instead of guessed at.
+                    try:
+                        from py.platform_ops import list_dreambot_window_titles
+                        from py.util import write_debug_entry
+                        write_debug_entry('screenshot_fail', {
+                            'account': account, 'trigger': trigger, 'err': err,
+                            'visible_dreambot_windows': list_dreambot_window_titles(),
+                        })
+                    except Exception:
+                        pass
                     # Fallback: if this was an event screenshot with a payload and URL,
                     # post the embed without the image so the notification is not lost.
                     # The capture-failure reason rides along as an embed footer so a
@@ -607,26 +619,71 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
     restore_wid:  window to raise after capture (pass for batch sequences).
     get_pid_cb:   optional callable(account) → int|None — read cached PID
     set_pid_cb:   optional callable(account, pid) — write resolved PID to cache
+
+    Window resolution order (v2.2.1):
+      0. Cached (window_id, pid) pair — verified by asking THAT window for
+         its PID (direct handle query, no enumeration). Immune to title
+         transients and busy-server search failures; this is the steady-
+         state path, so enumeration effectively never runs once a client
+         has been resolved once per session.
+      1. PID-first enumeration (trusted PID → its DreamBot window).
+      2. Title enumeration fallback (strict DreamBot+account guard).
+    Any successful resolve refreshes both caches. Failures return a
+    precise reason (no-match vs timed-out vs stale) instead of a generic
+    "no window found".
     """
     try:
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        from py.platform_ops import (find_window_ids_by_name_ex,
+                                     find_windows_for_pid_ex,
+                                     is_pid_running)
+        from py.launcher import (get_account_window, set_account_window,
+                                 clear_account_window)
 
         target_wid = None
+        fail_notes = []
+
+        # ── 0. Cached window handle, verified by direct PID query ────────────
+        cached = get_account_window(account_name)
+        if cached:
+            c_wid, c_pid = cached
+            live_pid = get_pid_for_window(c_wid)
+            if live_pid and live_pid == c_pid:
+                target_wid = c_wid
+            else:
+                clear_account_window(account_name)
+                fail_notes.append('cached window stale — cleared')
 
         # ── 1. PID-first path ─────────────────────────────────────────────────
         # find_windows_for_pid already filters: visible + 'dreambot' in title.
         # Account name match not required — trusted PID is the ownership signal.
-        pid = get_pid_cb(account_name) if get_pid_cb else None
-        if pid:
-            pid_wids = find_windows_for_pid(pid)
-            if pid_wids:
-                target_wid = pid_wids[0]
+        if target_wid is None:
+            pid = get_pid_cb(account_name) if get_pid_cb else None
+            if pid and not is_pid_running(pid):
+                # Stale-PID eviction (v2.2.1): a dead cached PID previously
+                # burned a wasted window search on every capture, forever.
+                if set_pid_cb:
+                    try:
+                        set_pid_cb(account_name, None)
+                    except Exception:
+                        pass
+                fail_notes.append(f'cached PID {pid} dead — evicted')
+                pid = None
+            if pid:
+                pid_wids, pid_reason = find_windows_for_pid_ex(pid)
+                if pid_wids:
+                    target_wid = pid_wids[0]
+                    set_account_window(account_name, target_wid, pid)
+                else:
+                    fail_notes.append(f'PID path: {pid_reason}')
 
         # ── 2. Title fallback ─────────────────────────────────────────────────
         if target_wid is None:
-            wids = find_window_ids_by_name(account_name)
+            wids, title_reason = find_window_ids_by_name_ex(account_name)
             if not wids:
-                return None, f"No window found for account: {account_name}"
+                fail_notes.append(f'title path: {title_reason or "no match"}')
+                return None, (f"No window found for account: {account_name} "
+                              f"({'; '.join(fail_notes)})")
             candidate = wids[0]
             # Hard guard: must contain both 'dreambot' AND account name
             confirmed_title = get_window_title(candidate)
@@ -638,14 +695,16 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
                     f"to prevent wrong-window screenshot"
                 )
             target_wid = candidate
-            # Save discovered PID so PID path is used on subsequent screenshots
-            if set_pid_cb:
-                try:
-                    resolved_pid = get_pid_for_window(target_wid)
-                    if resolved_pid:
+            # Save discovered PID so PID path is used on subsequent screenshots,
+            # and cache the verified (window, pid) pair for handle-first capture.
+            try:
+                resolved_pid = get_pid_for_window(target_wid)
+                if resolved_pid:
+                    if set_pid_cb:
                         set_pid_cb(account_name, resolved_pid)
-                except Exception:
-                    pass
+                    set_account_window(account_name, target_wid, resolved_pid)
+            except Exception:
+                pass
 
         ts        = datetime.now().strftime('%Y%m%d_%H%M%S')
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', account_name)

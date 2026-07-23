@@ -653,6 +653,12 @@ class LogWatcher:
                 skip = 'on break'
             elif not state.script_running:
                 skip = 'offline'
+            elif not state.logged_in:
+                # Break-end race (v2.2.1): 'Break over' clears on_break while
+                # the client is still logging in for 20s-minutes; firing now
+                # bounces off a client whose title can't be matched. Stay due;
+                # this check re-runs every 60s and fires right after login.
+                skip = 'not logged in yet'
             elif self._is_muted(name):
                 skip = 'muted'
             if skip:
