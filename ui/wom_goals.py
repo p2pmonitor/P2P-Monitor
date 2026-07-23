@@ -180,6 +180,15 @@ class WomGoalsPage:
         self._last99_scan_done = True
         self._rerender()
 
+    def notify_levelup_99(self, account, skill):
+        """Live push of a just-achieved 99 (see stats_tab.notify_levelup_99).
+        Appends to the in-memory history rows and re-renders — previously the
+        one-time startup scan meant new 99s only appeared after a monitor
+        restart (v2.2.0). Runs on the Tk thread (called via app.after)."""
+        rows = self._last99_history_rows.setdefault(account, [])
+        rows.append({'value': skill, 'activity': '99', '_ts_epoch': time.time()})
+        self._rerender()
+
     def _last_99_rows_for(self, account):
         """Pure in-memory lookup — no I/O. Returns whatever the background
         scan has found for this account so far; empty before the scan

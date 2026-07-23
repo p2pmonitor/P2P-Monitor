@@ -306,6 +306,7 @@ class ScreenshotService:
     def __init__(self, callbacks):
         self._cb       = callbacks
         self._queue    = queue.PriorityQueue(maxsize=50)
+        self._fail_log_ts = {}   # account -> last main-log capture-failure warning (10-min throttle)
         self._seq      = 0
         self._seq_lock = threading.Lock()
         self._thread   = None
@@ -361,6 +362,18 @@ class ScreenshotService:
             self._dbg(f"  ⚠ [{account}] Screenshot queue full — request dropped ({trigger})")
             return False
 
+    def _warn_capture_failure(self, account, trigger, err):
+        """Surface capture failures in the main monitor log — throttled to one
+        line per account per 10 min. Previously debug-only, which made missing
+        screenshots undiagnosable on non-debug installs (v2.2.0)."""
+        now = time.time()
+        if now - self._fail_log_ts.get(account, 0) < 600:
+            return
+        self._fail_log_ts[account] = now
+        log = self._cb.get('log')
+        if log:
+            log(f"⚠ [{account}] Screenshot capture failed ({trigger}): {err or 'unknown error'}")
+
     def _dbg(self, msg: str) -> None:
         """Log msg only when debug mode is enabled in config. Screenshot-only noise is always routed here."""
         try:
@@ -386,7 +399,8 @@ class ScreenshotService:
     def _worker(self):
         """Process queued screenshot requests in priority order."""
         from py.discord import (post_discord, post_bot_image,  # local import avoids circular
-                                screenshot_payload, _add_recovery_footer)
+                                screenshot_payload, _add_recovery_footer,
+                                parse_retry_after)
         while not self._stop.is_set():
             try:
                 item = self._queue.get(timeout=0.1)
@@ -409,16 +423,35 @@ class ScreenshotService:
                         get_pid_cb=self._cb.get('get_account_pid'),
                         set_pid_cb=self._cb.get('set_account_pid'),
                     )
+                    if not path:
+                        # One quick in-place retry (v2.2.0) — rescues transient
+                        # failures (window mid-transition, momentary lookup
+                        # miss) while keeping the shot timely.
+                        self._dbg(f"  🔁 [{account}] Capture failed ({err}) — retrying once in 1.5s")
+                        time.sleep(1.5)
+                        path, err = take_screenshot(
+                            account,
+                            restore_wid=restore_wid,
+                            hide_paint=hide_paint,
+                            get_pid_cb=self._cb.get('get_account_pid'),
+                            set_pid_cb=self._cb.get('set_account_pid'),
+                        )
                 if not path:
                     self._dbg(f"  🚫 [{account}] Screenshot failed: {err}")
+                    self._warn_capture_failure(account, trigger, err)
                     # Fallback: if this was an event screenshot with a payload and URL,
                     # post the embed without the image so the notification is not lost.
+                    # The capture-failure reason rides along as an embed footer so a
+                    # missing screenshot self-documents its cause (v2.2.0).
                     # Scheduled screenshots have no event payload — skip fallback for those.
                     if payload_override is not None and url_override:
                         self._dbg(f"  ↩ [{account}] Posting embed-only fallback for {trigger}")
                         try:
                             from py.discord import post_discord as _pd
-                            _pd(url_override, payload_override)
+                            _reason = (err or 'unknown error').strip()
+                            _fallback = _add_recovery_footer(
+                                payload_override, f"📷 Screenshot failed: {_reason[:180]}")
+                            _pd(url_override, _fallback)
                         except Exception as _fe:
                             self._dbg(f"  🚫 [{account}] Embed-only fallback failed: {_fe}")
                 else:
@@ -432,6 +465,13 @@ class ScreenshotService:
                                 self._dbg(f"  ⚠ [{account}] Gateway not ready after 60s — screenshot dropped")
                             else:
                                 ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
+                                if not ok:
+                                    _ra = parse_retry_after(err)
+                                    if _ra is not None:
+                                        _wait = min(_ra, 30.0) + 0.5
+                                        self._dbg(f"  ⏳ [{account}] Rate limited — retrying bot screenshot post in {_wait:.1f}s")
+                                        time.sleep(_wait)
+                                        ok, err = post_bot_image(bot_channel_id, bot_token, account, path)
                                 if not ok:
                                     handler = self._cb.get('handle_post_error')
                                     if handler:
@@ -458,6 +498,13 @@ class ScreenshotService:
                                 None if trigger == 'scheduled' else screenshot_payload(account, trigger))
                             if url:
                                 ok, e = post_discord(url, payload, image_path=path)
+                                if not ok:
+                                    _ra = parse_retry_after(e)
+                                    if _ra is not None:
+                                        _wait = min(_ra, 30.0) + 0.5
+                                        self._dbg(f"  ⏳ [{account}] Rate limited — retrying screenshot post in {_wait:.1f}s")
+                                        time.sleep(_wait)
+                                        ok, e = post_discord(url, payload, image_path=path)
                                 if not ok:
                                     handler = self._cb.get('handle_post_error')
                                     if handler:

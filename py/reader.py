@@ -46,9 +46,28 @@ _WINE_DEATH_STRONG = ('STOP STEALING MY WINE', 'Interacting Wine of zamorak')
 _WINE_DEATH_WEAK   = ('Ooh nasty', 'Died during Prayer')
 _WINE_DEATH_BACK_LINES    = 5  # lines to scan before the death line (within arr)
 _WINE_DEATH_FORWARD_LINES = 3  # lines to scan after the death line
-SKILL_LVL_RE    = re.compile(r"Congratulations, you've just advanced your (.+?) level\. You are now level (\d+)", re.I)
-SKILL_99_RE     = re.compile(r"Congratulations, you've reached the highest possible (.+?) level of 99", re.I)
-TOTAL_LVL_RE    = re.compile(r"Congratulations, you've reached a total level of (\d+)", re.I)
+# Level/total patterns are anchored to start directly after the [GAME] prefix
+# so group/clan broadcasts about OTHER players ("X has reached ... level N")
+# and player-typed chat can never match — see GitHub issue #3 (v2.2.0).
+SKILL_LVL_RE    = re.compile(r"^\[GAME\]\s*Congratulations, you've just advanced your (.+?) level\. You are now level (\d+)", re.I)
+SKILL_99_RE     = re.compile(r"^\[GAME\]\s*Congratulations, you've reached the highest possible (.+?) level of 99", re.I)
+TOTAL_LVL_RE    = re.compile(r"^\[GAME\]\s*Congratulations, you've reached a total level of (\d+)", re.I)
+# Own-player quest anchors — group broadcasts ("<name> has completed a quest:
+# X", GitHub issue #3) must never match, so the message must start directly
+# after the [GAME] prefix in the first-person Congratulations/You've form.
+QUEST_COMPLETE_RE = re.compile(r"^\[GAME\]\s*Congratulations, you've completed a quest", re.I)
+QUEST_STARTED_RE  = re.compile(r"^\[GAME\]\s*You've started a new quest", re.I)
+
+# ── Ban detection (v2.2.0) ───────────────────────────────────────────────────
+# Two known DreamBot ban signatures:
+#   [ERROR] Account is being set to banned status
+#   [WARN]  High severity server response, stopping script! Response: DISABLED
+_BAN_STATUS_RE   = re.compile(r'account is being set to banned status', re.I)
+_BAN_DISABLED_RE = re.compile(r'high severity server response.*response:\s*disabled', re.I)
+
+def is_ban_line(stripped_body):
+    """True if a (prefix-stripped) log line signals the account was banned."""
+    return bool(_BAN_STATUS_RE.search(stripped_body) or _BAN_DISABLED_RE.search(stripped_body))
 SCRIPT_START_RE = re.compile(r'Starting P2P Master AI now!', re.I)
 SCRIPT_STOP_RE  = re.compile(r'Stopped P2P Master AI!', re.I)
 SCRIPT_PAUSE_RE = re.compile(r'Script P2P Master AI paused\.\.\.')
@@ -261,7 +280,7 @@ def slice_quests(lines):
     """Returns list of ('complete', quest_name)."""
     results = []
     for line in lines:
-        if 'completed a quest' in line.lower():
+        if QUEST_COMPLETE_RE.search(strip_color(strip_prefix(line)).strip()):
             name = _extract_quest_name(line)
             if name:
                 results.append(('complete', name))
@@ -271,7 +290,7 @@ def slice_quests_started(lines):
     """Returns list of quest_name strings."""
     results = []
     for line in lines:
-        if "you've started a new quest" in line.lower():
+        if QUEST_STARTED_RE.search(strip_color(strip_prefix(line)).strip()):
             name = _extract_quest_name(line)
             if name:
                 results.append(name)

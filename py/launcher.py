@@ -494,8 +494,9 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
     Run in a daemon thread after Popen. Polls for the real DreamBot client PID
     via window title, caches it in launcher_state.json.
 
-    If the window is not found within 30 seconds, caches the immediate Popen PID
-    as a best-effort fallback, and logs a warning.
+    If the window is not found within 120 seconds, keeps watching at low
+    frequency (every 30s, up to 30 minutes). The launcher Popen PID is never
+    cached as a fallback — see v2.2.0 changelog.
 
     restore_geometry: optional (x, y, w, h) captured from the previous
     client window before it was closed (relaunch_account only — fresh
@@ -513,7 +514,26 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
         if log_fn:
             log_fn(msg)
 
-    result = _discover_with_timeout(account, timeout=30, poll=2)
+    result = _discover_with_timeout(account, timeout=120, poll=2)
+    if not result:
+        # Not confirmed within the initial window — keep watching at low
+        # frequency for up to 30 minutes (slow launcher/client boots, proxy
+        # delays, jav_config retries routinely exceed a fixed short window;
+        # see v2.2.0 changelog). When the window finally appears, the real
+        # PID is cached and the position restore below still runs.
+        _log(f'⚠️ [{account}] Client window not found within 120s — '
+             f'will keep watching for up to 30 minutes.')
+        _deadline = time.monotonic() + 1800
+        while time.monotonic() < _deadline:
+            time.sleep(30)
+            try:
+                _late = discover_account_process(account)
+            except Exception:
+                _late = None  # ambiguous or scan failure — keep waiting
+            if _late and _late.get('pid'):
+                result = _late
+                _log(f'✅ [{account}] Client window found late — continuing.')
+                break
     if result:
         real_pid = result['pid']
         _set_pid(account, real_pid)
@@ -637,10 +657,11 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                     _log(f'⚠️ [{account}] Window position restore failed: {exc} — '
                          f'client is open at its default position instead.')
     else:
-        _set_pid(account, immediate_pid)
-        _log(f'⚠️ [{account}] Client window not found within 30s — caching launcher PID {immediate_pid}.')
-        if restore_geometry is not None:
-            _log(f'⚠️ [{account}] Window position restore skipped — new client window never confirmed.')
+        # Do NOT cache the launcher Popen PID as a fallback — it is the
+        # launcher JVM, not the client, and it poisons the PID-first
+        # screenshot lookup until the next successful discovery (v2.2.0).
+        _log(f'⚠️ [{account}] Client window never confirmed after 30 minutes — '
+             f'PID not cached; window position restore skipped.')
 
 
 # ── Public launcher API ────────────────────────────────────────────────────────
@@ -707,7 +728,7 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
     ).start()
 
     return LaunchResult(ok=True, account=account, action='launched',
-                        message=f'Launched {account}. Client PID will be confirmed within 30s.',
+                        message=f'Launched {account}. Client PID will be confirmed within 120s.',
                         pid=immediate_pid)
 
 

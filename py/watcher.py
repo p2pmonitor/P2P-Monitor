@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+import traceback
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 from py.config  import save_config
 from py.util    import now_str, write_debug_entry, reset_debug_log
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
-from py.reader  import LOG_TS_RE
+from py.reader  import LOG_TS_RE, is_ban_line
 from py.history import (append_history,
                         get_last_seen, set_last_seen,
                         get_last_seen_meta,
@@ -121,6 +122,7 @@ class AccountState:
         self.session_start   = time.time()
         self.script_start_ts = None
         self.logged_in       = False
+        self.banned          = False  # ban detected in log; cleared on successful login (v2.2.0)
         self.total_break_secs    = 0
         self._break_start_ts     = None
         self._break_length_ms    = None   # parsed from "Break length N" log line; ms int or None
@@ -209,6 +211,9 @@ class LogWatcher:
         self._dirs_last_check = 0
         self._last_summary_date = None
         self._last_update_check_slot = 0.0    # epoch float: time of last update-awareness check
+        self._ss_skip_log_ts = {}      # account -> last "due but gated" debug log time (10-min throttle)
+        self._last_heartbeat = 0.0     # epoch float: last 24h heartbeat log
+        self._loop_started   = 0.0     # epoch float: when the _run loop started
 
     def _dbg(self, msg):
         """Log msg only when debug mode is enabled in config."""
@@ -404,7 +409,9 @@ class LogWatcher:
         with self._accounts_lock:
             snapshot = list(self._accounts.items())
         for name, s in sorted(snapshot):
-            if not s.script_running:
+            if s.banned:
+                status = '🔨 Banned'
+            elif not s.script_running:
                 status = '🔴 Offline'
             elif s.on_break or s._break_start_ts:
                 status = '🟡 On Break'
@@ -623,7 +630,11 @@ class LogWatcher:
 
     def _check_screenshots(self, ss_min):
         if not self.cfg.get('screenshots_enabled'):
+            if not getattr(self, '_ss_disabled_logged', False):
+                self._dbg('[ss] Scheduled screenshots disabled in Settings — skipping checks')
+                self._ss_disabled_logged = True
             return
+        self._ss_disabled_logged = False
         is_startup = not getattr(self, '_screenshots_started', False)
         self._screenshots_started = True
         threshold = ss_min * 60
@@ -631,20 +642,37 @@ class LogWatcher:
         with self._accounts_lock:
             snapshot = list(self._accounts.items())
         for name, state in snapshot:
+            if time.time() - state.last_screenshot_ts < threshold:
+                continue  # not due yet — normal, no log
+            # Account is due — if a gate blocks it, say why in debug mode.
+            # These skips were previously silent, which made "screenshots
+            # stopped, no errors anywhere" undiagnosable from the logs.
+            # Throttled to one line per account per 10 min to avoid noise.
+            skip = None
             if state.on_break or state._break_start_ts:
-                continue  # account is on break
-            if not state.script_running:
-                continue  # account is offline
-            if time.time() - state.last_screenshot_ts >= threshold:
-                state.last_screenshot_ts = time.time()
-                due.append(name)
+                skip = 'on break'
+            elif not state.script_running:
+                skip = 'offline'
+            elif self._is_muted(name):
+                skip = 'muted'
+            if skip:
+                _log_ts = self._ss_skip_log_ts.get(name, 0)
+                if time.time() - _log_ts >= 600:
+                    self._ss_skip_log_ts[name] = time.time()
+                    self._dbg(f'[ss] [{name}] screenshot due but account is {skip} — skipped')
+                continue
+            self._ss_skip_log_ts.pop(name, None)
+            state.last_screenshot_ts = time.time()
+            due.append(name)
         if not due:
             return
         for i, name in enumerate(due):
             if is_startup and not self.cfg.get('screenshot_on_startup', False):
+                self._dbg(f'[ss] [{name}] startup screenshot disabled in Settings — skipped')
                 continue
             trigger = 'startup' if is_startup else 'scheduled'
-            self._enqueue_screenshot(SS_PRIORITY_SCHEDULED, name, trigger)
+            if not self._enqueue_screenshot(SS_PRIORITY_SCHEDULED, name, trigger):
+                self._dbg(f'[ss] [{name}] {trigger} screenshot enqueue refused')
 
     # ── DreamBot / P2P Master AI update awareness ──────────────────────────────
 
@@ -903,7 +931,13 @@ class LogWatcher:
                 self._dbg(f'[update_check] {account or "?"}: already alerted for key {key}')
 
             # Auto-relaunch: separate signature to avoid mixing alert dedupe with relaunch dedupe
+            # Banned accounts are excluded — never relaunch a banned account (v2.2.0).
             if auto_relaunch_on and (script_outdated or new_client):
+                with self._accounts_lock:
+                    _b_state = self._accounts.get(account)
+                if _b_state is not None and _b_state.banned:
+                    self._dbg(f'[update_check] {account}: banned — excluded from auto-relaunch.')
+                    continue
                 rl_sig = f"{account}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
                 if rl_sig not in relaunched_sigs:
                     new_rl_sigs.append(rl_sig)
@@ -1273,34 +1307,64 @@ class LogWatcher:
             threading.Thread(target=self._check_update_awareness,
                              kwargs={'force': True}, daemon=True).start()
 
+        self._last_heartbeat = time.time()
+        self._loop_started   = time.time()
         while self._running:
-            current_dirs = self._get_log_dirs()
-            for d in current_dirs:
-                active = _get_active_log_file(d)
-                if not active:
-                    continue
-                self._check_file(str(active))
-            now = time.time()
-            if now - last_periodic >= 60:
-                last_periodic = now
-                self._check_screenshots(ss_min)
-                self._check_daily_summary()
-                self._check_update_awareness()
-                self._prune_screenshots()
-                self._prune_dedupe()
-                self.on_status()
-            # Persist running client window positions every ~2 minutes so a
-            # delayed relaunch / monitor restart can restore them (item:
-            # window geometry forgotten after delayed relaunch). Runs on its
-            # own daemon thread — window enumeration never blocks this loop.
-            if now - getattr(self, '_last_geom_sweep', 0) >= 120:
-                self._last_geom_sweep = now
-                accounts_snapshot = list(self._accounts.keys())
-                if accounts_snapshot:
-                    from py.launcher import persist_running_geometries
-                    threading.Thread(
-                        target=persist_running_geometries,
-                        args=(self.cfg, accounts_snapshot), daemon=True).start()
+            # The entire loop body is guarded: one bad cycle must never kill
+            # this thread. It runs event processing AND all periodic checks —
+            # if it dies, events and scheduled screenshots stop silently while
+            # the UI, gateway bot, and screenshot worker (separate threads)
+            # keep working, which masks the failure entirely.
+            try:
+                current_dirs = self._get_log_dirs()
+                for d in current_dirs:
+                    active = _get_active_log_file(d)
+                    if not active:
+                        continue
+                    self._check_file(str(active))
+                now = time.time()
+                if now - last_periodic >= 60:
+                    last_periodic = now
+                    # Each periodic check individually guarded so one failure
+                    # can't starve the others (or kill the loop).
+                    for _p_name, _p_fn in (
+                            ('screenshot check',  lambda: self._check_screenshots(ss_min)),
+                            ('daily summary',     self._check_daily_summary),
+                            ('update awareness',  self._check_update_awareness),
+                            ('screenshot prune',  self._prune_screenshots),
+                            ('dedupe prune',      self._prune_dedupe),
+                            ('status refresh',    self.on_status),
+                    ):
+                        try:
+                            _p_fn()
+                        except Exception:
+                            tb = traceback.format_exc()
+                            self.log(f"⚠ Periodic {_p_name} failed — monitor continues")
+                            self._dbg(f"[periodic] {_p_name} traceback:\n{tb}")
+                # Heartbeat — one line per 24h so a dead loop is diagnosable at
+                # a glance (last heartbeat older than a day = loop stopped then).
+                if now - self._last_heartbeat >= 86400:
+                    self._last_heartbeat = now
+                    with self._accounts_lock:
+                        _n_accounts = len(self._accounts)
+                    self.log(f"💓 Monitor loop alive — {_n_accounts} account(s), "
+                             f"up {_fmt_duration(now - self._loop_started)}")
+                # Persist running client window positions every ~2 minutes so a
+                # delayed relaunch / monitor restart can restore them (item:
+                # window geometry forgotten after delayed relaunch). Runs on its
+                # own daemon thread — window enumeration never blocks this loop.
+                if now - getattr(self, '_last_geom_sweep', 0) >= 120:
+                    self._last_geom_sweep = now
+                    accounts_snapshot = list(self._accounts.keys())
+                    if accounts_snapshot:
+                        from py.launcher import persist_running_geometries
+                        threading.Thread(
+                            target=persist_running_geometries,
+                            args=(self.cfg, accounts_snapshot), daemon=True).start()
+            except Exception:
+                tb = traceback.format_exc()
+                self.log("⚠ Monitor cycle failed — monitor continues")
+                self._dbg(f"[loop] cycle traceback:\n{tb}")
             time.sleep(interval)
 
     # ── Startup catchup ────────────────────────────────────────────────────────
@@ -1389,6 +1453,7 @@ class LogWatcher:
                 state.on_break       = False
                 state.logged_in      = False
                 state.script_running = False
+                state.banned         = False
 
                 def _state_lines_for(sf):
                     """Return lines for sf, reusing active_lines to avoid double read."""
@@ -1423,6 +1488,7 @@ class LogWatcher:
                         elif 'you have successfully been logged in' in b.lower():
                             state.on_break      = False
                             state.logged_in     = True
+                            state.banned        = False
                             break_start_log_ts  = None
                         elif 'starting p2p master ai now' in b.lower() or \
                              'script set to running' in b.lower() or \
@@ -1442,6 +1508,8 @@ class LogWatcher:
                             state.logged_in       = False
                             state.on_break        = False
                             state._break_start_ts = None
+                        elif is_ban_line(b):
+                            state.banned = True
             else:
                 # Rotation: only scan the new active file for state changes
                 for line in active_lines:
@@ -1465,6 +1533,7 @@ class LogWatcher:
                     elif 'you have successfully been logged in' in b.lower():
                         state.on_break      = False
                         state.logged_in     = True
+                        state.banned        = False
                         break_start_log_ts  = None
                     elif 'starting p2p master ai now' in b.lower() or \
                          'script set to running' in b.lower() or \
@@ -1482,6 +1551,8 @@ class LogWatcher:
                         state.logged_in       = False
                         state.on_break        = False
                         state._break_start_ts = None
+                    elif is_ban_line(b):
+                        state.banned = True
 
             # Debug: show reconstructed state
             self._dbg(
@@ -2186,6 +2257,11 @@ class LogWatcher:
         if not self.cfg.get('auto_restart_enabled', False):
             return 'disabled', None  # silent in monitor tab; shown in Discord embed only
 
+        # ── Gate 1b: account banned — never auto-restart a banned account ─────
+        if state.banned:
+            status = 'skipped — account is banned'
+            return status, f'🔄 [{account}] Auto restart {status}.'
+
         # ── Gate 2: suppress window (monitor-initiated relaunch) ──────────────
         try:
             from py.launcher import is_relaunch_suppressed
@@ -2374,12 +2450,30 @@ class LogWatcher:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts  = None
                 state._break_length_ms = None   # break consumed; clear for next cycle
+            elif is_ban_line(b):
+                if not state.banned:
+                    state.banned = True
+                    self.log(f'🔨 [{folder}] Ban detected — status set to Banned '
+                             f'(clears on next successful login).')
+                    try:
+                        self.handle_event({'type': 'ban', 'value': 'Account banned',
+                                           'activity': '', 'ts': now_str()},
+                                          folder, source='live')
+                    except Exception as _be:
+                        self._dbg(f'[ban] handle_event failed for {folder}: {_be}')
+                    try:
+                        from py.discord import ban_payload
+                        self._router.post_event(folder, 'default',
+                                                ban_payload(self._router.mention(), folder))
+                    except Exception as _be:
+                        self.log(f'⚠ [{folder}] Ban ping failed: {_be}')
             elif 'interacting (widget) logout' in b.lower():
                 state.logged_in = False
                 # Do NOT set _break_start_ts here — logout is not a break
             elif 'you have successfully been logged in' in b.lower():
                 state.logged_in = True
                 state.on_break  = False
+                state.banned    = False  # successful login clears ban (2-day temps, v2.2.0)
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts = None

@@ -1,5 +1,93 @@
 # Changelog
 
+## v2.2.0
+
+### Added
+
+**1. Ban detection.**
+Two DreamBot ban signatures are now detected ("Account is being set to
+banned status" and "High severity server response ... Response: DISABLED").
+When either appears, the account's status shows 🔨 Banned instead of
+Offline, a ping is sent to the account's monitor thread, and the event is
+recorded in history and the Event Log. A successful login clears the state
+(so 2-day temporary bans self-clear when the account returns), and it is
+reconstructed during startup catch-up so it survives monitor restarts.
+Banned accounts are excluded from auto-restart and update auto-relaunch.
+
+**2. Live "Last 99 Achieved" updates.**
+Stats → Goals & Maxing now receives 99s live from the event pipeline.
+Previously the page ran its history scan once at first build, so a new 99
+only appeared after a monitor restart.
+
+### Fixed
+
+**3. Window position restore after relaunch failed roughly half the time.**
+The post-relaunch discovery poll gave up after a fixed 30 seconds, but slow
+launcher/client boots (proxy delays, jav_config retries) routinely take
+longer — and on timeout the launcher's own Popen PID was cached as a
+fallback, which poisoned the PID-first screenshot lookup with a non-client
+PID. Discovery now waits up to 120s, then keeps watching at low frequency
+(every 30s, up to 30 minutes) and completes the PID cache + position
+restore when the window finally appears. The Popen-PID fallback is removed.
+
+**4. Missing screenshots now retry once and always explain themselves.**
+Event pings arriving without their image are the capture-failure fallback
+path. Capture now gets one quick in-place retry (1.5s), and when it still
+fails the reason is attached to the fallback embed as a footer
+("📷 Screenshot failed: …") and logged to the monitor tab (throttled,
+one line per account per 10 min) — previously the reason was debug-only.
+Rate-limited (HTTP 429) screenshot posts now honor Discord's retry_after
+and retry once instead of being dropped.
+
+**5. Group/clan broadcasts no longer trigger quest pings (GitHub issue #3).**
+"<player> has completed a quest: X" from group chat matched the loose
+'completed a quest' substring and fired a quest-complete ping for the wrong
+player. Quest completion/start and level/total-level patterns are now
+anchored to the first-person "[GAME] Congratulations, you've…" form, so
+other players' broadcasts (and player-typed chat) can never match.
+
+**6. Slash commands could stay unregistered after first bot setup.**
+First-time setup drains the Discord API budget on channel/thread creation
+right before command registration; registration retries capped each wait at
+30s even when Discord asked for longer, then gave up permanently until the
+next monitor start. Waits now honor retry_after (up to 15 min per wait),
+and after a rate-limited give-up the monitor re-arms registration in the
+background (every 5 minutes, up to 12 attempts) instead of waiting for a
+restart.
+
+### Carried from unreleased v2.1.4
+
+
+**7. Monitor loop could die silently, stopping events and scheduled screenshots.**
+The main monitor thread ran all periodic checks (screenshots, daily summary,
+update awareness, pruning, status refresh) inline with no exception guard.
+One unhandled exception anywhere in that chain — a network hiccup during a
+Discord post, an odd window title during an update check — killed the thread
+permanently and silently. The failure was fully masked: the status tab
+(UI-driven), the gateway bot, and the screenshot worker run on separate
+threads, so accounts still showed green and on-demand /ss still worked while
+scheduled screenshots and event processing were dead. Observed in the field
+after 100+ hours of uptime; a restart "fixed" it. The loop body is now
+guarded: each periodic check catches its own exceptions (logged with full
+traceback in debug mode, one-line notice in the monitor log) and an outer
+guard protects the whole cycle. One bad cycle can no longer kill the monitor.
+
+**8. Scheduled-screenshot skips are no longer silent (debug mode).**
+Every gate that skips a scheduled screenshot (account on break, offline,
+muted, screenshots disabled, startup screenshot disabled, enqueue refused)
+previously dropped the request without a trace, making "screenshots stopped,
+no errors anywhere" undiagnosable. Each skip reason is now logged in debug
+mode, throttled to one line per account per 10 minutes. Minor behavior
+change: a muted account no longer has its schedule timestamp advanced, so it
+becomes due immediately on unmute (matching on-break/offline semantics).
+
+**9. 24-hour heartbeat.**
+The monitor log now gets one line per day ("Monitor loop alive — N
+account(s), up …") so a dead loop is diagnosable at a glance: if the last
+heartbeat is older than a day, the loop stopped then. Logged regardless of
+debug mode — one line per day, works when debug is off (which is when it
+will matter).
+
 ## v2.1.3
 
 ### Fixed

@@ -151,6 +151,13 @@ def death_payload(mention, folder, context='', task_context=''):
         fields.append({"name": "Task", "value": task_context, "inline": False})
     return _embed("💀 Character Died", _desc(mention, folder), fields, 0xff0000)
 
+def ban_payload(mention, folder):
+    return _embed("🔨 Account Banned", _desc(mention, folder),
+                  [{"name": "Detail",
+                    "value": "🪦 Account has been banned, RIP git gud noob 🔨",
+                    "inline": False}],
+                  0x992d22)
+
 def levelup_payload(mention, folder, skill, level, total_level=None, is_99=False):
     title = "🎆 Level 99! 🎆" if is_99 else "🎉 Level Up!"
     fields = [{"name": "Skill", "value": skill,      "inline": True},
@@ -248,6 +255,21 @@ def _add_recovery_footer(payload, message):
 
 
 # ── Post ───────────────────────────────────────────────────────────────────────
+def parse_retry_after(err_str):
+    """Extract Discord's retry_after (seconds, float) from a 429 error
+    string. Returns None if the error is not a rate limit."""
+    if not err_str or 'HTTP 429' not in err_str:
+        return None
+    import re as _re
+    m = _re.search(r'"retry_after"\s*:\s*([0-9.]+)', err_str)
+    if not m:
+        return 1.0
+    try:
+        return float(m.group(1))
+    except (ValueError, TypeError):
+        return 1.0
+
+
 def post_discord(url, payload, image_path=None):
     """Post to Discord webhook. Returns (ok: bool, err: str)."""
     if not url or not url.strip().startswith('http'):
@@ -1614,6 +1636,7 @@ class GatewayRunner:
         for attempt in range(1, max_attempts + 1):
             _, err = bot_api(token, 'PUT', path, self.COMMANDS)
             if not err:
+                self._reg_bg_attempts = 0  # background retry budget resets on success
                 self.cfg['_slash_commands_hash'] = current_hash
                 save_cfg = self.cb.get('save_cfg')
                 if save_cfg:
@@ -1632,10 +1655,40 @@ class GatewayRunner:
                 return
             if attempt == max_attempts:
                 break
-            wait = min(retry_after, 30.0) + random.uniform(0.25, 0.75)
+            wait = min(retry_after, 900.0) + random.uniform(0.25, 0.75)
             self.cb['log'](f"🤖 Rate limited registering slash commands — "
                            f"retrying in {wait:.1f}s")
             time.sleep(wait)
         self.cb['log'](f"🤖 Slash command registration still rate limited after "
-                       f"{max_attempts} attempts — will retry on next monitor start")
+                       f"{max_attempts} attempts — will retry again in 5 minutes")
+        self._schedule_registration_retry(token, app_id)
+
+    _REG_BG_MAX = 12  # background re-attempts, 5-min spacing — ~1h of cover
+
+    def _schedule_registration_retry(self, token, app_id):
+        """Re-arm slash-command registration after a rate-limited give-up.
+        Previously the monitor never tried again in-session ('will retry on
+        next monitor start'), which left first-time bot setups — where
+        channel/thread creation has just drained the API budget — without
+        slash commands until a manual restart (v2.2.0)."""
+        if getattr(self, '_reg_retry_pending', False):
+            return
+        attempts = getattr(self, '_reg_bg_attempts', 0)
+        if attempts >= self._REG_BG_MAX:
+            self.cb['log']("🤖 Slash command registration retries exhausted — "
+                           "will retry on next monitor start")
+            return
+        self._reg_retry_pending = True
+        self._reg_bg_attempts = attempts + 1
+
+        def _rearm():
+            time.sleep(300)
+            self._reg_retry_pending = False
+            try:
+                self._register_commands(token, app_id)
+            except Exception as exc:
+                self.cb['log'](f"🤖 Background slash registration attempt failed: {exc}")
+
+        threading.Thread(target=_rearm, daemon=True,
+                         name='slash-reg-retry').start()
 

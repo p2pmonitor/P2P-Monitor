@@ -299,6 +299,14 @@ class StatsTab:
         from ui.wom_goals import WomGoalsPage
         self._wom_goals_page = WomGoalsPage(self.app, self._goals_maxing_page)
 
+    def notify_levelup_99(self, account, skill):
+        """Live 99 push from the event pipeline (p2p_monitor._on_event).
+        No-op until the Goals & Maxing page has been built — its one-time
+        history scan picks the 99 up at build time instead (v2.2.0)."""
+        page = getattr(self, '_wom_goals_page', None)
+        if page is not None:
+            page.notify_levelup_99(account, skill)
+
     def show_goals_maxing(self):
         """Public method — called by Monitor's Max Progress card click
         handler to jump straight to this section. App.show_tab('Stats')

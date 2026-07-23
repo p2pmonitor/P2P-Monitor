@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.1.3"
+VERSION      = "2.2.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -501,6 +501,14 @@ class App(tk.Tk):
                 self._highlights['last99'] = {
                     'account': folder, 'value': v1, 'activity': v2, 'ts': time.time(),
                 }
+                # Live-push to Stats → Goals & Maxing so 'Last 99 Achieved'
+                # updates without a monitor restart (v2.2.0).
+                stats_tab = getattr(self, '_stats_tab', None)
+                if stats_tab is not None:
+                    try:
+                        stats_tab.notify_levelup_99(folder, v1)
+                    except Exception:
+                        pass
             if self._status_debounce_id:
                 self.after_cancel(self._status_debounce_id)
             self._status_debounce_id = self.after(2000, self._debounced_refresh_tick)
