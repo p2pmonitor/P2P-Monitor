@@ -1,5 +1,156 @@
 # Changelog
 
+## v3.0.0
+
+**Major release: P2P Monitor now monitors the Detuks client instead of DreamBot.**
+DreamBot is no longer supported. Existing settings, history and Discord threads
+are kept; launcher presets are converted automatically.
+
+### ⚠ Read first — works best with one account at a time
+The Detuks client writes **every running client into one shared `client.log`**,
+and no log line says which account it came from. The monitor therefore
+attributes the log to a single account (Settings → **Log account**, or your
+only Launcher account automatically). With one account running, everything is
+exact. With several accounts running at once, their events are merged under
+that one name and status can flip between them.
+
+### Changed
+
+**1. Log reading — Detuks format.**
+New line format (`2026-11-13 11:41:38.859 [thread] INFO  logger - message`) is
+parsed everywhere: tasks, quests, level-ups/99s/total level, drops, collection
+log, deaths, chat, task locks with reasons, farming skips, Inferno. Game
+colour markers such as `@q_mes@` are stripped from names.
+
+**2. Log files — `client.log` + rotation.**
+The monitor reads `client.log` in the selected Detuks logs folder. When the
+client rotates it to `client_YYYY-MM-DD.N.log`, the lines written just before
+the rotation are recovered from the rotated file, so nothing is skipped.
+
+**3. Session state from Detuks lines.**
+`P2P Master AI X started with profile …` means the script is **loaded** and its
+GUI is waiting — status 🟡 **Waiting for Start**, no *Script Started* yet. The
+run starts on `Start button pressed` (or the first `NEW TASK` if the script
+starts on its own); only then are *Script Started*, uptime and relaunch
+confirmation triggered. A Start pressed again mid-run (GUI reopened) is not a
+new start. A fresh load always ends the previous run (a crashed client leaves
+no stop line). Script stop =
+`Finished onExit - P2P Master AI`; login = `Relogged on world N` / task
+activity; breaks are unchanged (`BREAK START` / `Break length` / `Break over`).
+Uptime now counts from the start of the **current script run**, and break time
+is totalled within that run.
+
+**4. Launcher — Detuks CLI.**
+Presets now build
+`<launcher> launch --jl-account <Account> -- --script <Script> --scriptArgs <Profile>`
+— the Detuks Client AppImage on Linux, `launcher.exe` on Windows (default install
+`%LOCALAPPDATA%\BotClient\launcher.exe`; the file picker opens there). New options:
+**Software rendering** (`--software-rendering`) and **Settings file**
+(`--rl-properties`). The account name is case-sensitive and may contain
+spaces; it is always passed as one argument (no literal quotes), and the
+command preview/log shows a correctly quoted, copy-pasteable command for the
+platform. The Linux AppImage must be executable — a missing `chmod +x` is
+reported clearly instead of a raw error.
+
+**5. Preset migration (automatic, one-time).**
+`params` → **Script profile** (empty → `Default`). Proxy, memory, covert,
+fresh/nofresh, menu manipulation, no-click-walk, world and custom args are
+removed — they were DreamBot-only, and DreamBot custom flags would break the
+new client. The old `launcher_jar` setting is removed.
+
+**6. Window matching — `BotClient - V… - <Account>`.**
+Screenshots, relaunch and Launcher status find the client window by its exact
+title, with the account compared **exactly and case-sensitively** (`Abc` can
+never match `Abcd`). The pre-loader window (`Old School Runescape`) and a client
+that has not logged in yet (`BotClient - V…`) are never matched, so they can
+never be closed.
+
+**7. First-run backfill imports only the current `client.log`.**
+Older rotated parts of the shared log can contain other accounts' lines.
+
+**8. Settings page "Restarts & Updates" → "Restarts & Start".** Holds Auto
+Restart and the new Script Start card.
+
+**9. `/force`, `/train` and hide-paint recalibrated for Detuks.** All click
+points were re-measured on Detuks window captures at two window sizes — the
+P2P Master AI panel is pinned to the bottom-left corner and does not scale,
+so the offsets hold at any window size. The button row moved down ~30 px and
+was re-spaced; the skill grid moved down ~30 px. `/force Loot` is now
+**`/force Logs`** (the panel has no Loot button any more; Logs opens, is
+screenshotted and closed like Stats).
+
+**10. Hide-paint detection.** The Hide/Show button stays in the same spot; the
+visibility check now crops only the button face, with a tighter threshold
+(Hide vs Hide 0.00, Show vs Hide ≈0.18 → threshold 0.08). The paint reference
+is stored under a new name, so the old DreamBot one is ignored — **snap it
+once again** (Settings → Paint Reference) with the paint shown.
+
+### Added
+
+**1. Task location and planned duration.** From the script's
+`Selected Task / Activity / Location for about N minutes` line — shown in the
+Event Log and as **Location** / **Planned** fields on the Discord task embed.
+
+**2. Severe lag alert.** A 10 s – 5 min client freeze (`LAG DETECTED`) while
+logged in and running posts an error alert, at most once per 30 minutes.
+Loading lag right after a script start, login or break end (3-minute warm-up)
+and multi-hour "gaps" from being logged out are ignored.
+
+**3. Count milestones.** `Your <X> kill/lap/harvest count is: N` posts a
+🏅 milestone to the level-up channel every 100 (follows the level-up
+notification toggle). Not recorded as a level-up, so Stats are unaffected.
+
+**4. GE coins line.** The script's `Up to N coins available` is shown in the
+Event Log.
+
+**5. Auto-click Start (on by default).** On Detuks the script waits at its GUI
+even with `--scriptArgs`. About 10 s after `Waiting for GUI completion`, the
+monitor finds the `P2P Master AI <version>` window owned by the same process as
+the account's `BotClient` window, locates the Start button by colour (any
+window position/size), clicks it and restores focus. Verified via
+`Start button pressed`; one retry; then **⏸ Waiting for Start — needs a click**
+goes to the Errors channel. Setting: **Settings → Restarts & Start →
+Auto-click Start**; when off, the same alert is sent after 5 minutes. A GUI
+wait found at monitor startup is handled the same way (ignored if hours old);
+a client closed at the GUI raises no alert.
+
+**6. New error rules.** `Login did not finish within N seconds; stopping` →
+"Login timed out — script stopped". `Task loop failed` → "Script task loop
+keeps failing", only when it repeats (3× within 15 min, once per hour; the
+normal one-off retry and the `task=Stopped` line at every stop are ignored).
+
+**7. Settings → Log account.** Which account the shared log belongs to. Must
+match the Launcher account exactly for screenshots/relaunch.
+
+**8. `/force Pause`.** Clicks the panel's Pause button — a toggle, so running
+it again resumes the script.
+
+### Removed
+
+**1. DreamBot update awareness.** The SDN script-version check, the
+`NEW CLIENT AVAILABLE` detection, update alerts and auto-relaunch-on-update are
+gone — they do not apply to the Detuks client. P2P Monitor's own update check
+is unchanged.
+
+### Fixed
+
+**1. Old log lines no longer replay as live events at startup when no client
+is running.** The active log is now positioned at its end in that case too; the
+backfill covers history. (With DreamBot this was rare because each session had
+its own file; the Detuks log is one long-lived file.)
+
+**2. Discord thread IDs are never pruned because the logs folder is empty or
+not yet written.** Pruning by subfolder only runs when the per-account
+subfolder layout is actually detected.
+
+### Known gaps
+- **Manual stop vs. auto restart:** Detuks logs show no verifiable "manual
+  stop" marker. With auto restart enabled, a stop you made by hand may be
+  auto-restarted (still limited by the update-window option).
+- **Ban detection** keeps the DreamBot ban signatures; Detuks ban messages have
+  not been observed yet.
+- **Script pause/resume** events: not present in Detuks logs.
+
 ## v2.2.1
 
 ### Fixed

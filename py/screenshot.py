@@ -28,9 +28,13 @@ SCREENSHOT_DIR = Path.home() / '.p2p_monitor' / 'screenshots'
 
 # ── Paint button geometry ──────────────────────────────────────────────────────
 # PAINT_BTN_* constants imported from py.platform_ops (centralized source of truth)
-PAINT_REF_FILE       = Path.home() / ".p2p_monitor" / "paint_visible_ref.png"
-PAINT_REF_SCALE_FILE = Path.home() / ".p2p_monitor" / "paint_ref_scale.txt"
-PAINT_DIFF_THRESH  = 0.15
+# v3.0.0: new file names so a DreamBot-era reference (different button,
+# different spot) is never compared against the Detuks panel — re-snap once.
+PAINT_REF_FILE       = Path.home() / ".p2p_monitor" / "paint_visible_ref_detuks.png"
+PAINT_REF_SCALE_FILE = Path.home() / ".p2p_monitor" / "paint_ref_scale_detuks.txt"
+# Measured on Detuks captures (Windows avg-max metric): Hide vs Hide 0.00,
+# Show vs Hide ≈0.18 (RMSE ≈0.30), so 0.08 separates them with margin.
+PAINT_DIFF_THRESH  = 0.08
 
 # ── Linux-only paint detection helpers ──────────────────────────────────────────
 # These functions only run on Linux (gated by supports_paint_detection()).
@@ -439,15 +443,15 @@ class ScreenshotService:
                 if not path:
                     self._dbg(f"  🚫 [{account}] Screenshot failed: {err}")
                     self._warn_capture_failure(account, trigger, err)
-                    # Diagnostic snapshot (v2.2.1): record what DreamBot windows
+                    # Diagnostic snapshot (v2.2.1): record what client windows
                     # were actually visible at this instant, so any remaining
                     # miss is provable from debug.jsonl instead of guessed at.
                     try:
-                        from py.platform_ops import list_dreambot_window_titles
+                        from py.platform_ops import list_client_window_titles
                         from py.util import write_debug_entry
                         write_debug_entry('screenshot_fail', {
                             'account': account, 'trigger': trigger, 'err': err,
-                            'visible_dreambot_windows': list_dreambot_window_titles(),
+                            'visible_client_windows': list_client_window_titles(),
                         })
                     except Exception:
                         pass
@@ -544,47 +548,19 @@ class ScreenshotService:
 
 def snap_paint_reference(log=None):
     """
-    Capture a fresh paint reference image from the first available DreamBot window.
+    Capture a fresh paint reference image from the first available client window.
     Focuses the window briefly, captures the paint button region, saves reference,
     then restores focus to the monitor.
     Returns (ok: bool, msg: str).
     """
-    import sys
-    from py.platform_ops import get_focused_window
+    from py.platform_ops import get_focused_window, list_client_window_titles
     from py.platform_ops import raise_and_focus_window
 
-    # Find any DreamBot window
-    # Try common account patterns — find_window_ids_by_name with just "dreambot"
-    import ctypes
-    wids = []
-    if sys.platform == 'win32':
-        # On Windows enumerate all DreamBot windows directly
-        try:
-            from ctypes import wintypes
-            user32 = ctypes.WinDLL('user32')
-            results = []
-            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-            def _enum(hwnd, _):
-                try:
-                    if not user32.IsWindowVisible(hwnd): return True
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length <= 0: return True
-                    buf = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buf, length + 1)
-                    if 'dreambot' in (buf.value or '').lower():
-                        results.append(str(int(hwnd)))
-                except Exception: pass
-                return True
-            user32.EnumWindows(_enum, 0)
-            wids = results
-        except Exception:
-            pass
-    else:
-        from py.platform_ops import find_window_ids_by_name
-        wids = find_window_ids_by_name('dreambot')
+    # Any visible BotClient window (logged-in or not) — v3.0.0 Detuks titles.
+    wids = [wid for wid, _title in list_client_window_titles()]
 
     if not wids:
-        return False, 'No DreamBot window found — make sure DreamBot is running'
+        return False, 'No client window found — make sure the Detuks client is running'
 
     wid = wids[0]
     restore_wid = get_focused_window()
@@ -615,7 +591,7 @@ def snap_paint_reference(log=None):
 def take_screenshot(account_name, restore_wid=None, hide_paint=False,
                     get_pid_cb=None, set_pid_cb=None):
     """
-    Capture DreamBot window for account. Returns (path, err).
+    Capture the client window for account. Returns (path, err).
     restore_wid:  window to raise after capture (pass for batch sequences).
     get_pid_cb:   optional callable(account) → int|None — read cached PID
     set_pid_cb:   optional callable(account, pid) — write resolved PID to cache
@@ -626,8 +602,8 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
          transients and busy-server search failures; this is the steady-
          state path, so enumeration effectively never runs once a client
          has been resolved once per session.
-      1. PID-first enumeration (trusted PID → its DreamBot window).
-      2. Title enumeration fallback (strict DreamBot+account guard).
+      1. PID-first enumeration (trusted PID → its BotClient window).
+      2. Title enumeration fallback (strict BotClient + exact account guard).
     Any successful resolve refreshes both caches. Failures return a
     precise reason (no-match vs timed-out vs stale) instead of a generic
     "no window found".
@@ -636,7 +612,7 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
         SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
         from py.platform_ops import (find_window_ids_by_name_ex,
                                      find_windows_for_pid_ex,
-                                     is_pid_running)
+                                     is_pid_running, title_matches_account)
         from py.launcher import (get_account_window, set_account_window,
                                  clear_account_window)
 
@@ -655,7 +631,7 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
                 fail_notes.append('cached window stale — cleared')
 
         # ── 1. PID-first path ─────────────────────────────────────────────────
-        # find_windows_for_pid already filters: visible + 'dreambot' in title.
+        # find_windows_for_pid already filters: visible + BotClient title.
         # Account name match not required — trusted PID is the ownership signal.
         if target_wid is None:
             pid = get_pid_cb(account_name) if get_pid_cb else None
@@ -685,13 +661,13 @@ def take_screenshot(account_name, restore_wid=None, hide_paint=False,
                 return None, (f"No window found for account: {account_name} "
                               f"({'; '.join(fail_notes)})")
             candidate = wids[0]
-            # Hard guard: must contain both 'dreambot' AND account name
+            # Hard guard: 'BotClient - V… - <account>' with the account matching
+            # EXACTLY (case-sensitive) — platform_ops.title_matches_account.
             confirmed_title = get_window_title(candidate)
-            title_lower = confirmed_title.lower()
-            if 'dreambot' not in title_lower or account_name.lower() not in title_lower:
+            if not title_matches_account(confirmed_title, account_name):
                 return None, (
                     f"HWND {candidate} title {confirmed_title!r} does not match "
-                    f"expected DreamBot account {account_name!r} — capture aborted "
+                    f"expected client account {account_name!r} — capture aborted "
                     f"to prevent wrong-window screenshot"
                 )
             target_wid = candidate

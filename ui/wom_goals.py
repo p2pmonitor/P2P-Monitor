@@ -409,7 +409,7 @@ class WomGoalsPage:
     # ── Single Account view ──────────────────────────────────────────────────────
     def _render_wom_username_row(self, account):
         """Simple WOM username override for this account — needed when the
-        DreamBot account name differs from the actual WOM username.
+        monitored account name differs from the actual WOM username.
         Defaults to the account name. Saving only updates config; it
         deliberately does NOT trigger a refresh itself — Refresh WOM
         stays a separate, explicit action either way."""
@@ -439,7 +439,7 @@ class WomGoalsPage:
 
         tk.Button(row, text='Save', font=app.SANSS, bg=app.BG4, fg=app.ACC, relief='flat',
                   padx=8, pady=3, cursor='hand2', command=_save).pack(side='left')
-        tk.Label(row, text="Used when the DreamBot account name differs from the WOM username.",
+        tk.Label(row, text="Used when the monitored account name differs from the WOM username.",
                  font=app.SANSS, bg=app.BG3, fg=app.FG2, wraplength=280, justify='left', anchor='w'
                  ).pack(side='left', padx=(12, 0))
 

@@ -96,6 +96,22 @@
       "window_sec": 0,
       "dedupe_sec": 600,
       "label": "Construction error \u2014 failed to clear floor"
+    },
+    {
+      "key": "login_timeout",
+      "pattern": "Login did not finish within \\d+ seconds; stopping",
+      "threshold": 1,
+      "window_sec": 0,
+      "dedupe_sec": 600,
+      "label": "Login timed out \u2014 script stopped"
+    },
+    {
+      "key": "task_loop_failed",
+      "pattern": "Task loop failed: task=(?!Stopped\\b)",
+      "threshold": 3,
+      "window_sec": 900,
+      "dedupe_sec": 3600,
+      "label": "Script task loop keeps failing"
     }
   ],
   "lock_reason_patterns": [

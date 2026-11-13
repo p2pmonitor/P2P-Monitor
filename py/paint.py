@@ -1,7 +1,7 @@
 """
-paint.py — DreamBot window automation for P2P Monitor
+paint.py — Detuks client window automation for P2P Monitor
 Owns hide/show paint and all click-based interactions.
-All coordinates are offsets from the bottom-left of the DreamBot window.
+All coordinates are offsets from the bottom-left of the BotClient window.
 """
 
 import sys
@@ -12,46 +12,56 @@ from py.platform_ops import (find_window_ids_by_name, get_focused_window,
                              is_window_minimized, restore_window,
                              get_window_dpi_scale)
 
-# ── Paint button (hide/show toggle) ───────────────────────────────────────────
-
-# ── Click offsets from bottom-left of the DreamBot window ────────────────────
-# Time adjustments
+# ── Click offsets from the bottom-left of the Detuks BotClient window ────────
+# Measured on Detuks v1.3.17 window captures (import -window) at two window
+# sizes: the P2P Master AI panel is pinned to the bottom-left corner and does
+# not scale with the window, so fixed (x from left, y from bottom) offsets
+# are valid at any window size. Values are button/cell centres.
+#   Button row (y=17): wrench 32 · Hide/Show 94 · Stats 156 · Logs 218 ·
+#                      -10m 280 · +10m 342 · Skip 404 · Pause 481
+#   Skill grid: columns x=172/235/298/361/424/487, rows y=147/115/83/51
 CLICK_OFFSETS = {
-    '-10m':         (345,  48),
-    '+10m':         (412,  47),
-    # Panel toggles (Stats / Loot)
-    'Stats':        (162,  48),
-    'Loot':         (219,  50),
-    # Skill / action forces
-    'Skip':         (475,  48),
-    'Quest':        (104,  80),
-    'Attack':       (168, 176),
-    'Strength':     (171, 146),
-    'Defence':      (170, 114),
-    'Range':        (174,  80),
-    'Agility':      (231, 147),
-    'Herblore':     (234, 116),
-    'Thieving':     (232,  85),
-    'Mining':       (294, 178),
-    'Smithing':     (293, 145),
-    'Fishing':      (296, 113),
-    'Cooking':      (295,  84),
-    'Prayer':       (355, 177),
-    'Magic':        (358, 145),
-    'Runecrafting': (359, 113),
-    'Construction': (359,  82),
-    'Crafting':     (421, 177),
-    'Fletching':    (423, 145),
-    'Slayer':       (419, 120),
-    'Hunter':       (421,  84),
-    'Firemaking':   (485, 177),
-    'Woodcutting':  (487, 146),
-    'Farming':      (484, 115),
-    'Sailing':      (483,  83),
+    # Time adjustments
+    '-10m':         (280,  17),
+    '+10m':         (342,  17),
+    # Panel toggles (open → screenshot → close)
+    'Stats':        (156,  17),
+    'Logs':         (218,  17),
+    # Single-click actions
+    'Skip':         (404,  17),
+    'Pause':        (481,  17),   # toggle — run again to resume
+    'Quest':        (108,  50),   # quest-points box in the info panel
+    # Skill grid — row 1
+    'Attack':       (172, 147),
+    'Mining':       (298, 147),
+    'Prayer':       (361, 147),
+    'Crafting':     (424, 147),
+    'Firemaking':   (487, 147),
+    # row 2
+    'Strength':     (172, 115),
+    'Agility':      (235, 115),
+    'Smithing':     (298, 115),
+    'Magic':        (361, 115),
+    'Fletching':    (424, 115),
+    'Woodcutting':  (487, 115),
+    # row 3
+    'Defence':      (172,  83),
+    'Herblore':     (235,  83),
+    'Fishing':      (298,  83),
+    'Runecrafting': (361,  83),
+    'Slayer':       (424,  83),
+    'Farming':      (487,  83),
+    # row 4
+    'Range':        (172,  51),
+    'Thieving':     (235,  51),
+    'Cooking':      (298,  51),
+    'Construction': (361,  51),
+    'Hunter':       (424,  51),
+    'Sailing':      (487,  51),
 }
 
 # Actions that are panel toggles (click open → screenshot → click close)
-PANEL_ACTIONS = {'Stats', 'Loot'}
+PANEL_ACTIONS = {'Stats', 'Logs'}
 
 # Actions that need an amount parameter (clicked N times)
 AMOUNT_ACTIONS = {'-10m', '+10m'}
@@ -177,7 +187,7 @@ def do_force_skill(account, action, log=None, window_lock=None):
 # ── Force: panel toggle (open → screenshot → close) ───────────────────────────
 def do_force_panel(account, action, screenshot_cb, log=None, window_lock=None):
     """
-    Open a panel (Stats/Loot) by clicking once, take a full-window screenshot,
+    Open a panel (Stats/Logs) by clicking once, take a full-window screenshot,
     then immediately click again to close it.
     screenshot_cb: callable() — caller handles capture + post while panel is open.
     window_lock: shared threading.Lock() to serialize with screenshot ops.
@@ -294,3 +304,154 @@ def do_force(account, adjustment, amount, log=None, window_lock=None):
 
     if log:
         log(f"✅ [{account}] {adjustment} × {amount} done")
+
+
+# ── Script GUI: click Start (v3.0.0) ──────────────────────────────────────────
+# On Detuks, --scriptArgs only picks the profile; P2P Master AI then opens its
+# GUI ("P2P Master AI <version>") and waits for Start (Enter does nothing).
+# The window can open anywhere and at any size, so the button is found by
+# colour, not by a fixed offset: Start is the largest solid block of the
+# dark-teal fill below in the GUI capture. The GUI window is only looked up by
+# the PID of the account's own BotClient window, so another account's GUI can
+# never be clicked.
+START_BTN_RGB      = (0, 65, 71)
+START_BTN_TOL      = 14
+START_BTN_MIN_FRAC = 0.02     # block must cover ≥2% of the GUI window
+
+
+def find_start_button(img, target=START_BTN_RGB, tol=START_BTN_TOL,
+                      min_frac=START_BTN_MIN_FRAC):
+    """Largest connected block of the Start colour in a PIL image.
+    Returns (cx, cy, (x0, y0, x1, y1), area) in image pixels, or None."""
+    im = img.convert('RGB')
+    W, H = im.size
+    if not W or not H:
+        return None
+    data = im.tobytes()
+    tr, tg, tb = target
+    ok = bytearray(W * H)
+    for i in range(W * H):
+        r, g, b = data[3 * i], data[3 * i + 1], data[3 * i + 2]
+        if abs(r - tr) <= tol and abs(g - tg) <= tol and abs(b - tb) <= tol:
+            ok[i] = 1
+    best = None
+    for start in range(W * H):
+        if ok[start] != 1:
+            continue
+        ok[start] = 2
+        stack = [start]
+        n = 0
+        x0 = x1 = start % W
+        y0 = y1 = start // W
+        while stack:
+            p = stack.pop()
+            n += 1
+            px, py = p % W, p // W
+            if px < x0: x0 = px
+            if px > x1: x1 = px
+            if py < y0: y0 = py
+            if py > y1: y1 = py
+            if px + 1 < W and ok[p + 1] == 1:
+                ok[p + 1] = 2; stack.append(p + 1)
+            if px > 0 and ok[p - 1] == 1:
+                ok[p - 1] = 2; stack.append(p - 1)
+            if py + 1 < H and ok[p + W] == 1:
+                ok[p + W] = 2; stack.append(p + W)
+            if py > 0 and ok[p - W] == 1:
+                ok[p - W] = 2; stack.append(p - W)
+        if best is None or n > best[3]:
+            best = ((x0 + x1) // 2, (y0 + y1) // 2, (x0, y0, x1, y1), n)
+    if best is None or best[3] < min_frac * W * H:
+        return None
+    return best
+
+
+def _account_client_pid(account):
+    """PID of the account's BotClient window. Falls back to the only BotClient
+    window on screen when the account cannot be matched by title (shared-log
+    fallback name, or the title has no account yet). Returns (pid, reason)."""
+    from py.platform_ops import (find_account_window_and_pid, get_pid_for_window,
+                                 list_client_window_titles)
+    try:
+        info = find_account_window_and_pid(account)
+    except ValueError as e:
+        return None, str(e)
+    if info and info.get('pid'):
+        return info['pid'], ''
+    clients = list_client_window_titles()
+    if len(clients) == 1:
+        pid = get_pid_for_window(clients[0][0])
+        if pid:
+            return pid, ''
+    if not clients:
+        return None, 'no BotClient window found'
+    return None, (f'no BotClient window titled for this account '
+                  f'({len(clients)} client windows open)')
+
+
+def click_script_start(account, log=None, window_lock=None):
+    """Find the account's P2P Master AI GUI and click Start.
+    Returns (ok, reason). Never raises."""
+    import os
+    import tempfile
+    from contextlib import nullcontext
+    from py.platform_ops import find_script_gui_windows, capture_window_image
+    try:
+        from PIL import Image
+    except ImportError:
+        return False, 'Pillow not installed'
+
+    pid, why = _account_client_pid(account)
+    if not pid:
+        return False, why
+    guis = find_script_gui_windows(pid)
+    if not guis:
+        return False, 'script GUI window not found (already started or not open yet)'
+    if len(guis) > 1:
+        return False, f'{len(guis)} script GUI windows open for this client'
+    gwid = guis[0]
+
+    ctx = window_lock if window_lock else nullcontext()
+    tmp = os.path.join(tempfile.gettempdir(), f'p2p_gui_{os.getpid()}.png')
+    with ctx:
+        restore_wid = get_focused_window()
+        try:
+            if is_window_minimized(gwid):
+                restore_window(gwid)
+                time.sleep(0.5)
+            raise_and_focus_window(gwid)
+            time.sleep(0.4)
+            ok, err = capture_window_image(gwid, tmp)
+            if not ok:
+                return False, f'GUI capture failed: {err}'
+            with Image.open(tmp) as im:
+                im.load()
+                iw, ih = im.size
+                hit = find_start_button(im)
+            if not hit:
+                return False, 'Start button not found in the GUI capture'
+            geom = get_window_geometry(gwid)
+            if not geom:
+                return False, 'could not read GUI window geometry'
+            gx, gy, gw, gh = geom
+            sx, sy = (gw / iw if iw else 1.0), (gh / ih if ih else 1.0)
+            cx, cy = hit[0], hit[1]
+            x, y = int(round(gx + cx * sx)), int(round(gy + cy * sy))
+            if log:
+                log(f'[{account}] Start button at image ({cx},{cy}) of {iw}x{ih} '
+                    f'→ screen ({x},{y}); GUI geom {geom}')
+            _click(x, y)
+            time.sleep(0.2)
+            return True, ''
+        except Exception as e:
+            return False, f'auto-click error: {e}'
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            if restore_wid and restore_wid != gwid:
+                try:
+                    raise_and_focus_window(restore_wid)
+                except Exception:
+                    pass

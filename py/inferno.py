@@ -25,10 +25,11 @@ import time
 from py.inferno_rules import get_patterns
 
 
-# ── Strip helpers (mirrors reader.py — kept local to avoid circular import) ───
-
-_STRIP_PREFIX_RE = re.compile(
-    r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[[A-Z]+\]\s*>?\s*', re.IGNORECASE)
+# ── Strip helpers ────────────────────────────────────────────────────────────
+# Prefix regex is shared with reader.py (v3.0.0: Detuks line format) so the two
+# can never drift apart again. reader.py imports nothing from this module, so
+# there is no import cycle.
+from py.reader import STRIP_PREFIX_RE as _STRIP_PREFIX_RE  # noqa: E402
 _LOG_TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 
 def _strip(line):

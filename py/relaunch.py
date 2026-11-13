@@ -561,20 +561,20 @@ class RelaunchManager:
                 pid_alive = False
             if pid_alive:
                 try:
-                    from py.platform_ops import list_dreambot_window_titles
+                    from py.platform_ops import list_client_window_titles
                     from py.util import write_debug_entry
                     write_debug_entry('relaunch', {
                         'account': account,
                         'msg': 'Ownership/discovery ambiguity — saved PID alive, '
                                'no window matched. Refusing to close or launch.',
                         'saved_pid': saved_pid,
-                        'visible_dreambot_windows': list_dreambot_window_titles(),
+                        'visible_client_windows': list_client_window_titles(),
                     })
                 except Exception:
                     pass
                 self._schedule_retry(
                     account,
-                    reason=(f'Could not verify existing DreamBot window for '
+                    reason=(f'Could not verify existing client window for '
                             f'{account}, but saved PID {saved_pid} is still '
                             f'alive — not closing, not launching a duplicate.'))
                 return

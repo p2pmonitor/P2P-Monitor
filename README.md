@@ -1,8 +1,12 @@
 # P2P Monitor
 
-A desktop monitor for [DreamBot](https://dreambot.org) P2P Master AI — tracks multiple RuneScape accounts in real time, posts Discord notifications for in-game events, launches/relaunches DreamBot clients, watches for script/client updates, and keeps a searchable event history.
+A desktop monitor for P2P Master AI running on the **Detuks client** — tracks your RuneScape account in real time, posts Discord notifications for in-game events, launches/relaunches clients, and keeps a searchable event history.
 
-Runs on **Linux** (Debian/Ubuntu) and **Windows 10/11**. Requires DreamBot with the P2P Master AI script running.
+Runs on **Linux** (Debian/Ubuntu) and **Windows 10/11**. Requires the Detuks client with the P2P Master AI script running.
+
+> **v3.0.0 — moved from DreamBot to the Detuks client.** DreamBot is no longer supported. See [CHANGELOG.md](CHANGELOG.md) for what changed and what is migrated automatically.
+
+> **Works best monitoring ONE account at a time.** The Detuks client writes every running client into a single shared `client.log`, and no log line says which account it came from. With one account running, the monitor knows exactly what that account is doing (tasks, pings, screenshots, relaunch). With several accounts running, their events are merged under one name.
 
 ---
 
@@ -23,42 +27,37 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 
 ## Features
 
-### Multi-account monitoring
-- Watches all accounts simultaneously from a single window
-- Detects account status: 🟢 Logged In, 🟡 Starting..., 🟡 On Break, 🔴 Offline
-- Tracks current task, activity, uptime, and break time per account
-- Auto-detects new accounts when DreamBot starts a new log file
-- If no active sessions exist on startup, monitor waits up to 10 minutes before stopping
+### Account monitoring
+- Reads the Detuks client's shared `client.log` (and its rotated `client_YYYY-MM-DD.N.log` parts) and attributes it to one account — **Settings → Log account**, or automatically your only Launcher account
+- Detects account status: 🟢 Logged In, 🟡 Starting..., 🟡 Waiting for Start, 🟡 On Break, 🔴 Offline
+- **Script start:** on Detuks, P2P Master AI opens its settings GUI after loading and waits for **Start**. The monitor shows 🟡 Waiting for Start and only posts *Script Started* when the run really begins (Start pressed, or the first task if the script starts on its own)
+- **Auto-click Start** (on by default): about 10 seconds after the GUI opens, the monitor finds the Start button by its colour in that account's own GUI window, clicks it and restores your focus. It retries once; if the script still hasn't started, an alert goes to the Errors channel
+- Tracks current task, activity, location, planned task duration, uptime (since the current script run started), and break time
+- Log rotation is followed live — lines written just before a rotation are recovered from the rotated file, not lost
+- If no client log exists on startup, monitor waits up to 10 minutes before stopping
 
-### DreamBot launcher and relaunching
-- Launcher tab stores DreamBot launch presets per account
+### Launcher and relaunching (Detuks CLI)
+- Launcher tab stores per-account presets for the Detuks CLI: the AppImage on Linux, `launcher.exe` on Windows, both run as `launch --jl-account <Account> -- --script "P2P Master AI" --scriptArgs <Profile>`
 - `/launch <account>` starts a client only if that account is not already open
 - `/launch all` starts all configured presets that are currently closed and skips already-open clients
-- `/relaunch <account>` restarts that account's DreamBot client — if **Respect breaks** is enabled and the client is running, the relaunch is queued and executes during the account's own break window (closed at break start, relaunched at break end) instead of interrupting an active session; with the setting off it restarts immediately
+- `/relaunch <account>` restarts that account's client — if **Respect breaks** is enabled and the client is running, the relaunch is queued and executes during the account's own break window (closed at break start, relaunched at break end) instead of interrupting an active session; with the setting off it restarts immediately
 - `/relaunch all` restarts all configured launcher presets one at a time, each account following its own break/retry state independently
 - Relaunch success is confirmed by the script's start message, never by process spawn alone; unconfirmed attempts retry automatically with increasing delays (5/10/20/30, capped at 60 minutes), and pending relaunches are remembered across monitor restarts
 - Client window position/size is captured before closing and persisted per account, so it is restored even when the relaunch happens much later (break-end relaunch, retry, or after the monitor itself restarted) — best-effort, never blocks the relaunch if it fails
-- Launcher command preview shows the exact Java/DreamBot command that will be used
+- Launcher command preview shows the exact command that will be used, quoted correctly for your platform (copy-pasteable)
+- Client windows are matched by their exact title `BotClient - V… - <Account>` (case-sensitive) — a client that has not logged in yet, or any other window, can never be closed by a relaunch
 
 ### Auto restart after Script Stopped
-- Optional auto-restart when P2P Master AI logs `Script Stopped`
-- Skips auto-restart when the stop was manually initiated from the Control Bar
+- Optional auto-restart when P2P Master AI logs its stop (`Finished onExit`)
+- ⚠ The Detuks log has no verifiable "manual stop" marker yet, so a stop you made by hand can also be auto-restarted while this is enabled (still limited by the update-window option)
 - Can respect active break state so accounts are not restarted during a break
 - Once auto-restart decides a relaunch is allowed, the launch itself uses the same safeguard as `/relaunch`: Script Started confirmation, automatic retry with backoff if startup isn't confirmed, restart-surviving pending state, and window-position restore
 - Supports random min/max restart delay
 - A selected `0` minute restart delay is treated as about **10 seconds**, not a true instant restart
 - Pending auto-restart is cancelled if the script starts again before the timer fires
 
-### Update awareness
-- Checks the DreamBot SDN API (`sdn.dreambot.org/scripts/all`) for the latest P2P Master AI version — falls back silently to the Cloudflare Worker cache if SDN is unavailable
-- Runs once when the monitor starts, then on a configurable interval (default 6 hours, minimum 1 minute) — set in Settings → Restarts & Updates → Update Awareness
-- Detects when the local P2P Master AI script version is behind the SDN version; handles trailing-zero versions correctly (SDN `2.15` = 2.150, newer than 2.149)
-- Detects DreamBot client update banners such as `(NEW CLIENT AVAILABLE)`
-- Sends **one grouped Discord alert** to the main monitor channel listing all accounts that need an update, organised by type (script only, client only, or both)
-- Per-account deduplication — same update state does not re-alert after restart; a new version resets the alert
-
 ### Discord notifications
-- Posts embeds for: tasks, Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, errors, script lifecycle events, launcher events, update alerts, and daily summaries
+- Posts embeds for: tasks (with location and planned duration), Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, kill/lap-count milestones (every 100), errors, severe lag spikes, script lifecycle events, launcher events, and daily summaries
 - Supports webhook mode with per-event-type webhooks or a single default webhook
 - Supports Discord bot mode with per-account monitor threads
 - **Discord webhooks are not required when using Discord bot mode**
@@ -84,16 +83,16 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Closest-to-99 and time-remaining estimate per skill
 - "Last 99 Achieved" — combines local event history with the WOM cache; Combat is intentionally excluded since it's a derived/composite level, not a real trainable skill
 - XP/hr rates are editable defaults (`Edit XP Rates`), globally or per account — not fetched from WOM, since WOM does not report personal rates
-- If your DreamBot account name differs from your WOM username, set the override in the account's Goals & Maxing page
+- If your monitored account name differs from your WOM username, set the override in the account's Goals & Maxing page
 
 ### Event history
 - Persists every event to a local JSONL file per account
 - History tab shows a 24-hour rolling view by default, with a custom date-range filter (any range, no maximum) plus quick presets (today, 7 days, 30 days, all time)
 - **Runtime Stats** button per account: shows total running time, active play time, break time, and break % — filterable by all-time, today, 7 days, or 30 days
-- Backfill: on startup, re-reads DreamBot log files to populate history without re-pinging Discord
+- Backfill: on startup, re-reads the client log to populate history without re-pinging Discord. The very first run only imports the current `client.log` — older rotated parts can contain other accounts' lines
 
 ### Error detection
-- Detects and pings on: login failures, world hop failures, pathing lockouts, stuckness, script crashes, server force-stops, GE failures, quest state loops, task locks, farming patch skips, overcrowded locations, and more
+- Detects and pings on: task locks (with the missing item/teleport), login time-outs, repeating script task-loop failures, pathing lockouts, script crashes, quest state loops, farming patch skips, severe lag spikes (10s–5min freezes while playing), and more
 - Errors enriched with last known task and activity context
 - Error detection patterns fetched from GitHub on startup — simple pattern fixes apply without a new build
 
@@ -107,7 +106,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Status tab shows current wave in real time; Discord receives milestone events only
 
 ### Uptime and break tracking
-- Tracks total session uptime and cumulative break time per account
+- Tracks uptime since the current script run started, and cumulative break time within that run
 - Break time persists correctly across monitor restarts
 
 ---
@@ -169,16 +168,16 @@ See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full Windows build details.
 
 ## Setup
 
-### DreamBot logs
-Set your DreamBot log folder path in **Settings → General Settings → DreamBot Logs Folder**. This should be the **parent Logs folder** that contains your account subfolders — not an individual account folder.
+### Detuks logs
+Set **Settings → General Settings → Detuks Logs Folder** to the Detuks client's logs folder — the folder that contains `client.log` (it appears once the client has been started). It lives under the client's user folder: inside the Detuks wine prefix on Linux (`…/wineprefix/drive_c/users/<you>/…/logs`), under your user profile on Windows. A warning appears in Settings if no `client.log` is found.
 
-- Linux default: `/home/debian/DreamBot/Logs`
-- Windows default: `C:\Users\<you>\DreamBot\Logs`
+Then set **Log account** to the account you are monitoring — the exact Launcher account name (case-sensitive). Leave it blank if you have exactly one Launcher account; it is used automatically.
 
-> **Note:** If you set the path to an account subfolder (e.g. `...\Logs\Accname`) the monitor will still work for that single account, but Discord thread IDs will be lost on every restart causing new threads to be created. A warning will appear in Settings if this is detected.
+### Paint reference (hide-paint screenshots)
+Screenshots can hide the P2P Master AI paint first. To know whether the paint is currently shown, the monitor compares the panel's **Hide/Show** button with a reference: with the client open and the paint **shown** (button reads *Hide*), press **Settings → Paint Reference → Snap Paint Reference** once. After updating from v2.x, snap it again — the DreamBot reference is not used.
 
-### Required OSRS / DreamBot message settings
-For several pings to work correctly, the game/client must actually write those events into the DreamBot log. In OSRS, make sure the relevant messages are enabled before relying on Discord alerts.
+### Required OSRS message settings
+For several pings to work correctly, the game must actually write those events into the client log. In OSRS, make sure the relevant messages are enabled before relying on Discord alerts.
 
 Recommended settings to turn on:
 
@@ -189,20 +188,38 @@ Recommended settings to turn on:
 If these are disabled in-game, the monitor may be running correctly but never see the log lines it needs to send those Discord notifications.
 
 ### Launcher tab setup
-The Launcher tab is used by `/launch`, `/relaunch`, and auto-restart after `Script Stopped`.
+The Launcher tab is used by `/launch`, `/relaunch`, and auto-restart after a script stop.
 
-For each account preset, set up the launcher fields to match the same account, script, and proxy information you use in the DreamBot client:
+1. Set the launcher path at the top of the tab: the **Detuks Client AppImage** on Linux (make it executable first: `chmod +x DetuksClient.AppImage`), or **`launcher.exe`** on Windows (default install: `%LOCALAPPDATA%\BotClient\launcher.exe`).
+2. Add one preset per account:
 
 | Field | What to enter |
 |---|---|
-| `Account (-account)` | The DreamBot account name/preset account |
-| `Script (-script)` | `P2P Master AI` |
-| `Proxy (-proxy)` | The same proxy name configured in DreamBot, if that account uses one |
-| `Memory -Xmx (MB)` | Recommended: `1024` |
-| `-covert` | Enable if you have DreamBot VIP and use Covert Mode |
-| `Params (-params, last)` | Your P2P Master AI profile/params so the script can auto-start correctly |
+| `Account (--jl-account)` | The account's display name **exactly** as saved in the Detuks launcher — **case-sensitive** (`MyAccount` ≠ `myaccount`). Spaces are fine; enter it without quotes |
+| `Script (--script)` | `P2P Master AI` |
+| `Script profile (--scriptArgs)` | Your P2P Master AI profile, e.g. `Default`. The script still opens its GUI and waits for Start — the monitor clicks it for you (see below) |
+| `--software-rendering` | Optional — force software rendering |
+| `Settings file (--rl-properties)` | Optional — a specific `settings.properties` for this account |
+| `Custom client args` | Optional — extra client arguments (passed after `--`) |
 
-The **Params** field is important. If the correct P2P Master AI profile/params are not set, the launcher can still restart DreamBot, but the script may not press Start or load the intended profile automatically. That makes `/relaunch` and auto-restart after `Script Stopped` much less useful because the client may reopen and sit idle.
+The resulting command, which you can also run yourself to test:
+
+```bash
+# Linux
+./DetuksClient.AppImage launch --jl-account "MyAccount" -- --script "P2P Master AI" --scriptArgs "Default"
+```
+```powershell
+# Windows (PowerShell)
+& "$env:LOCALAPPDATA\BotClient\launcher.exe" launch --jl-account "MyAccount" -- --script "P2P Master AI" --scriptArgs "Default"
+```
+```bat
+:: Windows (Command Prompt)
+"%LOCALAPPDATA%\BotClient\launcher.exe" launch --jl-account "MyAccount" -- --script "P2P Master AI" --scriptArgs "Default"
+```
+
+Options before `--` go to the launcher; everything after `--` goes to the client. Quote names that contain spaces when typing the command yourself — the monitor passes them correctly on its own.
+
+Presets from v2.x (DreamBot) are converted automatically on first start: the old **Params** value becomes the **Script profile**; proxy, memory, covert, fresh/nofresh, menu manipulation, no-click-walk, world and custom args are removed (DreamBot-only).
 
 Before relying on auto-restart, test one preset manually:
 
@@ -210,58 +227,34 @@ Before relying on auto-restart, test one preset manually:
 /launch <account>
 ```
 
-Confirm that DreamBot opens, selects the correct account/script/proxy, and starts P2P Master AI with the intended profile. Then test:
+Confirm that the client opens, logs into the right account, and starts P2P Master AI with the intended profile. Then test:
 
 ```text
 /relaunch <account>
 ```
 
-Confirm the client closes, reopens, and starts the script again without manual clicks.
+Confirm the client closes, reopens, and starts the script again without manual clicks (the monitor clicks **Start** on the script GUI — Settings → Restarts & Start → Auto-click Start). The client window is only found once that account has **logged in** (its title then ends in `- <Account>`).
 
 ### Auto restart setup
-Auto restart is configured in Settings → Restarts & Updates → Auto Restart.
+Auto restart is configured in Settings → Restarts & Start → Auto Restart.
+
+### Script Start setup
+On Detuks, `--scriptArgs <Profile>` selects the profile, but P2P Master AI still opens its GUI and waits for **Start** (Enter does nothing). With **Settings → Restarts & Start → Auto-click Start** on (the default), the monitor:
+
+1. waits about 10 seconds after the log shows `Waiting for GUI completion` (a click you make yourself wins),
+2. finds the `P2P Master AI <version>` window owned by the **same process** as that account's `BotClient` window — another account's GUI is never touched,
+3. locates the Start button by its colour (works wherever the window opens and at any size), clicks it, and restores the window you were using,
+4. confirms via `Start button pressed`, retries once, then posts **⏸ Waiting for Start — needs a click** to the Errors channel.
+
+With Auto-click Start off, the same alert is sent after 5 minutes of waiting. If the client was closed while sitting at the GUI, no alert is sent.
 
 Recommended starting settings:
 
-- Enable auto restart after `Script Stopped`
+- Enable auto restart after a script stop
 - Use a small random delay range, such as `1` to `30` minutes
 - Enable break-respect behavior if you do not want accounts restarted during active breaks
 
-If you set the minimum and maximum delay to `0`, the monitor treats that as about **10 seconds**. This avoids relaunching instantly before Windows/DreamBot fully closes the old process.
-
-### Update awareness setup
-Update awareness is enabled by default.
-
-The monitor reads local DreamBot window titles, for example:
-
-```text
-DreamBot 4.1.67 - <account> - P2P Master AI v2.141 - <proxy name> (NEW CLIENT AVAILABLE)
-```
-
-It checks:
-- The account name and local P2P Master AI script version from the title
-- The DreamBot client version from the title
-- Whether `(NEW CLIENT AVAILABLE)` is present
-- The latest P2P Master AI script version from the DreamBot SDN API, with Cloudflare Worker as a silent fallback if SDN is unavailable
-
-Checks run once at startup, then on the configured interval (default 6h, minimum 1m).
-
-Primary source is the DreamBot SDN API; the Cloudflare Worker is a silent fallback.
-
-When any account needs an update, **one grouped Discord message** is sent to the main monitor channel listing each account and what it needs:
-
-| Account state | Latest SDN version | Alert group |
-|---|---:|---|
-| `P2P Master AI v2.141` | `2.143` | P2P Master AI script update needed |
-| `P2P Master AI v2.141` + `NEW CLIENT AVAILABLE` | `2.143` | Both script + DreamBot update needed |
-| `P2P Master AI v2.143` + `NEW CLIENT AVAILABLE` | `2.143` | DreamBot client update needed |
-| `P2P Master AI v2.143` | `2.143` | No alert |
-
-Multiple accounts needing updates appear in the same message. The embed recommends `/relaunch <account>` to restart and load the latest version.
-
-**Ping on update:** if the `Ping` setting is enabled in the Update Awareness section, the configured user is pinged once per check.
-
-**Auto-relaunch on update (optional, default off):** when enabled, affected accounts are relaunched automatically as soon as an update is detected. Accounts without a launcher preset are listed for manual action. This can interrupt any current activity — enable only if that is acceptable.
+If you set the minimum and maximum delay to `0`, the monitor treats that as about **10 seconds**. This avoids relaunching instantly before the old client process has fully closed.
 
 ### Discord — webhook mode
 Webhook mode is the simplest setup if you do not want to create a Discord bot.
@@ -291,33 +284,33 @@ Slash commands are available when using Discord bot mode.
 |---|---|
 | `/ss [account]` | Screenshot → post to account thread |
 | `/s` | Post live status of all accounts |
-| `/force <account> <action> [amount]` | Force a non-skill action: Stats, Loot, -10m, +10m, Skip, Quest |
+| `/force <account> <action> [amount]` | Force a non-skill action: Stats, Logs, -10m, +10m, Skip, Pause (toggle), Quest |
 | `/train <account> <skill>` | Force-train a specific skill (the skill options previously under `/force`) |
 | `/stats <account> <view>` | WOM stats — `current` shows all 24 skill levels; a skill name shows estimated time to 99 for that skill |
 | `/max <account>` | Estimated time to max for that account (same calculation as the Stats tab) |
 | `/wom refresh <account or All>` | Refresh Wise Old Man data — same backend as the Refresh WOM button, with a short cooldown |
-| `/launch <account>` | Launch an account only if its DreamBot client is currently closed |
+| `/launch <account>` | Launch an account only if its client is currently closed |
 | `/launch all` | Launch all configured presets that are currently closed |
-| `/relaunch <account>` | Restart an account's DreamBot client — honors Respect Break (see below) |
+| `/relaunch <account>` | Restart an account's client — honors Respect Break (see below) |
 | `/relaunch all` | Restart all configured launcher presets, one at a time |
 
 `/stats` and `/max` read the cached Wise Old Man data. If no data is cached yet (or it looks stale), run `/wom refresh` first.
 
 `/launch` is safe and non-destructive. It skips already-open clients.
 
-`/relaunch` is intentionally destructive — it closes and reopens the matching DreamBot client so it can load the latest script/client state. How it behaves depends on the **Respect breaks** setting (Settings → Restarts & Updates):
+`/relaunch` is intentionally destructive — it closes and reopens the matching client so it can load the latest script/client state. How it behaves depends on the **Respect breaks** setting (Settings → Restarts & Start):
 
 - **Respect breaks off:** the client is closed and restarted immediately. No queue, no break checks.
 - **Respect breaks on, account not on break:** the relaunch is queued. The client stays open until its next break starts, is closed for the duration of that break, and relaunches at the break's end.
 - **Respect breaks on, account already on break:** the client is closed now and relaunches at the break's end.
 
-Every relaunch is confirmed by watching for the script's start message — a spawned process alone never counts as success. If startup is not confirmed within a few minutes (for example, DreamBot/Java is mid-update), the relaunch retries automatically with increasing delays (5, 10, 20, 30, then every 60 minutes) until it succeeds or the script is started another way. Pending relaunches survive a monitor restart. `/relaunch all` processes accounts one at a time; an account waiting out a retry delay or its break window never blocks the others.
+Every relaunch is confirmed by watching for the script's start message — a spawned process alone never counts as success. If startup is not confirmed within a few minutes (for example, the client is mid-update), the relaunch retries automatically with increasing delays (5, 10, 20, 30, then every 60 minutes) until it succeeds or the script is started another way. Pending relaunches survive a monitor restart. `/relaunch all` processes accounts one at a time; an account waiting out a retry delay or its break window never blocks the others.
 
 ---
 
 ## Data and files
 
-Config is automatically sanitized on startup: stale keys from older versions are removed, types are validated, and thread IDs for deleted accounts are pruned.
+Config is automatically sanitized on startup: stale keys from older versions are removed and types are validated. Discord thread IDs are never pruned in the standard shared-log layout.
 
 | Path | Contents |
 |---|---|
@@ -325,8 +318,6 @@ Config is automatically sanitized on startup: stale keys from older versions are
 | `~/.p2p_monitor/history/<account>/history.jsonl` | Per-account event log |
 | `~/.p2p_monitor/offsets.json` | Log file read positions |
 | `~/.p2p_monitor/screenshots/` | Screenshot files (auto-deleted after 24h) |
-| `~/.p2p_monitor/update_check_state.json` | Deduping state for script/client update alerts |
-| `~/.p2p_monitor/update_relaunch_state.json` | Deduping state for auto-relaunch on update |
 
 On Windows, `~` resolves to `C:\Users\<you>`.
 

@@ -1,5 +1,5 @@
 """
-reader.py — Pure log parsing for P2P Monitor v1.5.0
+reader.py — Pure log parsing for P2P Monitor v3.0.0 (Detuks client logs)
 Zero side effects: accepts lines, returns typed event dicts.
 All slice_* functions live here. parse_lines() is the single entry point
 used by both the live watcher and backfill — eliminates the triple-pipeline bug.
@@ -15,8 +15,21 @@ import re
 from py.error_rules import get_rules
 
 # ── Regex / pattern constants ──────────────────────────────────────────────────
-STRIP_PREFIX_RE = re.compile(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\[[A-Z]+\]\s*>?\s*', re.IGNORECASE)
+# Line prefix. Detuks client (v3.0.0):
+#   2026-11-13 11:41:38.859 [pool-9-thread-1] INFO  com.d.a.a.Main - NEW TASK (v0.82)
+#   └ date time.ms ───────┘ └ [thread] ─────┘ └LVL┘ └ logger ────┘ - └ body ┘
+# The legacy DreamBot shape ("2026-.. HH:MM:SS [INFO] > body") is still
+# accepted so old fixtures/tests keep parsing. A leading "> " on the body is
+# eaten in both shapes ("> Locking X" → "Locking X"), exactly as before.
+STRIP_PREFIX_RE = re.compile(
+    r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}'
+    r'(?:\.\d+\s+\[[^\]]*\]\s+[A-Z]+\s+\S+\s+-'   # Detuks: .ms [thread] LEVEL logger -
+    r'|\s+\[[A-Z]+\])'                                 # DreamBot: [LEVEL]
+    r'\s*>?\s*', re.IGNORECASE)
 STRIP_COLOR_RE  = re.compile(r'<col=[^>]*>(.*?)</col>', re.IGNORECASE)
+# Detuks keeps the game's inline chat-colour markers in [GAME] text:
+# "@q_mes@X Marks the Spot", "@mes_hl_red@…", "@sail_txt@…" (v3.0.0).
+STRIP_AT_TAG_RE = re.compile(r'@[a-z][a-z0-9_]*@', re.IGNORECASE)
 LOG_TS_RE       = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 
 PET_PATTERNS = [
@@ -68,13 +81,50 @@ _BAN_DISABLED_RE = re.compile(r'high severity server response.*response:\s*disab
 def is_ban_line(stripped_body):
     """True if a (prefix-stripped) log line signals the account was banned."""
     return bool(_BAN_STATUS_RE.search(stripped_body) or _BAN_DISABLED_RE.search(stripped_body))
-SCRIPT_START_RE = re.compile(r'Starting P2P Master AI now!', re.I)
-SCRIPT_STOP_RE  = re.compile(r'Stopped P2P Master AI!', re.I)
+# Script lifecycle (Detuks). Three distinct moments:
+#   LOADED  "P2P Master AI 0.82 started with profile Default" — the profile is
+#           loaded, then the script opens its GUI and WAITS ("Waiting for GUI
+#           completion"). --scriptArgs only selects the profile; it does not
+#           auto-start. NOT a "Script Started".
+#   STARTED "Start button pressed" (or the first NEW TASK after LOADED, should
+#           the script ever auto-start). The GUI can be reopened mid-run and
+#           Start pressed again — the watcher only counts a start while the
+#           script was not already running.
+#   STOPPED "Finished onExit - P2P Master AI v0.82" (exactly one per stop —
+#           the script logs "Prevented multiple onExit calls" otherwise).
+# DreamBot strings kept as alternates.
+SCRIPT_LOADED_RE   = re.compile(r'P2P Master AI\s+v?[\d.]+\s+started with profile', re.I)
+SCRIPT_START_RE    = re.compile(r'Start button pressed|Starting P2P Master AI now!', re.I)
+SCRIPT_STOP_RE     = re.compile(r'Finished onExit - P2P Master AI|Stopped P2P Master AI!', re.I)
+SCRIPT_GUI_WAIT_RE = re.compile(r'Waiting for GUI completion', re.I)
 SCRIPT_PAUSE_RE = re.compile(r'Script P2P Master AI paused\.\.\.')
 SCRIPT_RESUME_RE= re.compile(r'Script P2P Master AI resumed!')
 
-# Regex for '> Locking X' lines — structural parser, stays local
-_LOCKING_RE = re.compile(r'\]\s*>\s*Locking\s+(.+)', re.IGNORECASE)
+# Regex for '> Locking X' lines — structural parser, stays local. Matched on
+# the RAW line (strip_prefix eats the '>'). The '>' follows ']' in DreamBot
+# lines and the 'logger -' separator in Detuks lines.
+_LOCKING_RE   = re.compile(r'(?:\]|\s-)\s*>\s*Locking\s+(.+)', re.IGNORECASE)
+_LOCK_MARK_RE = re.compile(r'(?:\]|\s-)\s*>\s*Locking\b', re.IGNORECASE)
+
+# ── Detuks-era informational lines (v3.0.0) ──────────────────────────────────
+# "Selected Hunter / Herbiboar / Fossil Island for about 145 minutes" —
+# logged right after Task is / Activity is / Location is; carries the
+# location and the script's planned duration for the task.
+SELECTED_RE = re.compile(
+    r'^Selected\s+(.+?)\s+/\s+(.+?)\s+/\s+(.+?)\s+for about\s+(\d+)\s+minutes', re.I)
+# "LAG DETECTED 1243ms" — rated by the watcher (needs live session state).
+LAG_RE = re.compile(r'^LAG DETECTED\s+(\d+)\s*ms', re.I)
+# "[GAME] Your Tempoross kill count is: 1,200." / "...lap count is: N." /
+# "...herbiboar harvest count is: N." / "Your subdued Wintertodt count is: N."
+# TzKal-Zuk is excluded — the Inferno tracker owns that one.
+COUNT_RE = re.compile(r"^\[GAME\]\s*Your\s+(.+?)\s+count is:\s*(?:<[^>]+>)*\s*([\d,]+)", re.I)
+COUNT_MILESTONE_EVERY = 100
+# "Up to 150468713 coins available" — the script's GE buy-budget check.
+COINS_RE = re.compile(r'^Up to\s+([\d,]+)\s+coins available', re.I)
+
+
+def _is_lock_line(raw_line):
+    return bool(_LOCK_MARK_RE.search(raw_line))
 
 # Regex for reset lines that make the subsequent 'impossible' ping redundant
 _RESET_RE = re.compile(r'(Escaped ship|Stuck walking)\s*->\s*Startup', re.IGNORECASE)
@@ -103,7 +153,7 @@ def strip_prefix(line):
     return STRIP_PREFIX_RE.sub('', line)
 
 def strip_color(text):
-    return STRIP_COLOR_RE.sub(r'\1', text)
+    return STRIP_AT_TAG_RE.sub('', STRIP_COLOR_RE.sub(r'\1', text))
 
 def parse_log_ts(lines):
     """Return timestamp from last timestamped line in a batch."""
@@ -585,7 +635,7 @@ def slice_tasks(lines):
                 ts_j   = LOG_TS_RE.match(raw_j)
                 if ts_j and this_ts and ts_j.group(1) != this_ts:
                     break
-                if re.search(r'\]\s*>\s*Locking\b', raw_j, re.IGNORECASE):
+                if _is_lock_line(raw_j):
                     locked = True
                     break
                 if re.match(r'^Activity is\s+', nb, re.IGNORECASE) and not activity:
@@ -633,7 +683,7 @@ def slice_tasks(lines):
                 if re.match(r'.+\bStep\s+0\b', nb, re.IGNORECASE):
                     step_seen = True
                 # Check raw line — strip_prefix eats the leading '>' in '> Locking'
-                if not step_seen and re.search(r'\]\s*>\s*Locking\b', raw_j, re.IGNORECASE):
+                if not step_seen and _is_lock_line(raw_j):
                     locked = True
                     break
                 if re.match(r'^Activity is\s+', nb, re.IGNORECASE) and not activity:
@@ -696,7 +746,7 @@ def slice_last_task(lines):
 
             if re.match(r'.+\bStep\s+0\b', b, re.IGNORECASE):
                 step_seen = True
-            if not step_seen and re.search(r'\]\s*>\s*Locking\b', raw_j, re.IGNORECASE):
+            if not step_seen and _is_lock_line(raw_j):
                 locked = True
 
             m = re.match(r'^Actually task is\s+(.+)', b, re.IGNORECASE)
@@ -762,7 +812,7 @@ def slice_last_task(lines):
                         b2 = strip_prefix(arr[j]).strip()
                         if re.match(r'.+\bStep\s+0\b', b2, re.IGNORECASE):
                             prev_step_seen = True
-                        if not prev_step_seen and re.search(r'\]\s*>\s*Locking\b', arr[j], re.IGNORECASE):
+                        if not prev_step_seen and _is_lock_line(arr[j]):
                             prev_locked = True
                         m2 = re.match(r'^Actually task is\s+(.+)', b2, re.IGNORECASE)
                         if m2: prev_actually_val = m2.group(1).strip(); continue
@@ -904,6 +954,30 @@ def parse_lines(lines, context_lines=None):
         task_name, activity = tup[0], tup[1]
         search_hint = tup[2] if len(tup) > 2 else task_name
         events.append(_ev('task', task_name, activity, search_hint))
+
+    # Task enrichment (v3.0.0): attach location + planned duration from the
+    # "Selected Task / Activity / Location for about N minutes" line that
+    # follows a task pick. Extra keys only — 'value'/'activity' are untouched,
+    # so history, stats and dedupe keys are exactly as before.
+    _selected = []
+    for i, line in enumerate(arr):
+        sm = SELECTED_RE.match(strip_prefix(line).strip())
+        if sm:
+            _selected.append((i, sm.group(1).strip().lower(), sm.group(2).strip().lower(),
+                              sm.group(3).strip(), int(sm.group(4))))
+    if _selected:
+        _used = set()
+        for ev in events:
+            if ev['type'] != 'task' or ev['value'] == 'Break':
+                continue
+            t, a, start = ev['value'].lower(), (ev['activity'] or '').lower(), ev['_line_idx']
+            for k, (si, st, sa, loc, mins) in enumerate(_selected):
+                if k in _used or si < start or si > start + 400:
+                    continue
+                if st == t and (not a or sa == a):
+                    ev['_location'], ev['_planned_min'] = loc, mins
+                    _used.add(k)
+                    break
 
     # Slayer new task
     for monster, count in slice_slayer_tasks(arr):

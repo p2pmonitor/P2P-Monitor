@@ -68,7 +68,7 @@ cat > "$DESKTOP_FILE" << DESK
 Version=1.0
 Type=Application
 Name=P2P Monitor
-Comment=DreamBot P2P Master AI Log Monitor
+Comment=Detuks P2P Master AI Log Monitor
 Exec=python3 ${INSTALL_DIR}/p2p_monitor.py
 Icon=utilities-terminal
 Terminal=false
@@ -90,8 +90,8 @@ echo "  Config:        ~/.p2p_monitor/config.json"
 echo "  History:       ~/.p2p_monitor/history/"
 echo "  Desktop:       ~/Desktop/P2P-Monitor.desktop"
 echo ""
-echo "  DreamBot Logs: /home/debian/DreamBot/Logs"
-echo "  Each subfolder = one account (set in Settings)"
+echo "  Logs folder:   the Detuks client folder containing client.log"
+echo "                 (set in Settings; works best with one account at a time)"
 echo ""
 echo "  To run:   python3 ~/.p2p_monitor/p2p_monitor.py"
 echo "  To update: run app → Settings → Check for Update"

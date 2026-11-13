@@ -13,6 +13,7 @@ Adding a new platform:
 """
 
 import os
+import re
 import time
 import subprocess
 import sys
@@ -134,7 +135,7 @@ def _get_open_log_handles_windows():
     did not help — the per-process open_files() call itself is the bottleneck.
 
     Returning reliable=False causes the watcher to:
-      - use name-based log file selection (newest logfile-*.log)
+      - use name-based log file selection (client.log)
       - skip forced offline transitions
       - skip EOF pinning on stop
 
@@ -241,18 +242,118 @@ def find_windows_for_pid_ex(pid):
             for wid in wids:
                 try:
                     title = get_window_title(wid) or ''
-                    if 'dreambot' in title.lower():
+                    if is_client_title(title):
                         matches.append(wid)
                 except Exception:
                     pass
             if matches:
                 return matches, ''
-            return [], f'PID {pid} owns {len(wids)} window(s) but none titled DreamBot'
+            return [], f'PID {pid} owns {len(wids)} window(s) but none titled BotClient'
         else:
             wids = find_windows_for_pid(pid)
-            return (wids, '') if wids else ([], f'no visible DreamBot window owned by PID {pid}')
+            return (wids, '') if wids else ([], f'no visible BotClient window owned by PID {pid}')
     except Exception as e:
         return [], f'PID window lookup failed: {e}'
+
+
+# ── Client window titles (Detuks BotClient, v3.0.0) ────────────────────────────
+# Window titles seen over one client launch:
+#   'Old School Runescape'           — pre-loader window; never matched
+#   'BotClient - V1.2.3'             — client up, not logged in (no account yet)
+#   'BotClient - V1.2.3 - <Account>' — logged in; <Account> is the exact
+#                                      --jl-account display name, CASE-SENSITIVE,
+#                                      and does not change once the script loads
+# Every ownership decision (screenshot, relaunch close) goes through
+# title_matches_account(): exact, case-sensitive equality on the account
+# segment — never a substring, so 'Abc' can never match 'Abcd'.
+CLIENT_TITLE_MARKER = 'botclient'
+_CLIENT_TITLE_RE = re.compile(
+    r'^\s*BotClient\s*-\s*V?([0-9][\w.\-]*)(?:\s+-\s+(.+?))?\s*$', re.IGNORECASE)
+
+
+def is_client_title(title):
+    """True if title belongs to a bot client window (any account / none)."""
+    return CLIENT_TITLE_MARKER in (title or '').lower()
+
+
+def parse_client_title(title):
+    """Parse a client title. Returns (version, account) or None if it isn't a
+    client title. account is '' when the client is not logged in yet.
+    Surrounding quotes on the account segment are tolerated and removed."""
+    m = _CLIENT_TITLE_RE.match(title or '')
+    if not m:
+        return None
+    acct = (m.group(2) or '').strip()
+    if len(acct) >= 2 and acct[0] == acct[-1] and acct[0] in '\'"':
+        acct = acct[1:-1].strip()
+    return m.group(1), acct
+
+
+def title_matches_account(title, account):
+    """Exact, case-sensitive match of a client title's account segment."""
+    parsed = parse_client_title(title)
+    want = (account or '').strip()
+    return bool(parsed and want and parsed[1] == want)
+
+
+# The P2P Master AI configuration GUI ("P2P Master AI 0.82") is its own
+# top-level window, owned by the SAME process as the account's BotClient
+# window. It is only ever looked up by that PID — never by title alone — so a
+# GUI belonging to another account's client can never be matched.
+SCRIPT_GUI_TITLE_RE = re.compile(r'^\s*P2P Master AI\s+v?\d', re.IGNORECASE)
+
+
+def _list_windows_for_pid(pid):
+    """[(window_id, title)] for visible windows owned by pid. Never raises."""
+    out = []
+    if not pid:
+        return out
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype  = wintypes.DWORD
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype  = ctypes.c_bool
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype  = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetWindowTextW.restype  = ctypes.c_int
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lp):
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    wpid = wintypes.DWORD(0)
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                    if wpid.value != pid:
+                        return True
+                    n = user32.GetWindowTextLengthW(hwnd)
+                    if n > 0:
+                        buf = ctypes.create_unicode_buffer(n + 1)
+                        user32.GetWindowTextW(hwnd, buf, n + 1)
+                        out.append((str(int(hwnd)), buf.value or ''))
+                except Exception:
+                    pass
+                return True
+            user32.EnumWindows(_enum, 0)
+        else:
+            r = subprocess.run(['xdotool', 'search', '--onlyvisible', '--pid', str(pid)],
+                               capture_output=True, text=True, timeout=10)
+            for wid in r.stdout.split():
+                out.append((wid, get_window_title(wid) or ''))
+    except Exception:
+        pass
+    return out
+
+
+def find_script_gui_windows(pid):
+    """Visible P2P Master AI GUI window IDs owned by pid (the account's client)."""
+    return [wid for wid, title in _list_windows_for_pid(pid)
+            if SCRIPT_GUI_TITLE_RE.match(title or '')]
 
 
 def _ci_regex_pattern(text):
@@ -274,14 +375,16 @@ def _ci_regex_pattern(text):
 
 
 def _find_window_ids_linux(name):
-    """Find window IDs whose title contains 'name' (case-insensitive).
+    """Find client window IDs for account 'name'.
 
-    Ownership guard (parity with the Windows matcher): each candidate's
-    actual title is read back via `xdotool getwindowname` and must also
-    contain 'dreambot' (case-insensitive) — so a terminal or editor whose
-    title merely mentions the account name can never be matched (and
-    therefore never terminated). If the title read-back itself fails for a
-    candidate, the candidate is dropped: ownership could not be verified.
+    The xdotool search itself is broad (case-insensitive substring) to
+    collect candidates; ownership is then verified on each candidate's real
+    title, read back via `xdotool getwindowname`, with title_matches_account()
+    — a BotClient title whose account segment equals 'name' exactly
+    (case-sensitive). A terminal or editor whose title merely mentions the
+    account name can never be matched (and therefore never terminated). If
+    the title read-back fails for a candidate, the candidate is dropped:
+    ownership could not be verified.
     """
     return _find_window_ids_linux_ex(name)[0]
 
@@ -301,26 +404,25 @@ def _find_window_ids_linux_ex(name):
             return [], 'no window title matched'
         verified = []
         readback_failed = 0
-        needle = (name or '').lower()
         for wid in wids:
             try:
                 r = subprocess.run(['xdotool', 'getwindowname', wid],
                                    capture_output=True, text=True, timeout=10)
-                title = (r.stdout or '').strip().lower()
+                title = (r.stdout or '').strip()
             except subprocess.TimeoutExpired:
                 readback_failed += 1
                 continue
             except Exception:
                 readback_failed += 1
                 continue
-            if 'dreambot' in title and needle in title:
+            if title_matches_account(title, name):
                 verified.append(wid)
         if verified:
             return verified, ''
         if readback_failed:
             return [], (f'{len(wids)} candidate(s) found but title read-back '
                         f'failed/timed out for {readback_failed} (X busy?)')
-        return [], f'{len(wids)} candidate(s) found but none verified as DreamBot+account'
+        return [], f'{len(wids)} candidate(s) found but none verified as BotClient+account'
     except subprocess.TimeoutExpired:
         return [], 'window search timed out (X busy)'
     except FileNotFoundError:
@@ -329,9 +431,9 @@ def _find_window_ids_linux_ex(name):
         return [], f'window search failed: {e}'
 
 
-def list_dreambot_window_titles():
+def list_client_window_titles():
     """Diagnostic helper: return [(window_id, title), ...] for every visible
-    window whose title contains 'dreambot' (case-insensitive). Used only for
+    window whose title contains 'botclient' (case-insensitive). Used only for
     debug logging when relaunch ownership validation refuses — shows exactly
     what the matcher could see at that moment. Never raises."""
     out = []
@@ -358,7 +460,7 @@ def list_dreambot_window_titles():
                             buf = ctypes.create_unicode_buffer(n + 1)
                             user32.GetWindowTextW(hwnd, buf, n + 1)
                             t = buf.value or ''
-                            if 'dreambot' in t.lower():
+                            if is_client_title(t):
                                 titles.append((str(int(hwnd)), t))
                 except Exception:
                     pass
@@ -367,7 +469,7 @@ def list_dreambot_window_titles():
             out = titles
         else:
             r = subprocess.run(
-                ['xdotool', 'search', '--name', _ci_regex_pattern('dreambot')],
+                ['xdotool', 'search', '--name', _ci_regex_pattern(CLIENT_TITLE_MARKER)],
                 capture_output=True, text=True, timeout=5)
             for wid in r.stdout.strip().split():
                 try:
@@ -393,8 +495,7 @@ def _find_window_ids_windows(name):
     except Exception:
         return []
 
-    needle = (name or '').lower()
-    if not needle:
+    if not (name or '').strip():
         return []
 
     user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -422,8 +523,7 @@ def _find_window_ids_windows(name):
                 return True
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
-            title = (buf.value or '').lower()
-            if needle in title and 'dreambot' in title:
+            if title_matches_account(buf.value or '', name):
                 matches.append(str(int(hwnd)))
         except Exception:
             pass
@@ -1588,13 +1688,15 @@ def get_window_dpi_scale(window_id):
         return 1.0
 
 
-# ── DreamBot paint UI offsets (measured at 100% DPI) ───────────────────────────
-# These are scaled at point of use by get_window_dpi_scale().
+# ── P2P Master AI paint Hide/Show button (Detuks, measured at 100% DPI) ──────
+# Scaled at point of use by get_window_dpi_scale(). Same spot whether the
+# paint is shown ("Hide") or hidden ("Show"). The crop stays inside the
+# button face so only the label decides visible vs hidden.
 # Centralized here so paint.py and screenshot.py share one source of truth.
-PAINT_BTN_X_OFFSET = 100   # pixels from window left edge to Hide button
-PAINT_BTN_Y_OFFSET = 50    # pixels from window bottom edge to Hide button
-PAINT_BTN_CROP_W   = 60    # crop width for paint button visibility check
-PAINT_BTN_CROP_H   = 20    # crop height for paint button visibility check
+PAINT_BTN_X_OFFSET = 94    # pixels from window left edge to Hide/Show button
+PAINT_BTN_Y_OFFSET = 17    # pixels from window bottom edge to Hide/Show button
+PAINT_BTN_CROP_W   = 40    # crop width for paint button visibility check
+PAINT_BTN_CROP_H   = 18    # crop height for paint button visibility check
 
 
 def get_window_title(window_id):
@@ -1741,7 +1843,7 @@ def is_pid_running(pid: int) -> bool:
 
 def find_windows_for_pid(pid: int) -> list:
     """
-    Return visible window IDs owned by the given PID whose title contains 'DreamBot'.
+    Return visible window IDs owned by the given PID whose title is a BotClient title.
 
     Linux:   xdotool search --pid <pid>, then filter by title via get_window_title()
     Windows: EnumWindows + GetWindowThreadProcessId, filter visible + title
@@ -1770,12 +1872,12 @@ def _find_windows_for_pid_linux(pid: int) -> list:
         wids = [w for w in result.stdout.strip().split() if w]
         if not wids:
             return []
-        # Filter: visible + title contains 'dreambot'
+        # Filter: visible + BotClient title
         matches = []
         for wid in wids:
             try:
                 title = get_window_title(wid) or ''
-                if 'dreambot' in title.lower():
+                if is_client_title(title):
                     matches.append(wid)
             except Exception:
                 pass
@@ -1826,8 +1928,7 @@ def _find_windows_for_pid_windows(pid: int) -> list:
                     return True
                 buf = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buf, length + 1)
-                title = (buf.value or '').lower()
-                if 'dreambot' in title:
+                if is_client_title(buf.value or ''):
                     matches.append(str(int(hwnd)))
             except Exception:
                 pass
@@ -1901,7 +2002,7 @@ def terminate_process_tree(pid: int, timeout: int = 10) -> None:
 
 def find_account_window_and_pid(account: str) -> 'Optional[dict]':
     """
-    Find the DreamBot client window for 'account' and resolve its PID.
+    Find the client window for 'account' and resolve its PID.
 
     Returns:
         dict with keys 'window_id' (str) and 'pid' (int)  — exactly one match
@@ -1925,7 +2026,7 @@ def find_account_window_and_pid(account: str) -> 'Optional[dict]':
 
     if len(wids) > 1:
         raise ValueError(
-            f'{len(wids)} DreamBot windows matched "{account}" — ownership is ambiguous'
+            f'{len(wids)} client windows matched "{account}" — ownership is ambiguous'
         )
 
     wid = wids[0]

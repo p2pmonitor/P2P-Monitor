@@ -54,7 +54,7 @@ The output is a single `.exe` — no installer needed. Place it anywhere and run
   in place. Download and replace the `.exe` manually.
 - **discord.py bot**: Must be bundled at build time. The bot will not self-install
   missing dependencies in a packaged build.
-- **Windows offline detection**: If DreamBot closes unexpectedly, the monitor may
+- **Windows offline detection**: If the Detuks client closes unexpectedly, the monitor may
   not immediately detect the account as offline. Status will update within 2 minutes
   or on next monitor restart.
 

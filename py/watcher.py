@@ -1,7 +1,14 @@
 """
-watcher.py — Log watching engine for P2P Monitor v1.7.0
+watcher.py — Log watching engine for P2P Monitor v3.0.0
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
+
+v3.0.0 (Detuks client): the client writes ONE shared log (client.log, rotated
+to client_YYYY-MM-DD.N.log) for every client instance, with no account name on
+any line. A logs folder is therefore attributed to exactly one account —
+cfg['log_account'], else the only launcher preset's account. Monitoring is
+exact with one account running; with several, their lines are merged under
+that one name (documented: works best with one account at a time).
 """
 import json
 import os
@@ -13,10 +20,13 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from py.config  import save_config
+from py.config  import (save_config, CLIENT_LOG_ACTIVE, CLIENT_LOG_ROTATED_RE,
+                        is_client_log_name, folder_has_client_logs)
 from py.util    import now_str, write_debug_entry, reset_debug_log
 from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
-from py.reader  import LOG_TS_RE, is_ban_line
+from py.reader  import (LOG_TS_RE, is_ban_line, SCRIPT_START_RE, SCRIPT_STOP_RE,
+                        SCRIPT_LOADED_RE, SCRIPT_GUI_WAIT_RE,
+                        LAG_RE, COUNT_RE, COINS_RE, COUNT_MILESTONE_EVERY)
 from py.history import (append_history,
                         get_last_seen, set_last_seen,
                         get_last_seen_meta,
@@ -39,7 +49,7 @@ from py.screenshot import (get_focused_wid,
                             ScreenshotService)
 from py.inferno import InfernoTracker
 
-LOG_PATTERN = "logfile-*.log"
+SHARED_LOG_FALLBACK_ACCOUNT = 'Shared log'   # used when no account can be resolved
 
 _IS_BREAK_START_RE = re.compile(r'BREAK START', re.IGNORECASE)
 _IS_BREAK_OVER_RE  = re.compile(r'break over\s*(-?\d+)', re.IGNORECASE)
@@ -53,54 +63,71 @@ def _is_break_over(stripped_lower):
     return bool(_IS_BREAK_OVER_RE.match(stripped_lower))
 
 
-def _get_log_files(folder):
-    p = Path(folder)
-    files = list(p.glob("logfile-*.log")) + list(p.glob("logfile-*.log.*"))
-    return sorted(files, key=lambda f: f.name)
+# ── Session-state markers (prefix-stripped body) ──────────────────────────────
+# Detuks strings first, DreamBot strings kept as harmless alternates.
+def _is_script_loaded(b):
+    """Profile loaded, GUI about to open — the script is NOT running yet."""
+    return bool(SCRIPT_LOADED_RE.search(b))
 
+def _is_script_start(b):
+    """The script actually starts (Start pressed). DreamBot strings kept."""
+    low = b.lower()
+    return bool(SCRIPT_START_RE.search(b)) or 'script set to running' in low or 'awaiting login' in low
+
+def _is_gui_wait(b):
+    return bool(SCRIPT_GUI_WAIT_RE.search(b))
+
+def _is_script_stop(b):
+    return bool(SCRIPT_STOP_RE.search(b))
+
+def _is_login(b):
+    """Explicit 'now in game' lines. Detuks has no 'successfully logged in'
+    line; it logs 'Relogged on world N' (script relog after hop/logout) and the
+    client break handler's 'Logged back in, break cycle complete'. NEW TASK is
+    handled separately (it also implies in game)."""
+    low = b.lower()
+    return ('you have successfully been logged in' in low
+            or low.startswith('relogged on world')
+            or 'logged back in, break cycle complete' in low)
+
+def _is_logout(b):
+    low = b.lower()
+    return 'interacting (widget) logout' in low or low == 'logging out'
+
+
+def _log_file_order(f):
+    """Chronological sort key: rotated parts by (date, N), then the active
+    client.log last. N keeps counting up across days, so (date, N) is a total
+    order. Unknown names sort first."""
+    name = getattr(f, 'name', None) or os.path.basename(str(f))
+    if name == CLIENT_LOG_ACTIVE:
+        return (2, '', 0)
+    m = CLIENT_LOG_ROTATED_RE.match(name)
+    if m:
+        return (1, m.group(1), int(m.group(2)))
+    return (0, name, 0)
+
+
+def _get_log_files(folder):
+    """All Detuks client log files in folder, oldest → newest."""
+    try:
+        files = [f for f in Path(folder).iterdir()
+                 if f.is_file() and is_client_log_name(f.name)]
+    except Exception:
+        return []
+    return sorted(files, key=_log_file_order)
 
 
 def _get_active_log_file(folder):
-    """
-    Return the active logfile-*.log Path in folder — the one actually being
-    written to by a running DreamBot process.
+    """The file the client is writing to — always client.log in the Detuks
+    layout (rotated parts are never written again). None if absent."""
+    p = Path(folder) / CLIENT_LOG_ACTIVE
+    return p if p.is_file() else None
 
-    Strategy:
-      1. Uses get_open_log_handles() from platform_ops — Linux: readlink /proc/*/fd/*
-      2. If exactly one .log (no suffix) has an open handle — return it.
-      3. If multiple have open handles (duplicate client) — return the one
-         with the most recent mtime.
-      4. If none have open handles or scan is unreliable (Windows) — fall back
-         to most recently modified .log file. This correctly identifies the file
-         DreamBot is actively writing to regardless of filename order, and
-         naturally ignores rotated .log.1 files which won't be touched after rotation.
-    """
-    log_files = [f for f in _get_log_files(folder)
-                 if re.match(r'logfile-\d+\.log$', f.name)]
-    if not log_files:
-        return None
-    try:
-        scan = get_open_log_handles()
-        if not scan.reliable:
-            # Cannot trust handle scan — fall through to name-based fallback
-            raise RuntimeError(f'handle scan unreliable: {scan.reason}')
-        active_candidates = [f for f in log_files if normalize_path(f) in scan.paths]
-        if len(active_candidates) == 1:
-            return active_candidates[0]
-        elif len(active_candidates) > 1:
-            # Duplicate client — pick most recently modified
-            return max(active_candidates, key=lambda f: f.stat().st_mtime)
-        # No open handles — fall through to name-based fallback
-    except Exception:
-        pass
-    # Fallback: most recently modified .log file — the one DreamBot is
-    # actively writing to. More reliable than newest-by-filename on Windows
-    # where handle scanning is disabled, and correctly ignores rotated
-    # .log.1 files which won't have been touched since rotation.
-    try:
-        return max(log_files, key=lambda f: f.stat().st_mtime)
-    except Exception:
-        return log_files[-1]
+
+def _newest_rotated_file(folder):
+    rotated = [f for f in _get_log_files(folder) if f.name != CLIENT_LOG_ACTIVE]
+    return rotated[-1] if rotated else None
 
 def _fmt_duration(secs):
     """Format a duration in seconds as 'Xh YYm', or '—' if zero/negative."""
@@ -128,7 +155,6 @@ class AccountState:
         self._break_length_ms    = None   # parsed from "Break length N" log line; ms int or None
         self.script_running      = False  # True once script start confirmed; False on stop
         self.notified_levels     = {}
-        self.session_file_set    = set()  # tracks known session files; triggers uptime recalc when changed
         self._startup_done       = False  # guards _startup_catchup to run only once per state
         self.inferno             = InfernoTracker()  # stateful Inferno gear-check and attempt tracker
         # ── Error burst debounce ──────────────────────────────────────────────
@@ -140,6 +166,16 @@ class AccountState:
         self._recent_lines       = deque(maxlen=30)  # rolling buffer; manual-stop signature check
         self._pending_restart_timer: 'threading.Timer | None' = None
         self._pre_stop_break_snap = None  # break snapshot captured before script-stop clears it
+        # v3.0.0 Detuks extras (live only)
+        self._lag_quiet_until    = 0.0    # epoch: ignore LAG DETECTED until (login/start warm-up)
+        self.last_gp             = None   # last "Up to N coins available" value logged
+        self.count_milestones    = {}     # count name -> last milestone notified
+        # Script GUI / Start (v3.0.0): profile loaded, GUI open, Start not pressed
+        self.awaiting_start      = False
+        self._gui_wait_since     = None   # epoch the GUI wait was seen (live)
+        self._autostart_timer    = None   # threading.Timer for the next auto-click step
+        self._autostart_attempts = 0
+        self._gui_alerted        = False  # "needs a click" alert already sent this wait
 
     def should_alert(self, key, threshold, window_sec, dedupe_sec):
         now = time.time()
@@ -209,8 +245,8 @@ class LogWatcher:
         self.cfg = {}
         self._cached_dirs     = []
         self._dirs_last_check = 0
+        self._shared_account  = ''   # resolved in start() — see _resolve_shared_account
         self._last_summary_date = None
-        self._last_update_check_slot = 0.0    # epoch float: time of last update-awareness check
         self._ss_skip_log_ts = {}      # account -> last "due but gated" debug log time (10-min throttle)
         self._last_heartbeat = 0.0     # epoch float: last 24h heartbeat log
         self._loop_started   = 0.0     # epoch float: when the _run loop started
@@ -240,15 +276,50 @@ class LogWatcher:
             return []
         dirs = []
         root_path = Path(root)
-        if _get_log_files(root_path):
+        if folder_has_client_logs(root_path):
+            # Standard Detuks layout: the logs folder itself holds client.log.
             dirs.append(str(root_path))
         else:
+            # Per-account subfolders (logs_root/<account>/client.log) — only
+            # possible if the client ever gains per-instance log folders.
             for sub in sorted(root_path.iterdir(), key=lambda x: x.name):
-                if sub.is_dir() and _get_log_files(sub):
+                if sub.is_dir() and folder_has_client_logs(sub):
                     dirs.append(str(sub))
         self._cached_dirs = dirs
         self._dirs_last_check = now
         return dirs
+
+    # ── Log folder → account name ──────────────────────────────────────────────
+    def _resolve_shared_account(self):
+        """Account name for the shared client.log (logs_root itself):
+        cfg['log_account'] if set, else the single launcher preset's account,
+        else a neutral label. Resolved once per monitor start (start()), so an
+        edit mid-run can never split one log across two account states."""
+        name = (self.cfg.get('log_account') or '').strip()
+        if name:
+            return name
+        accounts = [(p.get('account') or '').strip()
+                    for p in self.cfg.get('launcher_presets', []) if isinstance(p, dict)]
+        accounts = [a for a in accounts if a]
+        if len(accounts) == 1:
+            return accounts[0]
+        return SHARED_LOG_FALLBACK_ACCOUNT
+
+    def _acct_for_dir(self, d):
+        """Account a log folder belongs to. The logs root (shared client.log)
+        maps to the resolved shared account; a per-account subfolder maps to
+        its folder name (the v2.x convention)."""
+        d = str(d)
+        root = (self.cfg.get('logs_root') or '').strip()
+        try:
+            if root and normalize_path(d) == normalize_path(root):
+                return self._shared_account or self._resolve_shared_account()
+        except Exception:
+            pass
+        return os.path.basename(os.path.normpath(d))
+
+    def _acct_for_path(self, path):
+        return self._acct_for_dir(os.path.dirname(str(path)))
 
     # ── Start / stop ───────────────────────────────────────────────────────────
     def start(self, cfg):
@@ -259,6 +330,7 @@ class LogWatcher:
         reset_debug_log()
         self.cfg      = cfg
         self._running = True
+        self._shared_account = self._resolve_shared_account()
         self._router  = DiscordRouter({
             'get_cfg':            lambda: self.cfg,
             'log':                self.log,
@@ -328,6 +400,7 @@ class LogWatcher:
                 if t is not None:
                     t.cancel()
                     state._pending_restart_timer = None
+                self._cancel_autostart(state)
         if self._ss_svc:
             self._ss_svc.stop()
         with self._backfill_lock:
@@ -340,22 +413,20 @@ class LogWatcher:
         if hasattr(self, '_bot_thread') and self._bot_thread and self._bot_thread.is_alive() and self._bot_thread is not threading.current_thread():
             self._bot_thread.join(timeout=5)
         with self._offsets_lock:
-            # Before saving offsets, EOF-pin any active log files whose DreamBot
-            # client has already closed. This prevents backfill from re-reading
+            # Before saving offsets, EOF-pin any active log file that no client
+            # process has open anymore. This prevents backfill from re-reading
             # those lines on next startup and duplicating history entries.
             scan = get_open_log_handles()
             # EOF-pin only when scan is reliable — skip if we can't trust
             # the result, to avoid pinning files that are actually still open
             if scan.reliable:
                 for d in self._get_log_dirs():
-                    log_files = _get_log_files(d)
-                    active = next((f for f in reversed(log_files)
-                                   if re.match(r'logfile-\d+\.log$', f.name)), None)
+                    active = _get_active_log_file(d)
                     if not active:
                         continue
                     fstr = str(active)
                     if normalize_path(fstr) not in scan.paths:
-                        # DreamBot already closed — pin to EOF
+                        # No client has it open — pin to EOF
                         try:
                             self._offsets[fstr] = active.stat().st_size
                         except Exception:
@@ -373,44 +444,16 @@ class LogWatcher:
 
     # ── Account row export ─────────────────────────────────────────────────────
     def get_account_rows(self):
-        # Check for new rotated log files per account and recalculate uptime/breaks if changed
-        try:
-            for d in self._get_log_dirs():
-                log_files   = _get_log_files(d)
-                # Use name-based selection here — fast, no proc scan.
-                # _get_active_log_file is only needed at startup and on explicit refresh.
-                active = next((f for f in reversed(log_files)
-                               if re.match(r'logfile-\d+\.log$', f.name)), None)
-                if not active:
-                    continue
-                active_name   = active.name
-                session_files = frozenset(
-                    f.name for f in log_files
-                    if f.name == active_name or f.name.startswith(active_name + '.'))
-                folder = os.path.basename(d)
-                with self._accounts_lock:
-                    state = self._accounts.get(folder)
-                if state and session_files != state.session_file_set:
-                    # Log rotation detected — re-run catchup to pick up new active file.
-                    # Run in a daemon thread so get_account_rows isn't blocked by a
-                    # potentially slow full-file scan on large logs.
-                    state.session_file_set = session_files
-                    active_str = str(active)
-                    threading.Thread(
-                        target=self._startup_catchup,
-                        args=(active_str,),
-                        kwargs={'is_rotation': True},
-                        daemon=True,
-                    ).start()
-        except Exception as e:
-            self._dbg(f'get_account_rows rotation check failed: {e}')
-
+        # v3.0.0: no per-session file switching any more — the client always
+        # writes client.log, and rotation is handled inline by _check_file().
         rows = []
         with self._accounts_lock:
             snapshot = list(self._accounts.items())
         for name, s in sorted(snapshot):
             if s.banned:
                 status = '🔨 Banned'
+            elif s.awaiting_start:
+                status = '🟡 Waiting for Start'
             elif not s.script_running:
                 status = '🔴 Offline'
             elif s.on_break or s._break_start_ts:
@@ -491,7 +534,7 @@ class LogWatcher:
 
     def _startup_cache_pid(self, account: str) -> None:
         """
-        Background daemon: discover the DreamBot window for account and cache
+        Background daemon: discover the client window for account and cache
         its PID via the launcher state file. Called once per active account at
         startup so PID-first screenshot lookup works from the first screenshot.
         Fails completely silently — never affects startup or monitor behaviour.
@@ -680,435 +723,6 @@ class LogWatcher:
             if not self._enqueue_screenshot(SS_PRIORITY_SCHEDULED, name, trigger):
                 self._dbg(f'[ss] [{name}] {trigger} screenshot enqueue refused')
 
-    # ── DreamBot / P2P Master AI update awareness ──────────────────────────────
-
-    _SDN_URL           = 'https://sdn.dreambot.org/scripts/all'
-    _WORKER_URL        = 'https://p2p-sdn-watch.p2pmonitor.workers.dev/p2p-master-ai/latest'
-    _SDN_SCRIPT_NAME   = 'P2P Master AI'
-    _SDN_SCRIPT_ID     = 1500
-    _SDN_AUTHOR        = 'Aeglen'
-    _UPDATE_STATE_FILE         = Path.home() / '.p2p_monitor' / 'update_check_state.json'
-    _AUTO_RELAUNCH_STATE_FILE  = Path.home() / '.p2p_monitor' / 'update_relaunch_state.json'
-
-    @staticmethod
-    def _sdn_ver_tuple(v) -> tuple:
-        """
-        Convert an SDN version (number or string) to a comparable tuple using
-        Decimal arithmetic so that trailing-zero versions are handled correctly.
-
-        SDN returns JSON numbers: 2.15 means 2.150 (not 2.15 as a simple float).
-        We convert by treating the fractional part as an integer.
-
-        Examples:
-          2.144  → (2, 144)
-          2.15   → (2, 150)   — newer than (2, 149)
-          2.9    → (2, 900)   — very unlikely, but safe
-        """
-        try:
-            from decimal import Decimal
-            d = Decimal(str(v)).normalize()
-            parts = str(d).split('.')
-            major = int(parts[0])
-            if len(parts) == 1:
-                return (major, 0)
-            frac_str = parts[1]
-            # Pad to 3 digits so 2.15 → 150, 2.144 → 144
-            minor = int(frac_str.ljust(3, '0')[:3])
-            return (major, minor)
-        except Exception:
-            return (0, 0)
-
-    @staticmethod
-    def _ver_tuple(v: str) -> tuple:
-        """
-        Convert a local version string (from DreamBot title) to a comparable tuple.
-        '2.143', 'v2.143' → uses _sdn_ver_tuple for consistent comparison.
-        """
-        return LogWatcher._sdn_ver_tuple(v.lstrip('v').strip())
-
-    @staticmethod
-    def _parse_dreambot_title(title: str) -> 'dict | None':
-        """
-        Parse a DreamBot window title.
-        Example: 'DreamBot 4.1.67 - AccountName - P2P Master AI v2.141 - proxy (NEW CLIENT AVAILABLE)'
-        Returns dict with keys: account, dreambot_version, script_version, new_client
-        Returns None if not a recognisable DreamBot/P2P Master AI title.
-        """
-        import re as _re
-        if 'dreambot' not in title.lower():
-            return None
-        m_script = _re.search(r'P2P Master AI v(\d+\.\d+)', title, _re.IGNORECASE)
-        if not m_script:
-            return None
-        # DreamBot version: first token after 'DreamBot '
-        m_db = _re.match(r'DreamBot\s+([\d.]+)', title, _re.IGNORECASE)
-        db_ver = m_db.group(1) if m_db else ''
-        # Account name: second dash-separated segment (strip spaces)
-        parts = [p.strip() for p in title.split(' - ')]
-        # parts[0] = 'DreamBot 4.1.67', parts[1] = account, parts[2] = 'P2P Master AI ...'
-        account = parts[1] if len(parts) >= 3 else ''
-        return {
-            'account':          account,
-            'dreambot_version': db_ver,
-            'script_version':   m_script.group(1),
-            'new_client':       '(NEW CLIENT AVAILABLE)' in title.upper(),
-        }
-
-    def _fetch_latest_version(self) -> 'str | None':
-        """
-        Fetch latest P2P Master AI version.
-        Primary:  DreamBot SDN API (sdn.dreambot.org/scripts/all)
-        Fallback: Cloudflare Worker cache
-        Returns version string (e.g. '2.144') or None on total failure.
-        """
-        ver = self._fetch_from_sdn()
-        if ver is not None:
-            return ver
-        self._dbg('[update_check] SDN unavailable — trying Worker fallback')
-        return self._fetch_from_worker()
-
-    def _fetch_from_sdn(self) -> 'str | None':
-        """Fetch and parse the DreamBot SDN API. Returns version string or None."""
-        import urllib.request, json as _json
-        try:
-            req = urllib.request.Request(
-                self._SDN_URL,
-                headers={'User-Agent': 'P2PMonitor/update-check'},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode())
-            scripts = data.get('scripts', [])
-            if not isinstance(scripts, list):
-                self._dbg('[update_check] SDN response missing scripts list')
-                return None
-            for script in scripts:
-                if script.get('name') != self._SDN_SCRIPT_NAME:
-                    continue
-                # Optional safety checks
-                if script.get('id') != self._SDN_SCRIPT_ID:
-                    self._dbg(f'[update_check] SDN: unexpected script id {script.get("id")}')
-                    continue
-                if script.get('author') != self._SDN_AUTHOR:
-                    self._dbg(f'[update_check] SDN: unexpected author {script.get("author")}')
-                    continue
-                ver = script.get('version')
-                if ver is None:
-                    self._dbg('[update_check] SDN: script has no version field')
-                    return None
-                ver_str = str(ver).strip()
-                self._dbg(f'[update_check] SDN: found {self._SDN_SCRIPT_NAME} '
-                          f'v{ver_str} (compiled {script.get("last_compile", "?")})')
-                return ver_str
-            self._dbg(f'[update_check] SDN: {self._SDN_SCRIPT_NAME!r} not found in scripts list')
-            return None
-        except Exception as exc:
-            self._dbg(f'[update_check] SDN fetch failed: {exc}')
-            return None
-
-    def _fetch_from_worker(self) -> 'str | None':
-        """Fetch latest_version from Cloudflare Worker cache. Returns version string or None."""
-        import urllib.request, json as _json
-        try:
-            req = urllib.request.Request(
-                self._WORKER_URL,
-                headers={'User-Agent': 'P2PMonitor/update-check'},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode())
-            ver = data.get('latest_version', '').strip()
-            if ver:
-                self._dbg(f'[update_check] Worker fallback: v{ver}')
-            return ver if ver else None
-        except Exception as exc:
-            self._dbg(f'[update_check] Worker fallback failed: {exc}')
-            return None
-
-    def _load_update_state(self) -> set:
-        try:
-            if self._UPDATE_STATE_FILE.exists():
-                return set(json.loads(self._UPDATE_STATE_FILE.read_text()))
-        except Exception:
-            pass
-        return set()
-
-    def _save_update_state(self, alerted: set) -> None:
-        try:
-            self._UPDATE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            self._UPDATE_STATE_FILE.write_text(json.dumps(sorted(alerted)))
-        except Exception:
-            pass
-
-    def _load_relaunch_state(self) -> set:
-        try:
-            if self._AUTO_RELAUNCH_STATE_FILE.exists():
-                return set(json.loads(self._AUTO_RELAUNCH_STATE_FILE.read_text()))
-        except Exception:
-            pass
-        return set()
-
-    def _save_relaunch_state(self, relaunched: set) -> None:
-        try:
-            self._AUTO_RELAUNCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            self._AUTO_RELAUNCH_STATE_FILE.write_text(json.dumps(sorted(relaunched)))
-        except Exception:
-            pass
-
-    def _check_update_awareness(self, force: bool = False) -> None:
-        """
-        Run the update-awareness check.
-        - force=True:  run unconditionally (startup call).
-        - force=False: run only if the configured interval has elapsed since last check.
-                       Interval is read from cfg: update_check_interval_hours +
-                       update_check_interval_minutes (default 6h 0m, minimum 1m).
-        """
-        if not self.cfg.get('update_check_enabled', True):
-            return
-        now = time.time()
-        if not force:
-            hours   = int(self.cfg.get('update_check_interval_hours', 6))
-            minutes = int(self.cfg.get('update_check_interval_minutes', 0))
-            interval_secs = max(60, hours * 3600 + minutes * 60)
-            if now - self._last_update_check_slot < interval_secs:
-                return
-        # Record this as the most recent check — including forced (startup)
-        # checks — so the periodic loop doesn't immediately re-check.
-        self._last_update_check_slot = now
-
-        # Read all DreamBot window titles using existing platform helpers
-        try:
-            from py.platform_ops import find_window_ids_by_name, get_window_title
-            wids   = find_window_ids_by_name('P2P Master AI')
-            titles = [get_window_title(w) for w in wids]
-        except Exception as exc:
-            self._dbg(f'[update_check] window read failed: {exc}')
-            return
-
-        parsed = [self._parse_dreambot_title(t) for t in titles]
-        parsed = [p for p in parsed if p]
-
-        if not parsed:
-            self._dbg('[update_check] No DreamBot windows found with P2P Master AI — no alert.')
-            return
-
-        latest_ver = self._fetch_latest_version()  # None if unreachable
-
-        alerted          = self._load_update_state()
-        relaunched_sigs  = self._load_relaunch_state()
-        auto_relaunch_on = self.cfg.get('auto_relaunch_on_update', False)
-
-        need_both   = []   # (account, db_ver, local_ver)
-        need_script = []   # (account, db_ver, local_ver)
-        need_client = []   # (account, db_ver)
-        new_keys    = []   # alert dedupe keys
-        to_relaunch = []   # accounts to auto-relaunch (have presets, new signature)
-        no_preset   = []   # accounts needing update but no preset
-        new_rl_sigs = []   # relaunch dedupe signatures
-
-        for info in parsed:
-            account    = info['account']
-            db_ver     = info['dreambot_version']
-            local_ver  = info['script_version']
-            new_client = info['new_client']
-
-            script_outdated = (
-                latest_ver is not None
-                and self._ver_tuple(local_ver) < self._ver_tuple(latest_ver)
-            )
-
-            # Per-account alert dedupe key
-            key = f"{account}|{db_ver}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
-
-            if not script_outdated and not new_client:
-                self._dbg(
-                    f'[update_check] {account or "?"}: script v{local_ver} current '
-                    f'(latest {latest_ver}), no client banner — no alert.'
-                )
-                continue
-
-            if key not in alerted:
-                new_keys.append(key)
-                if script_outdated and new_client:
-                    need_both.append((account, db_ver, local_ver))
-                elif script_outdated:
-                    need_script.append((account, db_ver, local_ver))
-                else:
-                    need_client.append((account, db_ver))
-            else:
-                self._dbg(f'[update_check] {account or "?"}: already alerted for key {key}')
-
-            # Auto-relaunch: separate signature to avoid mixing alert dedupe with relaunch dedupe
-            # Banned accounts are excluded — never relaunch a banned account (v2.2.0).
-            if auto_relaunch_on and (script_outdated or new_client):
-                with self._accounts_lock:
-                    _b_state = self._accounts.get(account)
-                if _b_state is not None and _b_state.banned:
-                    self._dbg(f'[update_check] {account}: banned — excluded from auto-relaunch.')
-                    continue
-                rl_sig = f"{account}|{local_ver}|{latest_ver or 'unknown'}|{int(new_client)}"
-                if rl_sig not in relaunched_sigs:
-                    new_rl_sigs.append(rl_sig)
-                    try:
-                        from py.launcher import find_preset
-                        if find_preset(self.cfg, account):
-                            to_relaunch.append(account)
-                        else:
-                            no_preset.append(account)
-                    except Exception:
-                        no_preset.append(account)
-                else:
-                    self._dbg(f'[update_check] {account}: already relaunched for sig {rl_sig}')
-
-        if not need_both and not need_script and not need_client and not to_relaunch:
-            return  # nothing new
-
-        url = self._router.resolve_url(None, 'default')
-        if not url:
-            self._dbg('[update_check] No default webhook — cannot send update alert.')
-            return
-
-        from py.discord import post_discord, apply_ping
-        mention   = self._router.mention()
-        ping_on   = self.cfg.get('ping_update', True)
-
-        if auto_relaunch_on and (to_relaunch or no_preset):
-            # Auto-relaunch message replaces normal alert
-            payload = self._build_relaunch_alert_payload(
-                to_relaunch, no_preset, need_both, need_script, need_client, latest_ver)
-            apply_ping(payload, mention, ping_on)
-            ok, err = post_discord(url, payload)
-            if ok:
-                self.log(f'🔄 Update auto-relaunch initiated for: {", ".join(to_relaunch)}')
-                for sig in new_rl_sigs:
-                    relaunched_sigs.add(sig)
-                self._save_relaunch_state(relaunched_sigs)
-                # Also persist alert dedupe keys so the same update doesn't later
-                # send a normal "Update Available" alert after relaunch suppresses re-relaunch
-                for key in new_keys:
-                    alerted.add(key)
-                self._save_update_state(alerted)
-                # Staggered relaunch
-                def _do_relaunches(accounts):
-                    from py.launcher import relaunch_account
-                    for i, acct in enumerate(accounts):
-                        if i > 0:
-                            import time as _time
-                            _time.sleep(5)
-                        try:
-                            result = relaunch_account(self.cfg, acct, log_fn=self.log)
-                            if not result.ok:
-                                self.log(f'❌ [{acct}] Update relaunch failed: {result.message}')
-                        except Exception as exc:
-                            self.log(f'❌ [{acct}] Update relaunch error: {exc}')
-                if to_relaunch:
-                    threading.Thread(target=_do_relaunches, args=(list(to_relaunch),),
-                                     daemon=True, name='update-relaunch').start()
-            else:
-                self.log(f'⚠ Update relaunch alert failed: {err}')
-        elif need_both or need_script or need_client:
-            payload = self._build_update_alert_payload(
-                need_both, need_script, need_client, latest_ver)
-            apply_ping(payload, mention, ping_on)
-            ok, err = post_discord(url, payload)
-            if ok:
-                for key in new_keys:
-                    alerted.add(key)
-                self._save_update_state(alerted)
-                self.log(f'🔔 Update alert sent — '
-                         f'both={len(need_both)} script={len(need_script)} client={len(need_client)}')
-            else:
-                self.log(f'⚠ Update alert failed: {err}')
-
-    def _build_update_alert_payload(self,
-                                    need_both:   list,
-                                    need_script: list,
-                                    need_client: list,
-                                    latest_ver: 'str | None') -> dict:
-        """
-        Build a single grouped Discord embed listing all accounts by update category.
-        """
-        from py.discord import _embed
-
-        fields = []
-
-        def _bullet_lines(items):
-            return '\n'.join(items)
-
-        if need_both:
-            lines = []
-            for account, db_ver, local_ver in need_both:
-                db_tag = f'DreamBot {db_ver} shows NEW CLIENT AVAILABLE' if db_ver else 'NEW CLIENT AVAILABLE'
-                lines.append(f'• {account}: script v{local_ver} → v{latest_ver}, {db_tag}')
-            fields.append({
-                'name':   'Both script + DreamBot update needed',
-                'value':  _bullet_lines(lines),
-                'inline': False,
-            })
-
-        if need_script:
-            lines = []
-            for account, db_ver, local_ver in need_script:
-                lines.append(f'• {account}: v{local_ver} → v{latest_ver}')
-            fields.append({
-                'name':   'P2P Master AI script update needed',
-                'value':  _bullet_lines(lines),
-                'inline': False,
-            })
-
-        if need_client:
-            lines = []
-            for account, db_ver in need_client:
-                db_tag = f'DreamBot {db_ver} shows NEW CLIENT AVAILABLE' if db_ver else 'NEW CLIENT AVAILABLE'
-                lines.append(f'• {account}: {db_tag}')
-            fields.append({
-                'name':   'DreamBot client update needed',
-                'value':  _bullet_lines(lines),
-                'inline': False,
-            })
-
-        desc  = 'Recommended: use `/relaunch <account>` to restart and load the latest version.'
-        color = 0xffaa00  # amber
-
-        return _embed('🔔 Update Available', desc, fields, color)
-
-    def _build_relaunch_alert_payload(self,
-                                      to_relaunch: list,
-                                      no_preset:   list,
-                                      need_both:   list,
-                                      need_script: list,
-                                      need_client: list,
-                                      latest_ver: 'str | None') -> dict:
-        """Build the Discord embed when auto-relaunch fires on update detection."""
-        from py.discord import _embed
-
-        fields = []
-        if to_relaunch:
-            fields.append({
-                'name':   '🔄 Auto-relaunching',
-                'value':  '\n'.join(f'• {a}' for a in to_relaunch),
-                'inline': False,
-            })
-        if no_preset:
-            fields.append({
-                'name':   '⚠ Manual relaunch required (no preset)',
-                'value':  '\n'.join(f'• {a}' for a in no_preset),
-                'inline': False,
-            })
-
-        # Include update detail in description
-        lines = []
-        for account, db_ver, local_ver in need_both:
-            lines.append(f'• {account}: script v{local_ver} → v{latest_ver}, NEW CLIENT AVAILABLE')
-        for account, db_ver, local_ver in need_script:
-            lines.append(f'• {account}: script v{local_ver} → v{latest_ver}')
-        for account, db_ver in need_client:
-            lines.append(f'• {account}: NEW CLIENT AVAILABLE')
-
-        desc = 'Update detected — clients are being relaunched automatically.\n'
-        if lines:
-            desc += '\n'.join(lines)
-
-        return _embed('🔔 Update — Auto-Relaunch Initiated', desc, fields, 0xff6600)
-
     # ── Daily summary ──────────────────────────────────────────────────────────
 
     def _check_daily_summary(self):
@@ -1190,14 +804,14 @@ class LogWatcher:
             # Only log once per session to avoid spamming the monitor tab.
             if not getattr(self, '_unreliable_scan_logged', False):
                 for d in self._get_log_dirs():
-                    folder = os.path.basename(d)
+                    folder = self._acct_for_dir(d)
                     self._dbg(f'handle scan unreliable ({scan.reason}) — '
                               f'skipping offline check for {folder}')
                 self._unreliable_scan_logged = True
             self.on_status()
             return
         for d in self._get_log_dirs():
-            folder = os.path.basename(d)
+            folder = self._acct_for_dir(d)
             with self._accounts_lock:
                 state = self._accounts.get(folder)
             if state is None:
@@ -1219,7 +833,7 @@ class LogWatcher:
         """
         Check if any process has an open file handle in the given folder.
         Uses get_open_log_handles() from platform_ops (Linux: readlink /proc/*/fd/*)
-        Returns True if DreamBot is actively writing to the folder.
+        Returns True if a client process is actively writing to the folder.
         Returns False if no process has the folder open (stale/dead session).
         """
         try:
@@ -1263,8 +877,16 @@ class LogWatcher:
                         pass  # leave active file for _startup_catchup / poll loop
                     else:
                         self._offsets[str(f)] = f.stat().st_size  # rotated — skip
-        account_names = [os.path.basename(d) for d in dirs]
+        account_names = [self._acct_for_dir(d) for d in dirs]
         self.log(f"▶ Monitoring {len(dirs)} account(s): {', '.join(account_names)}")
+        if any(normalize_path(d) == normalize_path(self.cfg.get('logs_root', '')) for d in dirs):
+            self.log("ℹ Detuks shared log: all client instances write to one client.log. "
+                     f"Events are attributed to \"{self._shared_account}\" — monitoring is exact "
+                     "with one account running at a time.")
+            if self._shared_account == SHARED_LOG_FALLBACK_ACCOUNT:
+                self.log("⚠ No account set for the shared log — set Settings → Log account "
+                         "(or keep exactly one Launcher account) so screenshots and relaunch "
+                         "can find the client window.")
         for d in dirs:
             log_files = _get_log_files(d)
             active = _get_active_log_file(d)
@@ -1274,7 +896,7 @@ class LogWatcher:
                 # Background: discover and cache PID for this account so PID-first
                 # screenshot lookup works immediately, even for clients not launched
                 # by the monitor this session.
-                _acct = os.path.basename(d)
+                _acct = self._acct_for_dir(d)
                 threading.Thread(
                     target=self._startup_cache_pid,
                     args=(_acct,),
@@ -1288,8 +910,18 @@ class LogWatcher:
                 except Exception as e:
                     self._dbg(f'Could not pin offset for {active.name}: {e}')
             else:
-                # Stale log — create blank offline state, skip catchup entirely
-                folder_name = os.path.basename(d)
+                # Stale log — create blank offline state, skip catchup entirely.
+                # Pin client.log to EOF here too (v3.0.0): the Detuks log is ONE
+                # long-lived shared file, so leaving the offset at 0/stale would
+                # make the poll loop replay old lines as live events (Discord
+                # spam). History for that span is the backfill's job.
+                if active:
+                    try:
+                        with self._offsets_lock:
+                            self._offsets[str(active)] = active.stat().st_size
+                    except Exception as e:
+                        self._dbg(f'Could not pin offset for {active.name}: {e}')
+                folder_name = self._acct_for_dir(d)
                 with self._accounts_lock:
                     if folder_name not in self._accounts:
                         self._accounts[folder_name] = AccountState(folder_name)
@@ -1303,15 +935,20 @@ class LogWatcher:
                 self._backfill_threads = [x for x in self._backfill_threads if x.is_alive()]
                 self._backfill_threads.append(t)
 
+        # Accounts whose script GUI was already open and waiting at startup
+        # get the same auto-click / alert handling as a live GUI wait.
+        for _acct in sorted(getattr(self, '_startup_gui_waiting', set())):
+            with self._accounts_lock:
+                _st = self._accounts.get(_acct)
+            if _st is not None and _st.awaiting_start:
+                _st._gui_wait_since = time.time()
+                self.log(f"⏸ [{_acct}] P2P Master AI is waiting at its GUI for Start")
+                self._schedule_autostart(_acct, _st)
+
         interval        = int(self.cfg.get('check_interval', 5))
         ss_min          = int(self.cfg.get('screenshot_minutes', 60))
         last_periodic   = time.time()
         self.on_status()  # populate status tab immediately after startup catchup
-
-        # Startup update-awareness check — runs once in background, non-blocking
-        if self.cfg.get('update_check_enabled', True):
-            threading.Thread(target=self._check_update_awareness,
-                             kwargs={'force': True}, daemon=True).start()
 
         self._last_heartbeat = time.time()
         self._loop_started   = time.time()
@@ -1336,7 +973,6 @@ class LogWatcher:
                     for _p_name, _p_fn in (
                             ('screenshot check',  lambda: self._check_screenshots(ss_min)),
                             ('daily summary',     self._check_daily_summary),
-                            ('update awareness',  self._check_update_awareness),
                             ('screenshot prune',  self._prune_screenshots),
                             ('dedupe prune',      self._prune_dedupe),
                             ('status refresh',    self.on_status),
@@ -1376,191 +1012,157 @@ class LogWatcher:
     # ── Startup catchup ────────────────────────────────────────────────────────
     def _startup_catchup(self, active_path, is_rotation=False):
         """
-        Called once per account at startup with the active log file path.
-        Reads the current session (active file + any .log.1/.log.2 rotated
-        parts of the same session) to set:
-          script_start_ts  - timestamp of first 'Connecting to server' in oldest
-                             session file (= DreamBot client session start time)
-          total_break_secs - sum of ALL 'Break over N' ms across all session files
-          logged_in / on_break / script_running - reconstructed by scanning ALL
-                             session files oldest→newest on cold start; active file
-                             only on rotation (preserves in-memory state)
-          last_task / last_activity - from the last NEW TASK block in active file
+        Called once per account at startup with the active log path (client.log).
+        Reconstructs live state from the log in ONE forward pass:
+          logged_in / on_break / script_running / banned — last state markers
+          script_start_ts  - start of the CURRENT script run: the 'Start
+                             button pressed' (or first NEW TASK) after the last
+                             'started with profile' load line.
+          awaiting_start   - loaded, GUI open, Start not pressed yet.
+                             v3.0.0: uptime = time since that script start (the
+                             shared client.log has no per-client session file).
+          total_break_secs - completed breaks (BREAK START → Break over N,
+                             timestamp math) within that run only
+          last_task / last_activity - from the last NEW TASK block
 
-        Session grouping: logfile-X.log is active; logfile-X.log.1, .log.2 etc.
-        are rotated parts of the same DreamBot client session (same base name,
-        higher N = older). Other logfile-Y files are different sessions.
+        Files scanned: client.log, plus the newest rotated part
+        (client_YYYY-MM-DD.N.log) when client.log alone holds no script start
+        and no NEW TASK — i.e. rotation happened mid-run. Older parts are
+        never needed for current state.
+
+        is_rotation is accepted for call compatibility and ignored (v3.0.0:
+        rotation is handled inline in _check_file).
         """
         try:
             active_path = str(active_path)
-            folder = os.path.basename(os.path.dirname(active_path)) or \
-                     os.path.splitext(os.path.basename(active_path))[0]
-            state = self._get_account(folder, skip_backfill=True)
-
-            # ── Identify all files in this session ────────────────────────────
-            active_name = os.path.basename(active_path)  # e.g. logfile-X.log
             log_dir     = os.path.dirname(active_path)
-            all_files   = _get_log_files(log_dir)        # sorted by name
+            folder      = self._acct_for_dir(log_dir)
+            state       = self._get_account(folder, skip_backfill=True)
 
-            # Session files = active + any logfile-X.log.N (same base)
-            session_files = [f for f in all_files
-                             if f.name == active_name or
-                             f.name.startswith(active_name + '.')]
-
-            # Update session_file_set so get_account_rows doesn't re-trigger this
-            state.session_file_set = frozenset(f.name for f in session_files)
-
-            def _rot_key(f):
-                """Sort key: .log = 0 (newest), .log.1 = -1, .log.2 = -2, ..."""
-                n = f.name
-                if n == active_name:
-                    return 0
+            def _read(path):
                 try:
-                    return -int(n.rsplit('.', 1)[1])
+                    with open(str(path), 'r', encoding='utf-8', errors='replace') as fh:
+                        return [l.rstrip('\n') for l in fh]
                 except Exception as e:
-                    self._dbg(f'Could not parse rotation index for {n}: {e}')
-                    return -999
+                    self.log(f"⚠ [{folder}] Could not read {os.path.basename(str(path))}: {e}")
+                    return []
 
-            # Newest first for scanning; we'll reverse where needed
-            session_files_newest_first = sorted(session_files, key=_rot_key, reverse=True)
-            session_files_oldest_first = list(reversed(session_files_newest_first))
+            active_lines = _read(active_path)
+            scan_lines   = active_lines
+            used_files   = [os.path.basename(active_path)]
+            has_anchor = any(_is_script_start(strip_prefix(l).strip()) or 'NEW TASK' in l
+                             for l in active_lines)
+            if not has_anchor:
+                prev = _newest_rotated_file(log_dir)
+                if prev is not None:
+                    scan_lines = _read(prev) + active_lines
+                    used_files.insert(0, prev.name)
 
-            # ── Read active file lines (reused for state scan + task scan) ────
-            try:
-                with open(active_path, 'r', encoding='utf-8', errors='replace') as f:
-                    active_lines = [l.rstrip('\n') for l in f]
-            except Exception as e:
-                self.log(f"⚠ [{folder}] Could not read active log: {e}")
-                active_lines = []
+            self._dbg(f'[{folder}] _startup_catchup: files (oldest→newest): {used_files}')
 
-            # ── Debug: show what we're working with ───────────────────────────
-            self._dbg(
-                f'[{folder}] _startup_catchup: '
-                f'{"rotation" if is_rotation else "cold start"} | '
-                f'active={active_name} | '
-                f'session files (oldest→newest): '
-                f'{[f.name for f in session_files_oldest_first]}'
-            )
+            def _ts_of(line):
+                m = LOG_TS_RE.match(line)
+                if not m:
+                    return None
+                try:
+                    return datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
+                except Exception:
+                    return None
 
-            # ── Login / break state scan ──────────────────────────────────────
-            # Forward scan is the correct algorithm — tracks the last unmatched
-            # BREAK START giving the true current break state regardless of how
-            # many completed breaks appear in the files.
-            #
-            # Cold start: reset all state then walk ALL session files oldest→newest
-            # so that startup/login lines in rotated siblings are not missed.
-            # Active file lines are already in active_lines — reuse them for the
-            # active file pass to avoid reading it twice.
-            #
-            # Rotation: preserve last known good in-memory state — only override
-            # if the new active file contains explicit state-changing lines.
-            break_start_log_ts = None
-            if not is_rotation:
-                state.on_break       = False
-                state.logged_in      = False
-                state.script_running = False
-                state.banned         = False
+            state.on_break       = False
+            state.logged_in      = False
+            state.script_running = False
+            state.banned         = False
+            state.awaiting_start = False
+            gui_waiting         = False   # GUI wait seen since the last LOADED line
+            gui_wait_ts         = None
+            run_start_ts        = None
+            break_start_log_ts  = None
+            total_break_secs    = 0.0
+            break_length_ms     = None
 
-                def _state_lines_for(sf):
-                    """Return lines for sf, reusing active_lines to avoid double read."""
-                    if sf.name == active_name:
-                        return active_lines
-                    try:
-                        with open(str(sf), 'r', encoding='utf-8', errors='replace') as fh:
-                            return [l.rstrip('\n') for l in fh]
-                    except Exception as e:
-                        self.log(f"⚠ [{folder}] Could not read {sf.name} for state scan: {e}")
-                        return []
-
-                for sf in session_files_oldest_first:
-                    for line in _state_lines_for(sf):
-                        b = strip_prefix(line).strip()
-                        if _is_break_start(line):
-                            state.on_break  = True
-                            state.logged_in = False
-                            m = LOG_TS_RE.match(line)
-                            if m:
-                                try:
-                                    break_start_log_ts = datetime.strptime(
-                                        m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                                except Exception as e:
-                                    self._dbg(f'Break start timestamp parse failed: {e}')
-                                    break_start_log_ts = None
-                        elif _is_break_over(b.lower()):
-                            state.on_break       = False
-                            state.logged_in      = True
-                            state.script_running = True
-                            break_start_log_ts   = None
-                        elif 'you have successfully been logged in' in b.lower():
-                            state.on_break      = False
-                            state.logged_in     = True
-                            state.banned        = False
-                            break_start_log_ts  = None
-                        elif 'starting p2p master ai now' in b.lower() or \
-                             'script set to running' in b.lower() or \
-                             'awaiting login' in b.lower():
-                            state.script_running = True
-                            state.logged_in      = False
-                        elif 'solvers all finished' in b.lower():
-                            state.script_running = True
-                            state.logged_in      = True
-                            state.on_break       = False
-                        elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
-                            # Script is processing tasks — definitively in game
-                            # Don't override on_break — break state takes priority
-                            state.logged_in = True
-                        elif 'stopped p2p master ai' in b.lower():
-                            state.script_running  = False
-                            state.logged_in       = False
-                            state.on_break        = False
-                            state._break_start_ts = None
-                        elif is_ban_line(b):
-                            state.banned = True
-            else:
-                # Rotation: only scan the new active file for state changes
-                for line in active_lines:
-                    b = strip_prefix(line).strip()
-                    if _is_break_start(line):
-                        state.on_break  = True
-                        state.logged_in = False
-                        m = LOG_TS_RE.match(line)
-                        if m:
-                            try:
-                                break_start_log_ts = datetime.strptime(
-                                    m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                            except Exception as e:
-                                self._dbg(f'Break start timestamp parse failed: {e}')
-                                break_start_log_ts = None
-                    elif _is_break_over(b.lower()):
-                        state.on_break       = False
-                        state.logged_in      = True
-                        state.script_running = True
-                        break_start_log_ts   = None
-                    elif 'you have successfully been logged in' in b.lower():
-                        state.on_break      = False
-                        state.logged_in     = True
-                        state.banned        = False
-                        break_start_log_ts  = None
-                    elif 'starting p2p master ai now' in b.lower() or \
-                         'script set to running' in b.lower() or \
-                         'awaiting login' in b.lower():
-                        state.script_running = True
-                        state.logged_in      = False
-                    elif 'solvers all finished' in b.lower():
-                        state.script_running = True
-                        state.logged_in      = True
-                        state.on_break       = False
-                    elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+            from py.util import parse_break_length_ms
+            for idx, line in enumerate(scan_lines):
+                b = strip_prefix(line).strip()
+                if _is_break_start(line):
+                    state.on_break  = True
+                    state.logged_in = False
+                    break_start_log_ts = _ts_of(line)
+                    break_length_ms = parse_break_length_ms(scan_lines, idx + 1, max_search=3)
+                elif _is_break_over(b.lower()):
+                    ts = _ts_of(line)
+                    if ts and break_start_log_ts and ts > break_start_log_ts:
+                        total_break_secs += ts - break_start_log_ts
+                    state.on_break       = False
+                    state.logged_in      = True
+                    state.script_running = True
+                    break_start_log_ts   = None
+                    break_length_ms      = None
+                elif _is_login(b):
+                    state.on_break     = False
+                    state.logged_in    = True
+                    state.banned       = False
+                    break_start_log_ts = None
+                elif _is_script_loaded(b):
+                    # Profile loaded; GUI opens and waits for Start (v3.0.0).
+                    # A fresh load ends any previous run.
+                    state.script_running = False
+                    state.awaiting_start = True
+                    gui_waiting = False
+                elif _is_gui_wait(b):
+                    if state.awaiting_start:
+                        gui_waiting = True
+                        gui_wait_ts = _ts_of(line)
+                elif _is_script_start(b) or ('NEW TASK' in b.upper() and state.awaiting_start):
+                    if not state.script_running:
+                        # A new run begins — uptime and break totals restart.
+                        run_start_ts     = _ts_of(line)
+                        total_break_secs = 0.0
+                    state.script_running = True
+                    state.awaiting_start = False
+                    gui_waiting          = False
+                    if 'NEW TASK' in b.upper() and not state.on_break:
                         state.logged_in = True
-                    elif 'stopped p2p master ai' in b.lower():
-                        state.script_running  = False
-                        state.logged_in       = False
-                        state.on_break        = False
-                        state._break_start_ts = None
-                    elif is_ban_line(b):
-                        state.banned = True
+                elif 'solvers all finished' in b.lower():
+                    state.script_running = True
+                    state.logged_in      = True
+                    state.on_break       = False
+                elif 'NEW TASK' in b.upper() and state.script_running and not state.on_break:
+                    # Script is processing tasks — definitively in game
+                    state.logged_in = True
+                elif _is_logout(b) and not state.on_break:
+                    state.logged_in = False
+                elif _is_script_stop(b):
+                    state.script_running = False
+                    state.awaiting_start = False
+                    gui_waiting          = False
+                    state.logged_in      = False
+                    state.on_break       = False
+                    break_start_log_ts   = None
+                    run_start_ts         = None
+                elif is_ban_line(b):
+                    state.banned = True
 
-            # Debug: show reconstructed state
+            state.script_start_ts  = run_start_ts if state.script_running else None
+            # GUI open and waiting at monitor start → same handling as live
+            # (auto-click Start / "needs a click" alert) once startup completes.
+            self._startup_gui_waiting = getattr(self, '_startup_gui_waiting', set())
+            if state.awaiting_start and gui_waiting:
+                if gui_wait_ts and time.time() - gui_wait_ts > self._GUI_WAIT_STALE_SEC:
+                    # Hours-old GUI wait with nothing after it: the client was
+                    # closed at the GUI. Don't show it as waiting or alert.
+                    state.awaiting_start = False
+                else:
+                    self._startup_gui_waiting.add(folder)
+            state.total_break_secs = total_break_secs
+            state._break_start_ts  = None
+            if state.on_break:
+                state._break_length_ms = break_length_ms
+                if break_start_log_ts and break_start_log_ts <= time.time():
+                    state._break_start_ts = break_start_log_ts
+                else:
+                    state._break_start_ts = time.time()
+
             self._dbg(
                 f'[{folder}] reconstructed state: '
                 f'script_running={state.script_running} '
@@ -1569,97 +1171,26 @@ class LogWatcher:
                 f'script_start_ts={state.script_start_ts} '
                 f'total_break_secs={state.total_break_secs:.1f}'
             )
-
-            # If we started mid-break, find the break length for expected_end calculation
-            if state.on_break:
-                from py.util import parse_break_length_ms
-                last_break_idx = None
-                for i, line in enumerate(active_lines):
-                    if _is_break_start(line):
-                        last_break_idx = i
-                if last_break_idx is not None:
-                    break_length_ms = parse_break_length_ms(active_lines, last_break_idx + 1, max_search=3)
-                    if break_length_ms is not None:
-                        state._break_length_ms = break_length_ms  # persist for break-end scheduling
-
-            # ── Uptime + break time: scan ALL session files ───────────────────
-            # Walk oldest-first to find client start time and sum all completed breaks.
-            # Uses timestamp math (BREAK START → Break over N) — ignores logged ms value
-            # since DreamBot logs -100 for manually skipped breaks.
-            total_break_ms  = 0
-            client_start_ts = None
-            pending_break_start = None
-            for sf in session_files_oldest_first:
-                try:
-                    sf_fh = open(str(sf), 'r', encoding='utf-8', errors='replace')
-                except Exception as e:
-                    self.log(f"⚠ [{folder}] Could not read session file {sf.name}: {e}")
-                    continue
-                with sf_fh:
-                    for line in sf_fh:
-                        line = line.rstrip('\n')
-                        b    = strip_prefix(line).strip()
-                        m    = LOG_TS_RE.match(line)
-                        ts   = None
-                        if m:
-                            try:
-                                ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                            except Exception as e:
-                                self._dbg(f'Break scan timestamp parse failed: {e}')
-                        if _is_break_start(line) and ts:
-                            pending_break_start = ts
-                        elif _is_break_over(b.lower()) and ts and pending_break_start:
-                            duration_ms = (ts - pending_break_start) * 1000
-                            if duration_ms > 0:
-                                total_break_ms += duration_ms
-                            pending_break_start = None
-                        if client_start_ts is None and 'connecting to server' in b.lower() and ts:
-                            client_start_ts = ts
-
-            if client_start_ts:
-                state.script_start_ts = client_start_ts
-
-            # Completed break total — set unconditionally from session scan.
-            state.total_break_secs = total_break_ms / 1000.0
-
-            # Seed _break_start_ts from log timestamp once — do not overwrite if
-            # already set so the timer keeps accumulating across _startup_catchup calls.
-            if state.on_break and not state._break_start_ts:
-                if break_start_log_ts and break_start_log_ts <= time.time():
-                    state._break_start_ts = break_start_log_ts
-                else:
-                    # Fallback: use now — better than leaving _break_start_ts unset
-                    state._break_start_ts = time.time()
-
             state._startup_done = True
 
-            # ── Current task: use shared slice_last_task from reader.py ────────
-            # On rotation: preserve existing task — new log starts empty so searching
-            # for a task would always fail and log a misleading warning.
-            # On cold start: always search for task.
-            if not is_rotation:
-                last_task, last_activity = slice_last_task(active_lines)
-                if last_task or last_activity:
-                    state.last_task     = last_task
-                    state.last_activity = last_activity
-                    display = last_task or last_activity or '?'
-                    self.log(f"📋 [{folder}] Startup task: {display}" +
-                             (f" / {last_activity}" if last_activity and last_task else ''))
-                elif state.on_break:
-                    # Mid-break restart: slice_last_task returns empty because
-                    # the last NEW TASK block is followed by BREAK START.
-                    # Show the break with its length so the status tab is useful.
-                    from py.util import format_break_duration
-                    state.last_task = 'Break'
-                    if 'break_length_ms' in dir() and break_length_ms:
-                        state.last_activity = format_break_duration(break_length_ms)
-                    else:
-                        state.last_activity = ''
-                    self.log(f"📋 [{folder}] Startup task: Break" +
-                             (f" / {state.last_activity}" if state.last_activity else ''))
-                else:
-                    if state.script_running:
-                        self.log(f"⚠ [{folder}] No task found in active log")
+            # ── Current task (shared slice_last_task from reader.py) ──────────
+            last_task, last_activity = slice_last_task(scan_lines)
+            if last_task or last_activity:
+                state.last_task     = last_task
+                state.last_activity = last_activity
+                display = last_task or last_activity or '?'
+                self.log(f"📋 [{folder}] Startup task: {display}" +
+                         (f" / {last_activity}" if last_activity and last_task else ''))
+            elif state.on_break:
+                # Mid-break restart: the last NEW TASK block is followed by
+                # BREAK START, so slice_last_task returns empty — show the break.
+                from py.util import format_break_duration
+                state.last_task     = 'Break'
+                state.last_activity = format_break_duration(break_length_ms) if break_length_ms else ''
+                self.log(f"📋 [{folder}] Startup task: Break" +
+                         (f" / {state.last_activity}" if state.last_activity else ''))
+            elif state.script_running:
+                self.log(f"⚠ [{folder}] No task found in active log")
 
         except Exception as e:
             self.log(f"⚠ Startup scan error [{e.__class__.__name__}]: {e}")
@@ -1667,17 +1198,21 @@ class LogWatcher:
     # ── Backfill ───────────────────────────────────────────────────────────────
     @staticmethod
     def _log_file_sort_key(f):
-        """Sort key for log files — extracts unix timestamp from filename.
-        logfile-1777318301710.log.1 → 1777318301710
-        Sorts correctly regardless of rotation suffix.
-        """
-        import re as _re
-        m = _re.search(r'logfile-(\d+)', str(f))
-        return int(m.group(1)) if m else 0
+        """Stable file identity for the backfill resume checkpoint — the file
+        NAME (client.log or client_YYYY-MM-DD.N.log). Chronological ordering
+        uses _log_file_order(). A checkpoint naming client.log that no longer
+        matches after a rotation is rejected by the line-equality check and
+        falls back to the first-occurrence scan (bounded replay, never skip)."""
+        return getattr(f, 'name', None) or os.path.basename(str(f))
 
     def _backfill_history(self, folder):
         """
         Scan all log files for this account and write missing history entries.
+
+        v3.0.0 first run (no resume marker): only the active client.log is
+        backfilled. Older rotated parts of the shared Detuks log can hold other
+        accounts' lines (every client writes the same file), so importing them
+        wholesale into one account's history would be wrong.
 
         Uses a last-seen-line approach instead of byte offsets or scanned-file sets:
         - All log files sorted chronologically by unix timestamp in filename
@@ -1690,7 +1225,7 @@ class LogWatcher:
         Subsequent runs: skips to last-seen line quickly, processes only new content.
         Never fires Discord or screenshots — append_history only.
         """
-        account = os.path.basename(folder)
+        account = self._acct_for_dir(folder)
         # ── Single-flight guard ─────────────────────────────────────────────
         # Only one backfill per account per session — insurance against any
         # concurrent spawn path double-appending the same unmarked span.
@@ -1729,9 +1264,10 @@ class LogWatcher:
             except Exception as e:
                 self._dbg(f'[backfill] {account}: could not preload history keys: {e}')
 
-            # Sort all files by unix timestamp embedded in filename — correct
-            # chronological order regardless of .log/.log.1/.log.2 suffix
-            log_files = sorted(log_files, key=self._log_file_sort_key)
+            # Chronological: rotated parts by (date, N), then client.log
+            log_files = sorted(log_files, key=_log_file_order)
+            if last_seen is None:
+                log_files = [f for f in log_files if f.name == CLIENT_LOG_ACTIVE]
 
             total_entries  = 0
             skipped_existing = 0
@@ -1750,6 +1286,10 @@ class LogWatcher:
 
             bf_last_task     = ''
             bf_last_activity = ''
+            # Run state across chunks/files so backfilled history only gets a
+            # 'Script Started' for runs that really began (v3.0.0).
+            bf_running  = False
+            bf_awaiting = False
             # One InfernoTracker per account for the full backfill — state must
             # persist across chunks so gear-check windows and attempt waves that
             # span chunk boundaries are handled correctly.
@@ -1777,7 +1317,7 @@ class LogWatcher:
                 #      Valid only if its stored line still matches both the
                 #      current marker AND the line at that index (a live-loop
                 #      marker update, or any file surprise, invalidates it).
-                #   2. Fallback — FIRST-occurrence text scan. DreamBot logs
+                #   2. Fallback — FIRST-occurrence text scan. Client logs
                 #      contain thousands of exact duplicate lines, so a
                 #      later duplicate of a mid-file checkpoint line must
                 #      never be trusted: first occurrence can only resume
@@ -1836,11 +1376,23 @@ class LogWatcher:
 
                 def _process_chunk(chunk):
                     nonlocal entries_this_file, bf_last_task, bf_last_activity, \
-                             bf_recent_tail, skipped_existing
+                             bf_recent_tail, skipped_existing, bf_running, bf_awaiting
                     if not chunk:
                         return
+                    _genuine = set()
+                    for _i, _ln in enumerate(chunk):
+                        _b = strip_prefix(_ln).strip()
+                        if _is_script_stop(_b):
+                            bf_running = bf_awaiting = False
+                        elif _is_script_loaded(_b):
+                            bf_running, bf_awaiting = False, True
+                        elif _is_script_start(_b) or ('NEW TASK' in _b.upper() and bf_awaiting):
+                            if not bf_running:
+                                _genuine.add(_i)
+                            bf_running, bf_awaiting = True, False
                     try:
                         events = parse_lines(chunk, context_lines=bf_recent_tail)
+                        events = self._filter_start_events(events, _genuine, chunk)
                     except Exception as pe:
                         self.log(f'  ⚠ [{account}] Backfill parse error: {pe}')
                         return
@@ -1991,40 +1543,55 @@ class LogWatcher:
     def _check_file(self, path):
         try:
             size = os.path.getsize(path)
+            rotated_tail = []
             with self._offsets_lock:
                 offset = self._offsets.get(path, 0)
-                if size < offset:
-                    # File shrank — rotation detected. Migrate old offset to .log.1
-                    # so backfill knows where it was already processed up to.
-                    rotated_path = path + '.1'
-                    self._offsets[rotated_path] = offset
+            if size < offset:
+                # client.log shrank — the client rotated it to
+                # client_YYYY-MM-DD.N.log and started a fresh client.log.
+                # Lines written between our last poll and the rotation now sit
+                # at the end of the newest rotated part: read that tail first so
+                # they are not lost, then continue from the start of client.log.
+                prev = _newest_rotated_file(os.path.dirname(path))
+                if prev is not None:
+                    try:
+                        if prev.stat().st_size >= offset:
+                            with open(str(prev), 'r', encoding='utf-8', errors='replace') as f:
+                                f.seek(offset)
+                                rotated_tail = f.read().splitlines()
+                            with self._offsets_lock:
+                                self._offsets[str(prev)] = prev.stat().st_size
+                    except Exception as e:
+                        self._dbg(f'rotation tail read failed for {prev.name}: {e}')
+                with self._offsets_lock:
                     self._offsets[path] = 0
-                    offset = 0
-                    self.log(f"🔄 Log rotated: {os.path.basename(path)}")
-            if size <= offset:
+                offset = 0
+                self.log(f"🔄 Log rotated: {os.path.basename(path)}"
+                         + (f" (+{len(rotated_tail)} line(s) recovered from {prev.name})"
+                            if rotated_tail and prev is not None else ''))
+            new_lines = []
+            if size > offset:
+                with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    f.seek(offset)
+                    new_text = f.read()
+                    new_offset = f.tell()
+                with self._offsets_lock:
+                    self._offsets[path] = new_offset
+                new_lines = new_text.splitlines()
+            new_lines = rotated_tail + new_lines
+            if not any(l.strip() for l in new_lines):
                 return
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(offset)
-                new_text = f.read()
-                new_offset = f.tell()
-            with self._offsets_lock:
-                self._offsets[path] = new_offset
-            if not new_text.strip():
-                return
-            new_lines = new_text.splitlines()
-            folder    = os.path.basename(os.path.dirname(path)) or os.path.splitext(os.path.basename(path))[0]
-            self._process_lines(new_lines, folder)
+            account = self._acct_for_path(path)
+            self._process_lines(new_lines, account)
             # Update last-seen marker so backfill knows where to resume.
             # Only write to disk when the value actually changes — avoids I/O every 5s.
-            if new_lines:
-                try:
-                    account   = os.path.basename(os.path.dirname(path))
-                    last_line = new_lines[-1]
-                    if last_line != self._last_seen_cache.get(account):
-                        set_last_seen(account, last_line)
-                        self._last_seen_cache[account] = last_line
-                except Exception:
-                    pass
+            try:
+                last_line = new_lines[-1]
+                if last_line != self._last_seen_cache.get(account):
+                    set_last_seen(account, last_line)
+                    self._last_seen_cache[account] = last_line
+            except Exception:
+                pass
         except Exception as e:
             self.log(f"⚠ Error reading {os.path.basename(path)}: {e}")
 
@@ -2137,7 +1704,9 @@ class LogWatcher:
                         _ping(quest_payload(mention, account, value), 'quest'))
                 elif etype == 'task':
                     if 'slayer' not in (value or '').lower():
-                        self._router.post_task(account, value, activity)
+                        self._router.post_task(account, value, activity,
+                                               location=ev.get('_location', ''),
+                                               planned_min=ev.get('_planned_min'))
                 elif etype == 'slayer_task':
                     self._router.post_event(account, 'task',
                         _ping(slayer_task_payload(mention, account, value, activity), 'task'))
@@ -2236,6 +1805,179 @@ class LogWatcher:
         except Exception:
             return False  # fail safe
 
+    # ── Script GUI / Start (v3.0.0) ─────────────────────────────────────────
+    # On Detuks, --scriptArgs only selects the profile: after loading, the
+    # script opens its GUI and waits for Start. When the log shows the GUI
+    # wait, the monitor (if enabled) clicks Start itself after a short grace
+    # period (so a human click wins), verifies via "Start button pressed",
+    # retries once, then alerts the Errors channel. With auto-click off it
+    # alerts after _GUI_WAIT_ALERT_SEC instead.
+    _AUTOSTART_GRACE_SEC    = 10
+    _AUTOSTART_VERIFY_SEC   = 15
+    _AUTOSTART_MAX_ATTEMPTS = 2
+    _GUI_WAIT_ALERT_SEC     = 300
+    _GUI_WAIT_STALE_SEC     = 6 * 3600
+
+    @staticmethod
+    def _filter_start_events(events, genuine_starts, lines):
+        """Keep only 'Script Started' events that really began a run (a
+        Start pressed while already running — GUI reopened mid-run — is
+        dropped), and synthesize one for a run that began via NEW TASK
+        without a Start line (auto-start)."""
+        out = [e for e in events
+               if not (e.get('type') == 'script_event' and e.get('value') == 'start'
+                       and e.get('_line_idx') not in genuine_starts)]
+        have = {e.get('_line_idx') for e in out
+                if e.get('type') == 'script_event' and e.get('value') == 'start'}
+        for idx in sorted(set(genuine_starts) - have):
+            m = LOG_TS_RE.match(lines[idx]) if 0 <= idx < len(lines) else None
+            out.append({'type': 'script_event', 'value': 'start', 'activity': '▶️ Script Started',
+                        'ts': m.group(1) if m else now_str(), '_line_idx': idx})
+        out.sort(key=lambda e: (e.get('ts', ''), e.get('_line_idx', 0)))
+        return out
+
+    def _cancel_autostart(self, state):
+        t = getattr(state, '_autostart_timer', None)
+        if t is not None:
+            t.cancel()
+            state._autostart_timer = None
+
+    def _schedule_autostart(self, folder, state, delay=None):
+        self._cancel_autostart(state)
+        if self.cfg.get('auto_click_start', True):
+            d  = self._AUTOSTART_GRACE_SEC if delay is None else delay
+            fn = lambda: self._autostart_step(folder, state)
+        else:
+            d  = self._GUI_WAIT_ALERT_SEC
+            fn = lambda: self._gui_wait_alert(folder, state, 'auto-click Start is off')
+        t = threading.Timer(d, fn)
+        t.daemon = True
+        state._autostart_timer = t
+        t.start()
+
+    def _autostart_step(self, folder, state):
+        state._autostart_timer = None
+        if not self._running or not state.awaiting_start:
+            return
+        if state._autostart_attempts >= self._AUTOSTART_MAX_ATTEMPTS:
+            why = getattr(state, '_autostart_reason', '')
+            if why == 'no BotClient window found':
+                # The client is gone (closed at the GUI) — nothing to click.
+                state.awaiting_start = False
+                self.log(f"⚪ [{folder}] Script GUI was waiting but no client window is open — "
+                         f"assuming the client was closed")
+                return
+            self._gui_wait_alert(folder, state, why
+                                 or 'Start was clicked but the script did not start')
+            return
+        state._autostart_attempts += 1
+        try:
+            from py.paint import click_script_start
+            ok, why = click_script_start(folder, log=self._dbg, window_lock=self._window_lock)
+        except Exception as e:
+            ok, why = False, f'auto-click error: {e}'
+        state._autostart_reason = '' if ok else why
+        if ok:
+            self.log(f"🖱️ [{folder}] Clicked Start on the P2P Master AI GUI "
+                     f"(attempt {state._autostart_attempts}/{self._AUTOSTART_MAX_ATTEMPTS})")
+        else:
+            self.log(f"⚠ [{folder}] Auto-click Start failed: {why}")
+        # Next step verifies (start line cancels this timer) / retries / alerts.
+        self._schedule_autostart(folder, state, delay=self._AUTOSTART_VERIFY_SEC)
+
+    def _gui_wait_alert(self, folder, state, reason):
+        state._autostart_timer = None
+        if state._gui_alerted or not state.awaiting_start or not self._running:
+            return
+        state._gui_alerted = True
+        detail = f'P2P Master AI is waiting at its GUI — click Start. ({reason})'
+        self.log(f"❌ [{folder}] Waiting for Start — needs a click: {reason}")
+        if self.cfg.get('monitor_errors', True):
+            try:
+                self.handle_event({'type': 'error', 'value': '⏸ Waiting for Start — needs a click',
+                                   'activity': detail, 'ts': now_str(),
+                                   '_detail': detail, '_task_ctx': ''},
+                                  folder, source='live')
+            except Exception as e:
+                self._dbg(f'[{folder}] waiting-for-start alert failed: {e}')
+
+    # Severe-lag alert window. LAG DETECTED is the script's own tick-gap
+    # measurement: the median is ~1s; spikes right after a client start /
+    # login / break are normal loading (40s+), and gaps of minutes/hours are
+    # time spent logged out — not lag. Only a 10s–5min freeze while logged
+    # in, running, and past a 3-minute warm-up is reported, at most once per
+    # 30 minutes.
+    _LAG_ALERT_MIN_MS = 10_000
+    _LAG_ALERT_MAX_MS = 300_000
+    _LAG_DEDUPE_SEC   = 1800
+
+    def _process_info_lines(self, lines, folder, state):
+        """Severe lag alerts, count milestones and the GE coins line."""
+        from py.reader import strip_color
+        for line in lines:
+            b = strip_prefix(line).strip()
+
+            m = LAG_RE.match(b)
+            if m:
+                ms = int(m.group(1))
+                if (self._LAG_ALERT_MIN_MS <= ms <= self._LAG_ALERT_MAX_MS
+                        and state.script_running and state.logged_in
+                        and not state.on_break
+                        and time.time() >= state._lag_quiet_until
+                        and self.cfg.get('monitor_errors', True)
+                        and state.should_alert('severe_lag', 1, 0, self._LAG_DEDUPE_SEC)):
+                    secs   = ms / 1000.0
+                    detail = f'Client froze for {secs:.0f}s (LAG DETECTED {ms}ms)'
+                    last_t = state.last_task or ''
+                    last_a = state.last_activity or ''
+                    if last_t.lower() == 'break':
+                        last_t = last_a = ''
+                    task_ctx = f"{last_t} — {last_a}" if last_a else last_t
+                    tsm = LOG_TS_RE.match(line)
+                    self.log(f"❌ [{folder}] Severe lag spike: {secs:.0f}s")
+                    self.handle_event({'type': 'error', 'value': 'Severe lag spike',
+                                       'activity': detail, 'ts': tsm.group(1) if tsm else now_str(),
+                                       '_detail': detail, '_task_ctx': task_ctx},
+                                      folder, source='live')
+                continue
+
+            m = COUNT_RE.match(strip_color(b))
+            if m:
+                name = m.group(1).strip()
+                try:
+                    n = int(m.group(2).replace(',', ''))
+                except ValueError:
+                    continue
+                key = name.lower()
+                if ('tzkal' in key or not n or n % COUNT_MILESTONE_EVERY
+                        or state.count_milestones.get(key) == n):
+                    continue
+                state.count_milestones[key] = n
+                if not self.cfg.get('monitor_levelups', True):
+                    continue
+                self.log(f"🎉 [{folder}] 🏅 {name[:1].upper() + name[1:]} count: {n:,}")
+                try:
+                    from py.discord import count_milestone_payload, apply_ping
+                    url = self._router.resolve_url(folder, 'levelup')
+                    if url:
+                        mention = self._router.mention()
+                        payload = apply_ping(count_milestone_payload(mention, folder, name, n),
+                                             mention, self.cfg.get('ping_levelup', False))
+                        self._router.post_event(folder, 'levelup', payload, url=url)
+                except Exception as e:
+                    self._dbg(f'[{folder}] count milestone post failed: {e}')
+                continue
+
+            m = COINS_RE.match(b)
+            if m:
+                try:
+                    gp = int(m.group(1).replace(',', ''))
+                except ValueError:
+                    continue
+                if gp != state.last_gp:
+                    state.last_gp = gp
+                    self.log(f"🪙 [{folder}] Coins available (GE check): {gp:,}")
+
     def _maybe_schedule_auto_restart(self, folder: str, lines: list,
                                      state: 'AccountState') -> tuple:
         """
@@ -2278,6 +2020,12 @@ class LogWatcher:
             pass
 
         # ── Gate 3: manual-stop signature ─────────────────────────────────────
+        # DreamBot-era signature. v3.0.0: Detuks logs show NO verifiable
+        # manual-stop marker (a manual stop logs only "Finished onExit"; the
+        # client's 'Stopping external plugin' line also appears on script
+        # self-updates), so this gate cannot fire on Detuks today — a manual
+        # stop may be auto-restarted when auto restart is enabled (still bound
+        # by the update-window gate). See v3.0.0 CHANGELOG "Known gaps".
         sig = 'user initiated script stop via control bar.'
         recent_snapshot = list(state._recent_lines)
         all_recent = list(lines) + recent_snapshot
@@ -2428,6 +2176,7 @@ class LogWatcher:
         _prior_context = list(state._recent_lines)
 
         # Update login/break state from this batch
+        genuine_starts = set()   # line idx of starts that really began a run (v3.0.0)
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
             state._recent_lines.append(line)          # rolling buffer for manual-stop detection
@@ -2456,6 +2205,7 @@ class LogWatcher:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts  = None
                 state._break_length_ms = None   # break consumed; clear for next cycle
+                state._lag_quiet_until = time.time() + 180
             elif is_ban_line(b):
                 if not state.banned:
                     state.banned = True
@@ -2473,32 +2223,52 @@ class LogWatcher:
                                                 ban_payload(self._router.mention(), folder))
                     except Exception as _be:
                         self.log(f'⚠ [{folder}] Ban ping failed: {_be}')
-            elif 'interacting (widget) logout' in b.lower():
+            elif _is_logout(b) and not state.on_break:
                 state.logged_in = False
                 # Do NOT set _break_start_ts here — logout is not a break
-            elif 'you have successfully been logged in' in b.lower():
+            elif _is_login(b):
                 state.logged_in = True
                 state.on_break  = False
                 state.banned    = False  # successful login clears ban (2-day temps, v2.2.0)
+                state._lag_quiet_until = time.time() + 180
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts = None
-            elif 'starting p2p master ai now' in b.lower():
-                state.script_running = True
-                state.logged_in      = False
-                # Only set script_start_ts if not already set from DreamBot client start
-                # (Connecting to server in _startup_catchup). This preserves session uptime
-                # across script restarts — uptime tracks DreamBot session, not script runs.
-                if not state.script_start_ts:
+            elif _is_script_loaded(b):
+                # Profile loaded — the script's GUI opens and waits for Start.
+                # Not a start (v3.0.0): status → Waiting for Start. A fresh
+                # load always means any previous run is over (a client that
+                # crashed leaves no "Finished onExit" line).
+                state.script_running = False
+                state.awaiting_start = True
+                state._gui_wait_since = None
+                state._gui_alerted = False
+                state._autostart_attempts = 0
+                self._cancel_autostart(state)
+            elif _is_gui_wait(b):
+                if state.awaiting_start and state._gui_wait_since is None:
+                    state._gui_wait_since = time.time()
+                    self._schedule_autostart(folder, state)
+            elif _is_script_start(b) or ('NEW TASK' in b.upper() and state.awaiting_start):
+                if not state.script_running:
+                    # A new script run begins (v3.0.0: uptime = current run —
+                    # the shared client.log has no per-client session start).
+                    genuine_starts.add(idx)
+                    state.total_break_secs = 0.0
                     m = LOG_TS_RE.match(line)
-                    if m:
-                        try:
-                            state.script_start_ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S').timestamp()
-                        except Exception as e:
-                            self._dbg(f'script_start_ts parse failed: {e}')
-            elif 'script set to running' in b.lower() or 'awaiting login' in b.lower():
+                    try:
+                        state.script_start_ts = (datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
+                                                 .timestamp() if m else time.time())
+                    except Exception as e:
+                        state.script_start_ts = time.time()
+                        self._dbg(f'script_start_ts parse failed: {e}')
+                    state._lag_quiet_until = time.time() + 180
                 state.script_running = True
-                state.logged_in      = False
+                state.awaiting_start = False
+                state._gui_wait_since = None
+                self._cancel_autostart(state)
+                if 'NEW TASK' in b.upper() and not state.on_break:
+                    state.logged_in = True
             elif 'solvers all finished' in b.lower():
                 state.script_running = True
                 state.logged_in      = True
@@ -2507,7 +2277,7 @@ class LogWatcher:
                 # Script is processing tasks — definitively in game
                 # Don't touch on_break — break state takes priority
                 state.logged_in = True
-            elif 'stopped p2p master ai' in b.lower():
+            elif _is_script_stop(b):
                 # Capture break context before clearing — used by _compute_restart_delay
                 # if 'Respect breaks on relaunch' is enabled.
                 state._pre_stop_break_snap = {
@@ -2516,6 +2286,9 @@ class LogWatcher:
                     'break_length_ms': state._break_length_ms,
                 }
                 state.script_running  = False
+                state.awaiting_start  = False
+                state._gui_wait_since = None
+                self._cancel_autostart(state)
                 state.logged_in       = False
                 state.on_break        = False
                 state._break_start_ts = None
@@ -2523,6 +2296,7 @@ class LogWatcher:
 
         # Parse all events through the unified reader pipeline.
         parsed = parse_lines(lines, context_lines=_prior_context)
+        parsed = self._filter_start_events(parsed, genuine_starts, lines)
 
         # Snapshot the task/activity context as it stood *before* this batch —
         # used by reset attribution below so a reset line is matched against the
@@ -2547,7 +2321,12 @@ class LogWatcher:
                 state.last_task     = value
                 state.last_activity = activity
                 display = value or activity or '?'
-                self.log(f"📋 [{folder}] {display}" + (f" / {activity}" if activity and value else ""))
+                extra = ''
+                if ev.get('_location'):
+                    extra += f" @ {ev['_location']}"
+                if ev.get('_planned_min'):
+                    extra += f" (~{ev['_planned_min']}m)"
+                self.log(f"📋 [{folder}] {display}" + (f" / {activity}" if activity and value else "") + extra)
 
             elif etype == 'slayer_task':
                 state.last_task     = 'Slayer'
@@ -2810,6 +2589,9 @@ class LogWatcher:
                     '_detail': _reset_trigger[1], '_task_ctx': task_ctx,
                 }
                 self.handle_event(reset_ev, folder, source='live')
+
+        # ── Detuks informational lines (v3.0.0, live only — never backfilled) ──
+        self._process_info_lines(lines, folder, state)
 
         # ── Inferno tracker ────────────────────────────────────────────────────
         # Feed every live line batch through the stateful Inferno tracker.
@@ -3114,7 +2896,7 @@ class LogWatcher:
 
     # ── Bot screenshot helpers (called by GatewayRunner via callbacks) ──────────
     def _bot_screenshot_to_channel(self, account, channel_id, token):
-        # Capture the currently focused window NOW (before DreamBot steals focus)
+        # Capture the currently focused window NOW (before the client steals focus)
         # so the worker can restore it after the screenshot completes.
         restore_wid = get_focused_wid()
         self._enqueue_screenshot(SS_PRIORITY_ONDEMAND, account, 'bot-ss',
@@ -3124,7 +2906,7 @@ class LogWatcher:
 
     def _bot_force_panel(self, account, action, channel_id, token):
         """
-        Open a Stats/Loot panel, take a full-window screenshot using the
+        Open a Stats/Logs panel, take a full-window screenshot using the
         already-focused window (inside the lock), post to the account's monitor
         thread, then close the panel.
         Runs in a daemon thread (called by GatewayRunner).

@@ -6,11 +6,12 @@ explicit visual reference (column-header row with icons, sage avatar
 circles, muted dark buttons with colored icon+text, solid-green Add
 Account / Launch Selected, plain inline helper text).
 
-Preserves exactly:
-- Config keys: launcher_jar, launcher_presets — same shape, same fields
-  per preset (account/script/proxy/mem/covert/nofresh/fresh/
-  menu_manipulation/no_click_walk/world/custom/params). _PresetDialog's
-  _get_preset()/_build() field set is untouched.
+v3.0.0 (Detuks client): config keys launcher_path + launcher_presets.
+Preset fields: account (--jl-account, case-sensitive), script (--script),
+script_profile (--scriptArgs), software_rendering (--software-rendering),
+rl_properties (--rl-properties), custom (extra client args after `--`).
+v2.x DreamBot presets are migrated on load — see
+py.launcher.migrate_launcher_config().
 - The click-to-select + "Launch Selected" mechanism — kept exactly as
   before, just reimplemented over Frame rows instead of a Treeview
   (clicking a row's account area toggles selection with a visible
@@ -39,14 +40,16 @@ a just-clicked single Launch) can never spawn two operations for the same
 account at once.
 """
 import os
-import shlex
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 from py.config   import save_config
 from py.launcher import (launch_account, relaunch_account, build_command, list_presets,
-                          discover_account_process)
+                          discover_account_process, format_command,
+                          validate_launcher_path, DEFAULT_SCRIPT, DEFAULT_SCRIPT_PROFILE)
+
+_IS_WINDOWS = os.name == 'nt'
 
 # Minimum genuine overflow (in px) before a scroll container shows its
 # scrollbar — without this, even a few pixels of rounding/measurement
@@ -74,22 +77,23 @@ class LauncherTab:
         root = tk.Frame(self.frame, bg=app.BG2, padx=16, pady=16)
         root.pack(fill='both', expand=True)
 
-        # ── Launcher .jar Path ──────────────────────────────────────────────
-        tk.Label(root, text="Launcher .jar Path", font=app.SANSB, bg=app.BG2, fg=app.FG
-                 ).pack(anchor='w')
-        jar_row = tk.Frame(root, bg=app.BG2)
-        jar_row.pack(fill='x', pady=(8, 16))
-        self._jar_var = tk.StringVar(value=app.cfg.get('launcher_jar', ''))
-        jar_entry = tk.Entry(jar_row, textvariable=self._jar_var, font=app.SANS,
+        # ── Detuks launcher path ────────────────────────────────────────────
+        tk.Label(root, text=("Detuks Launcher (launcher.exe)" if _IS_WINDOWS
+                             else "Detuks Client AppImage"),
+                 font=app.SANSB, bg=app.BG2, fg=app.FG).pack(anchor='w')
+        path_row = tk.Frame(root, bg=app.BG2)
+        path_row.pack(fill='x', pady=(8, 16))
+        self._path_var = tk.StringVar(value=app.cfg.get('launcher_path', ''))
+        path_entry = tk.Entry(path_row, textvariable=self._path_var, font=app.SANS,
                               bg=app.BG3, fg=app.FG, insertbackground=app.ACC, relief='flat')
-        jar_entry.pack(side='left', fill='x', expand=True, ipady=7, padx=(0, 8))
-        self._jar_var.trace_add('write', lambda *_: self._save_jar())
+        path_entry.pack(side='left', fill='x', expand=True, ipady=7, padx=(0, 8))
+        self._path_var.trace_add('write', lambda *_: self._save_path())
 
-        tk.Button(jar_row, text='📁  Browse', font=app.SANSB, bg=app.BG4, fg=app.FG,
+        tk.Button(path_row, text='📁  Browse', font=app.SANSB, bg=app.BG4, fg=app.FG,
                   relief='flat', padx=14, pady=8, cursor='hand2',
-                  command=self._browse_jar).pack(side='left', padx=(0, 8))
+                  command=self._browse_path).pack(side='left', padx=(0, 8))
 
-        tk.Button(jar_row, text='+  Add Account', font=app.SANSB, bg=app.GREEN, fg=app.BG,
+        tk.Button(path_row, text='+  Add Account', font=app.SANSB, bg=app.GREEN, fg=app.BG,
                   relief='flat', padx=14, pady=8, cursor='hand2',
                   command=self._open_add_dialog).pack(side='left')
 
@@ -160,8 +164,9 @@ class LauncherTab:
         info_row = tk.Frame(root, bg=app.BG2)
         info_row.pack(fill='x', pady=(8, 0))
         info_text = (
-            "ⓘ  Ensure your account is pre-saved in DreamBot's Account Manager with the exact nickname "
-            "used above, and your proxy is pre-saved in DreamBot's Proxy Manager with the exact nickname used above."
+            "ⓘ  Each account must be saved in the Detuks Client launcher. The account name is its "
+            "display name there and is CASE-SENSITIVE (e.g. MyAccount ≠ myaccount). Works best "
+            "monitoring one account at a time — the client writes all accounts to one shared log."
         )
         info_lbl = tk.Label(info_row, text=info_text, font=app.SANSS, bg=app.BG2, fg=app.FG2,
                              justify='left', anchor='w')
@@ -184,17 +189,25 @@ class LauncherTab:
             tk.Label(btns, text=text, font=app.SANSS, bg=app.BG4, fg=app.FG2,
                      width=self.ROW_BTN_WIDTH, anchor='center').pack(side='left')
 
-    def _save_jar(self):
-        self.app.cfg['launcher_jar'] = self._jar_var.get().strip()
+    def _save_path(self):
+        self.app.cfg['launcher_path'] = self._path_var.get().strip()
         save_config(self.app.cfg)
 
-    def _browse_jar(self):
-        path = filedialog.askopenfilename(
-            title='Select Launcher.jar',
-            filetypes=[('JAR files', '*.jar'), ('All files', '*.*')]
-        )
+    def _browse_path(self):
+        if _IS_WINDOWS:
+            title, types = 'Select Detuks launcher.exe', [('Launcher', '*.exe'), ('All files', '*.*')]
+        else:
+            title, types = 'Select Detuks Client AppImage', [('AppImage', '*.AppImage'), ('All files', '*')]
+        initial = None
+        if _IS_WINDOWS:
+            # Default Detuks install folder on Windows.
+            d = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'BotClient')
+            if os.path.isdir(d):
+                initial = d
+        path = filedialog.askopenfilename(title=title, filetypes=types,
+                                          **({'initialdir': initial} if initial else {}))
         if path:
-            self._jar_var.set(os.path.normpath(path))
+            self._path_var.set(os.path.normpath(path))
 
     # ── Rows ─────────────────────────────────────────────────────────────────────
     def _refresh_rows(self):
@@ -344,26 +357,20 @@ class LauncherTab:
             w['launch_btn'].configure(state='disabled' if flag else 'normal',
                                        text='⏳  ...' if flag else '▶  Launch')
 
-    def _validate_jar_path(self, show_error=True):
-        """Single source of truth for jar-path validation. Returns the jar
-        path string if valid, or None. Shows at most one error dialog
+    def _validate_launcher_path(self, show_error=True):
+        """Single source of truth for launcher-path validation (delegates to
+        py.launcher.validate_launcher_path — exists, and executable on
+        Linux). Returns the path or None. Shows at most one error dialog
         (when show_error=True) — callers that need to validate once for a
         whole batch (Launch Selected) call this themselves before looping,
         then pass the already-confirmed path through so the per-account
         path (_launch_one) never re-validates or re-errors."""
-        jar = self._jar_var.get().strip()
-        if not jar:
-            if show_error:
-                messagebox.showerror('Launcher', 'Please set the path to Launcher.jar first.')
-            return None
-        if not os.path.isfile(jar):
-            if show_error:
-                messagebox.showerror('Launcher',
-                    f'Launcher.jar not found at:\n{jar}\n\nPlease check the path in Settings.')
-            return None
-        return jar
+        path, why = validate_launcher_path({'launcher_path': self._path_var.get()})
+        if not path and show_error:
+            messagebox.showerror('Launcher', why)
+        return path
 
-    def _run_launch_op(self, account, op_fn, jar=None):
+    def _run_launch_op(self, account, op_fn, launcher=None):
         """Shared in-flight-guard + background-thread plumbing for both a
         normal launch (op_fn=launch_account — refuses if already running,
         same as before) and an explicit user-confirmed relaunch
@@ -373,9 +380,9 @@ class LauncherTab:
         if account in self._in_flight:
             return  # in-flight guard — ignore repeated clicks
 
-        if jar is None:
-            jar = self._validate_jar_path()
-            if jar is None:
+        if launcher is None:
+            launcher = self._validate_launcher_path()
+            if launcher is None:
                 return
 
         self._set_in_flight(account, True)
@@ -395,13 +402,13 @@ class LauncherTab:
             app.after(0, _show)
         threading.Thread(target=_run, daemon=True).start()
 
-    def _launch_one(self, account, _jar_prevalidated=None):
-        self._run_launch_op(account, launch_account, jar=_jar_prevalidated)
+    def _launch_one(self, account, _path_prevalidated=None):
+        self._run_launch_op(account, launch_account, launcher=_path_prevalidated)
 
     def _relaunch_one(self, account):
         """Only ever called from the explicit Relaunch button below — never
         triggered automatically by a plain Launch click."""
-        self._run_launch_op(account, relaunch_account, jar=None)
+        self._run_launch_op(account, relaunch_account, launcher=None)
 
     def _show_already_running_dialog(self, account, message):
         """Replaces a plain OK-only error for the specific 'already
@@ -448,14 +455,14 @@ class LauncherTab:
         if not self._selected:
             messagebox.showinfo('Launcher', 'Select one or more accounts to launch.')
             return
-        # Validate the jar path exactly once for the whole batch — fixes
+        # Validate the launcher path exactly once for the whole batch — fixes
         # the repeated-error-dialog issue when multiple accounts are
-        # selected and the jar path is missing/invalid.
-        jar = self._validate_jar_path()
-        if jar is None:
+        # selected and the path is missing/invalid.
+        launcher = self._validate_launcher_path()
+        if launcher is None:
             return
         for account in list(self._selected):
-            self._launch_one(account, _jar_prevalidated=jar)
+            self._launch_one(account, _path_prevalidated=launcher)
 
     # ── Edit / Delete / Add ──────────────────────────────────────────────────────
     def _find_preset_index(self, account):
@@ -523,10 +530,9 @@ class LauncherTab:
 
 
 class _PresetDialog:
-    """Popup dialog for adding or editing a launch preset. Restyled to the
-    warm dark palette/sans-serif fonts; the field set, _get_preset()'s
-    data shape, and _save()'s validation are byte-for-byte the same as
-    before — only colors/fonts changed."""
+    """Popup dialog for adding or editing a launch preset (Detuks fields,
+    v3.0.0). Live command preview shows the exact, correctly quoted command
+    for this platform."""
 
     def __init__(self, app, existing=None):
         self.app    = app
@@ -571,30 +577,13 @@ class _PresetDialog:
         tk.Label(w, text='Basic', font=app.SANSB, bg=app.BG2,
                  fg=app.ACC).pack(fill='x', padx=14, pady=(14, 2))
 
-        row('Account (-account)',    entry, 'account')
-        row('Script (-script)',      entry, 'script',  'P2P Master AI')
-        row('Proxy (-proxy)',        entry, 'proxy')
-
-        # Memory checkbox + number
-        mem_frame = tk.Frame(w, bg=app.BG2)
-        mem_frame.pack(fill='x', **PAD)
-        tk.Label(mem_frame, text='Memory -Xmx (MB)', font=app.SANS,
-                 bg=app.BG2, fg=app.FG, width=22, anchor='w').pack(side='left')
-        mem_en_var = tk.StringVar(value='1' if p.get('mem') else '')
-        self._vars['mem_enabled'] = mem_en_var
-        tk.Checkbutton(mem_frame, variable=mem_en_var, bg=app.BG2, fg=app.FG,
-                       selectcolor=app.BG3, activebackground=app.BG2,
-                       onvalue='1', offvalue='',
-                       command=self._update_preview).pack(side='left')
-        mem_var = tk.StringVar(value=p.get('mem', '1024'))
-        self._vars['mem'] = mem_var
-        tk.Entry(mem_frame, textvariable=mem_var, font=app.SANS,
-                 bg=app.BG3, fg=app.FG, insertbackground=app.ACC, relief='flat',
-                 width=8).pack(side='left', padx=4, ipady=3)
-        tk.Label(mem_frame, text='(placed before -jar)',
-                 font=app.SANSS, bg=app.BG2, fg=app.FG2).pack(side='left')
-        mem_var.trace_add('write', lambda *_: self._update_preview())
-        mem_en_var.trace_add('write', lambda *_: self._update_preview())
+        row('Account (--jl-account)', entry, 'account')
+        tk.Label(w, text='Exact display name saved in the Detuks launcher — case-sensitive. '
+                         'Spaces are fine (passed as one argument).',
+                 font=app.SANSS, bg=app.BG2, fg=app.FG2, anchor='w', justify='left',
+                 wraplength=520).pack(fill='x', padx=14)
+        row('Script (--script)',          entry, 'script',         DEFAULT_SCRIPT)
+        row('Script profile (--scriptArgs)', entry, 'script_profile', DEFAULT_SCRIPT_PROFILE)
 
         # Checkboxes
         def bool_row(label, key):
@@ -610,18 +599,29 @@ class _PresetDialog:
                            command=self._update_preview).pack(side='left')
             var.trace_add('write', lambda *_: self._update_preview())
 
-        bool_row('-covert',           'covert')
-        bool_row('-nofresh',          'nofresh')
-
         tk.Label(w, text='All Options', font=app.SANSB, bg=app.BG2,
                  fg=app.ACC).pack(fill='x', padx=14, pady=(10, 2))
 
-        bool_row('-fresh',            'fresh')
-        bool_row('-menuManipulation', 'menu_manipulation')
-        bool_row('-noClickWalk',      'no_click_walk')
-        row('World (-world)',         entry, 'world')
-        row('Custom args',            entry, 'custom')
-        row('Params (-params, last)', entry, 'params')
+        bool_row('--software-rendering', 'software_rendering')
+
+        rl_var = row('Settings file (--rl-properties)', entry, 'rl_properties')
+        rl_btn_row = tk.Frame(w, bg=app.BG2)
+        rl_btn_row.pack(fill='x', padx=14)
+        tk.Label(rl_btn_row, text='', width=22, bg=app.BG2).pack(side='left')
+
+        def _browse_rl():
+            path = filedialog.askopenfilename(
+                title='Select settings.properties',
+                filetypes=[('Properties', '*.properties'), ('All files', '*.*')])
+            if path:
+                rl_var.set(os.path.normpath(path))
+        tk.Button(rl_btn_row, text='📁  Browse', font=app.SANSS, bg=app.BG4, fg=app.FG,
+                  relief='flat', padx=8, pady=2, cursor='hand2',
+                  command=_browse_rl).pack(side='left')
+        tk.Label(rl_btn_row, text='  optional — default is the client\'s own settings.properties',
+                 font=app.SANSS, bg=app.BG2, fg=app.FG2).pack(side='left')
+
+        row('Custom client args',     entry, 'custom')
 
         # ── Command preview ───────────────────────────────────────────────────
         tk.Label(w, text='Command Preview', font=app.SANSB, bg=app.BG2,
@@ -653,25 +653,31 @@ class _PresetDialog:
         p = {}
         for key, var in self._vars.items():
             p[key] = var.get()
-        # Resolve mem: only set if enabled
-        if not p.get('mem_enabled'):
-            p['mem'] = ''
-        del p['mem_enabled']
-        # Convert bools
-        for bkey in ('covert', 'nofresh', 'fresh', 'menu_manipulation', 'no_click_walk'):
-            p[bkey] = bool(p.get(bkey))
+        # Strip only surrounding whitespace — never case (--jl-account is
+        # case-sensitive) and never inner spaces (names may contain spaces).
+        for skey in ('account', 'script', 'script_profile', 'rl_properties', 'custom'):
+            p[skey] = (p.get(skey) or '').strip()
+        p['software_rendering'] = bool(p.get('software_rendering'))
         return p
 
     def _update_preview(self):
-        p   = self._get_preset()
-        jar = self.app.cfg.get('launcher_jar', '/path/to/Launcher.jar').strip() or '/path/to/Launcher.jar'
-        cmd = build_command(jar, p)
-        self._preview.configure(text=' '.join(shlex.quote(c) for c in cmd))
+        if not hasattr(self, '_preview'):
+            return  # fields still being built
+        p    = self._get_preset()
+        dflt = r'%LOCALAPPDATA%\BotClient\launcher.exe' if _IS_WINDOWS else '/path/to/DetuksClient.AppImage'
+        path = self.app.cfg.get('launcher_path', '').strip() or dflt
+        self._preview.configure(text=format_command(build_command(path, p)))
 
     def _save(self):
         p = self._get_preset()
-        if not p.get('account', '').strip():
+        if not p['account']:
             messagebox.showwarning('Launcher', 'Account name is required.')
+            return
+        if p['account'][:1] in '\'"' or p['account'][-1:] in '\'"':
+            messagebox.showwarning(
+                'Launcher',
+                'Enter the account name without quotes — names with spaces are '
+                'already passed as a single argument.')
             return
         self.result = p
         self.window.destroy()

@@ -116,10 +116,24 @@ def drop_payload(mention, folder, drop_types, item):
     return _embed(f"{icons} {titles}", _desc(mention, folder),
                   [{"name": "Item", "value": item, "inline": False}], color)
 
-def task_payload(mention, folder, task, activity):
-    return _embed("📋 Task Update", _desc(mention, folder),
-                  [{"name": "Task",     "value": task     or "—", "inline": True},
-                   {"name": "Activity", "value": activity or "—", "inline": True}], 0x00d4ff)
+def task_payload(mention, folder, task, activity, location='', planned_min=None):
+    fields = [{"name": "Task",     "value": task     or "—", "inline": True},
+              {"name": "Activity", "value": activity or "—", "inline": True}]
+    # v3.0.0: from the script's "Selected T / A / Location for about N minutes"
+    if location:
+        fields.append({"name": "Location", "value": location, "inline": True})
+    if planned_min:
+        h, m = divmod(int(planned_min), 60)
+        fields.append({"name": "Planned", "value": f"~{h}h {m:02d}m" if h else f"~{m}m",
+                       "inline": True})
+    return _embed("📋 Task Update", _desc(mention, folder), fields, 0x00d4ff)
+
+def count_milestone_payload(mention, folder, name, count):
+    """v3.0.0: '[GAME] Your <name> count is: N' reached a round milestone."""
+    return _embed("🏅 Count Milestone", _desc(mention, folder),
+                  [{"name": "Count",  "value": name[:1].upper() + name[1:], "inline": True},
+                   {"name": "Total",  "value": f"{int(count):,}",         "inline": True}],
+                  0xffd700)
 
 def chat_payload(mention, folder, chat, response):
     return _embed("💬 Chat Event", _desc(mention, folder),
@@ -821,7 +835,8 @@ class DiscordRouter:
                 self._cb['log'](f"  🚫 Discord failed: {err}")
 
     def post_task(self, account, task_name, activity,
-                  title_override=None, footer_override=None):
+                  title_override=None, footer_override=None,
+                  location='', planned_min=None):
         """Build and post a task embed via post_event (screenshot handled there)."""
         if self._cb['is_muted'](account):
             return
@@ -830,7 +845,8 @@ class DiscordRouter:
             url, _ = self.wh_with_thread('default', account)
         if not url:
             return
-        payload = task_payload(self.mention(), account, task_name, activity)
+        payload = task_payload(self.mention(), account, task_name, activity,
+                               location=location, planned_min=planned_min)
         if title_override:
             payload['embeds'][0]['title'] = title_override
         if footer_override:
@@ -1008,7 +1024,7 @@ class GatewayRunner:
     # /force keeps only the non-skill actions; individual skill forcing moved
     # to /train so every option is visible as a fixed choice (Discord caps
     # fixed choices at 25 per option).
-    FORCE_ACTIONS = ['Stats', 'Loot', '-10m', '+10m', 'Skip', 'Quest']
+    FORCE_ACTIONS = ['Stats', 'Logs', '-10m', '+10m', 'Skip', 'Pause', 'Quest']
 
     # Exactly the 23 trainable skills the old /force skill set supported —
     # same strings the script expects; no functionality added or removed.
@@ -1093,13 +1109,13 @@ class GatewayRunner:
         },
         {
             'name':        'launch',
-            'description': 'Launch a DreamBot account by preset (skips if already running)',
+            'description': 'Launch an account by Launcher preset (skips if already running)',
             'options': [{'name': 'account', 'description': 'Account name, or "all"',
                          'type': 3, 'required': True, 'autocomplete': True}],
         },
         {
             'name':        'relaunch',
-            'description': 'Restart a DreamBot account — closes if open, launches fresh',
+            'description': 'Restart an account — closes its client if open, launches fresh',
             'options': [{'name': 'account', 'description': 'Account name, or "all"',
                          'type': 3, 'required': True, 'autocomplete': True}],
         },
@@ -1297,7 +1313,7 @@ class GatewayRunner:
                             f"⏱ Clicking {action} × {amount} for {matched}",
                             ephemeral=True)
 
-                    elif action in ('Stats', 'Loot'):
+                    elif action in ('Stats', 'Logs'):
                         # Panel toggle — open, screenshot, post to monitor thread, close
                         tid = cfg.get('bot_thread_ids', {}).get(matched, {}).get('monitor')
                         dest = tid if tid else str(interaction.channel_id)
@@ -1310,13 +1326,13 @@ class GatewayRunner:
                             ephemeral=True)
 
                     else:
-                        # Skip / Quest — single click, no response needed
+                        # Skip / Pause / Quest — single click, no response needed
                         threading.Thread(
                             target=cb['on_force_skill'],
                             args=(matched, action), daemon=True).start()
-                        await interaction.followup.send(
-                            f"🎯 Forcing {action} for {matched}",
-                            ephemeral=True)
+                        msg = (f"⏯ Toggling Pause for {matched} — run it again to resume"
+                               if action == 'Pause' else f"🎯 Forcing {action} for {matched}")
+                        await interaction.followup.send(msg, ephemeral=True)
 
                 elif cmd == 'train':
                     # Same behavior the old /force skill choices had — moved to

@@ -40,7 +40,8 @@
   "gear_check_reset_patterns": [
     "Resetting via Startup",
     "NEW TASK",
-    "Stopped P2P Master AI"
+    "Stopped P2P Master AI",
+    "Finished onExit - P2P Master AI"
   ],
 
   "milestone_waves": [7, 15, 24, 31, 41, 48, 56, 63, 67, 68, 69],

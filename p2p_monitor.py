@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 P2P Monitor v2.0.2
-Monitors DreamBot P2P Master AI log files, posts events to Discord webhooks.
+Monitors Detuks client P2P Master AI log files, posts events to Discord webhooks.
 
 File structure:
   p2p_monitor.py          — App shell, wiring, tray, lifecycle
@@ -16,14 +16,14 @@ File structure:
   py/util.py              — Shared helpers (now_str, fmt_ts)
   py/discord.py           — Embed payloads, post_discord, DiscordRouter, GatewayRunner
   py/screenshot.py        — xdotool, paint hide/show
-  py/paint.py             — DreamBot window automation, click commands
+  py/paint.py             — client window automation, click commands
   py/watcher.py           — LogWatcher, AccountState, poll loop, backfill
   ui/monitor_tab.py       — Monitor tab
   ui/status_tab.py        — Status tab
   ui/stats_tab.py         — Stats tab (Checkpoint 2: levelup aggregation, KPI cards, chart)
   ui/history_tab.py       — History tab, date picker, tree
   ui/settings_tab.py      — Settings tab, event notifications table
-  ui/launcher_tab.py      — DreamBot CLI Launcher tab
+  ui/launcher_tab.py      — Detuks CLI Launcher tab
 """
 
 import os
@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "2.2.1"
+VERSION      = "3.0.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -88,8 +88,7 @@ DEFAULT_CFG = {
     "ss_event_death": False, "ss_event_levelup": False,
     "ping_quest": False, "ping_task": False, "ping_chat": False,
     "ping_error": True, "ping_drops": False, "ping_death": True,
-    "ping_levelup": False, "ping_update": True, "ping_script_event": True,
-    "auto_relaunch_on_update": False,
+    "ping_levelup": False, "ping_script_event": True,
     "ss_hide_paint_scheduled": False,
     "ss_hide_paint_task": False, "ss_hide_paint_quest": False,
     "ss_hide_paint_chat": False, "ss_hide_paint_error": False,
@@ -114,16 +113,19 @@ DEFAULT_CFG = {
     "debug": False,
     "enable_usage_stats": True,
     "usage_stats_url": "https://stats.p2pmonitor.workers.dev",
-    "launcher_jar": "",
+    # v3.0.0 — Detuks launcher (AppImage on Linux, launcher.exe on Windows).
+    # Replaces the DreamBot-era "launcher_jar" key, which sanitize_config drops.
+    "launcher_path": "",
+    # v3.0.0 — account name for the shared Detuks log (client.log). Empty =
+    # auto: the single launcher preset's account if exactly one exists.
+    "log_account": "",
     "launcher_presets": [],
     "auto_restart_enabled": False,
+    "auto_click_start": True,
     "auto_restart_min_minutes": 1,
     "auto_restart_max_minutes": 30,
     "auto_restart_game_update_window_only": True,
     "auto_restart_respect_breaks": True,
-    "update_check_enabled": True,
-    "update_check_interval_hours": 6,
-    "update_check_interval_minutes": 0,
     "hist_col_widths": {},
     "ui_section_discord_open": True,
     "ui_section_notifications_open": True,
@@ -221,13 +223,17 @@ class App(tk.Tk):
                     'Button', 'Listbox'):
             self.option_add(f'*{cls}.highlightThickness', 0)
         self.cfg     = load_config(DEFAULT_CFG)
+        # v3.0.0: convert DreamBot-era launcher presets to the Detuks shape
+        # (params → script_profile; DreamBot-only fields dropped). One-shot —
+        # migrated presets carry no legacy keys, so this is a no-op afterwards.
+        _migrated = _launcher.migrate_launcher_config(self.cfg)
         _corrections = sanitize_config(
             self.cfg, DEFAULT_CFG,
             logs_root=self.cfg.get('logs_root', ''),
             log_fn=self._log,
             debug=self.cfg.get('debug', False),
         )
-        if _corrections:
+        if _corrections or _migrated:
             save_config(self.cfg)
         self.watcher = None   # created in _start() to avoid orphaned screenshot worker thread
         self._counts = {k: 0 for k in ('task', 'chat', 'error', 'drop', 'death', 'levelup')}
@@ -318,7 +324,7 @@ class App(tk.Tk):
         chrome.pack(fill='x')
         tk.Label(chrome, text="P2P MONITOR", font=self.BIG,
                  bg=self.BG, fg=self.ACC).pack(side='left')
-        tk.Label(chrome, text="  DreamBot P2P Master AI", font=self.SANS,
+        tk.Label(chrome, text="  Detuks · P2P Master AI", font=self.SANS,
                  bg=self.BG, fg=self.FG2).pack(side='left', pady=(2, 0))
         self._status_var = tk.StringVar(value="● STOPPED")
         self._status_lbl = tk.Label(chrome, textvariable=self._status_var,

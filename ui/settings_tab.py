@@ -21,9 +21,8 @@ original 7-section text breakdown):
   3. Event Notifications  — script events, per-event notify/screenshot/ping
                             grid, levelup-every, hide-paint-overlay grid
   4. Daily Summary        — daily summary + screenshot scheduling
-  5. Restarts & Updates   — auto restart, update awareness (DreamBot/script
-                            update checking — a different system from
-                            General's manual update check)
+  5. Restarts & Start     — auto restart, auto-click Start on the script
+                            GUI (DreamBot update awareness retired in v3.0.0)
 
 Every existing config key, default, and behavior is preserved — this is
 a UI/organization checkpoint, not a settings/behavior change. Save/load
@@ -46,7 +45,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from py.discord import post_discord, bot_setup_discord, _embed
 from py.util    import now_str, DEBUG_LOG_FILE, is_frozen
-from py.config  import save_config, is_logs_root_account_folder, CONFIG_FILE
+from py.config  import save_config, folder_has_client_logs, CONFIG_FILE
 from py.platform_ops import open_path
 
 # Minimum genuine overflow (in px) before a scroll container shows its
@@ -65,7 +64,7 @@ class SettingsTab:
         ('discord',       '🤖', 'Discord Alerts'),
         ('notifications', '🔔', 'Event Notifications'),
         ('summary',       '📅', 'Daily Summary'),
-        ('restarts',      '🔄', 'Restarts & Updates'),
+        ('restarts',      '🔄', 'Restarts & Start'),
     ]
 
     def __init__(self, app, parent_frame):
@@ -396,8 +395,12 @@ class SettingsTab:
         right.grid(row=0, column=1, sticky='nsew', padx=(6, 0))
 
         # ── Logs folder ──────────────────────────────────────────────────────
-        _, body = self._card(left, '📁', 'DreamBot Logs Folder',
-                              "Location of DreamBot log files used for monitoring and diagnostics.")
+        _, body = self._card(left, '📁', 'Detuks Logs Folder',
+                              "The Detuks client logs folder (the one containing client.log). "
+                              "The client writes every account to this ONE shared log with no "
+                              "account name on its lines, so the monitor works best with one "
+                              "account running at a time — that is what lets it know exactly "
+                              "which account a task, screenshot or ping belongs to.")
         dr = tk.Frame(body, bg=app.BG3)
         dr.pack(fill='x')
         self._vars['logs_root'] = tk.StringVar(value=app.cfg.get('logs_root', ''))
@@ -413,10 +416,13 @@ class SettingsTab:
         body.bind('<Configure>', lambda e: self._logs_root_warn.configure(wraplength=max(e.width - 8, 100)))
         self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
         self._check_logs_root_warning()
+        self._row_text(body, "Log account:", 'log_account',
+                       helper="Account this log belongs to — the exact Launcher account name "
+                              "(case-sensitive), so screenshots and relaunch find its window. "
+                              "Leave blank to use your only Launcher account automatically. "
+                              "Takes effect on monitor restart.")
 
-        # ── Manual Update Check (app's own self-update — distinct from the
-        # Update Awareness DreamBot/script checker on the Restarts & Updates
-        # page) ──────────────────────────────────────────────────────────────
+        # ── Manual Update Check (P2P Monitor's own self-update) ─────────────
         _, body = self._card(left, '🔄', 'Manual Update Check')
         tk.Label(body, text="P2P Monitor does not auto-update.\n"
                              "Updates are checked manually only and are not auto-installed.",
@@ -430,8 +436,9 @@ class SettingsTab:
 
         # ── Paint Reference ──────────────────────────────────────────────────
         _, body = self._card(left, '🖌', 'Paint Reference',
-                              "Capture the current screen colors (RGB) to help calibrate "
-                              "paint detection and matching.")
+                              "Snap once with the P2P paint SHOWN (the button reads Hide). "
+                              "The monitor compares the Hide/Show button against it to know "
+                              "whether the paint is hidden before a screenshot.")
         snap_row = tk.Frame(body, bg=app.BG3)
         snap_row.pack(fill='x')
         self._snap_lbl = tk.Label(snap_row, text="", font=self._sanss, bg=app.BG3, fg=app.GREEN)
@@ -456,7 +463,7 @@ class SettingsTab:
         # ── Monitoring Intervals ─────────────────────────────────────────────
         _, body = self._card(right, '🕐', 'Monitoring Intervals')
         self._row_int(body, "Interval (sec):", 'check_interval', 1, 60,
-                      helper="How often P2P Monitor checks DreamBot logs for changes.")
+                      helper="How often P2P Monitor checks the client log for changes.")
 
         # ── Debug ────────────────────────────────────────────────────────────
         _, body = self._card(right, '🐛', 'Debug')
@@ -894,10 +901,10 @@ class SettingsTab:
                             "Set how often scheduled screenshots are taken.",
                             _build_ss_interval)
 
-    # ── Page 5: Restarts & Updates ───────────────────────────────────────────
+    # ── Page 5: Restarts & Start ───────────────────────────────────────────
     def _build_restarts_page(self, parent):
         app = self.app
-        self._page_header(parent, "Restarts & Updates", "Configure automatic restarts and update awareness behaviors.")
+        self._page_header(parent, "Restarts & Start", "Configure automatic restarts and script start.")
         inner = self._scrollable_body(parent)
 
         # ── Auto Restart ─────────────────────────────────────────────────────
@@ -931,37 +938,17 @@ class SettingsTab:
                    ).pack(side='left', padx=(6, 0))
         self._vars['auto_restart_max_minutes'] = ar_max_var
 
-        # ── Update Awareness (DreamBot/script updates — distinct from the
-        # Manual Update Check on the General Settings page) ─────────────────
-        _, body = self._card(inner, '☁', 'Update Awareness')
-        self._row_bool(body, "Check for P2P Master AI / DreamBot client updates",
-                       'update_check_enabled', default=True,
-                       helper="Checks DreamBot SDN for updates and silently falls back if needed.")
-
-        intv_row = tk.Frame(body, bg=app.BG3)
-        intv_row.pack(fill='x', pady=(4, 4))
-        tk.Label(intv_row, text="Check interval:", font=self._sans,
-                 bg=app.BG3, fg=app.FG2).pack(side='left')
-        intv_h_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_hours', 6)))
-        tk.Spinbox(intv_row, from_=0, to=24, textvariable=intv_h_var, width=4, font=self._sans,
-                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
-                   ).pack(side='left', padx=(8, 2))
-        tk.Label(intv_row, text="h", font=self._sans, bg=app.BG3, fg=app.FG2).pack(side='left')
-        intv_m_var = tk.IntVar(value=int(app.cfg.get('update_check_interval_minutes', 0)))
-        tk.Spinbox(intv_row, from_=0, to=59, textvariable=intv_m_var, width=4, font=self._sans,
-                   bg=app.BG4, fg=app.FG, buttonbackground=app.BG4, relief='flat'
-                   ).pack(side='left', padx=(6, 2))
-        tk.Label(intv_row, text="m   (min: 1m | default: 6h 0m)", font=self._sanss,
-                 bg=app.BG3, fg=app.FG2).pack(side='left', padx=(2, 0))
-        self._vars['update_check_interval_hours']   = intv_h_var
-        self._vars['update_check_interval_minutes'] = intv_m_var
-
-        self._row_bool(body, "Ping configured user on update alerts", 'ping_update', default=True)
-        self._row_bool(body, "Auto-relaunch clients when script/client update is found",
-                       'auto_relaunch_on_update', default=False)
-        self._warning_banner(body,
-            "Auto-relaunch on update will immediately restart affected clients. "
-            "This may interrupt your current activity, including critical encounters such as Inferno/Jad.")
+        # ── Script Start (v3.0.0) ────────────────────────────────────────────
+        _, body = self._card(inner, '▶️', 'Script Start',
+                              "On Detuks, P2P Master AI opens its GUI and waits for Start.")
+        self._row_bool(body, "Auto-click Start on the P2P Master AI GUI",
+                       'auto_click_start', default=True,
+                       helper="About 10s after the log shows the GUI waiting, the monitor "
+                              "finds the Start button by colour in that account's own GUI "
+                              "window and clicks it (focus is restored afterwards). It retries "
+                              "once; if the script still hasn't started, an alert goes to the "
+                              "Errors channel. When off, the alert is sent after 5 minutes "
+                              "of waiting instead.")
 
     # ── Save ───────────────────────────────────────────────────────────────────
     def save(self):
@@ -982,15 +969,6 @@ class SettingsTab:
                          'bot_channel_id', 'bot_poll_interval',
                          '_slash_commands_deleted'):
             app.cfg.pop(dead_key, None)
-        # Clamp update-check interval: minimum 1 minute, maximum 24 hours
-        h = int(app.cfg.get('update_check_interval_hours', 6))
-        m = int(app.cfg.get('update_check_interval_minutes', 0))
-        total = h * 60 + m
-        total = max(1, min(total, 24 * 60))
-        app.cfg['update_check_interval_hours']   = total // 60
-        app.cfg['update_check_interval_minutes'] = total % 60
-        self._vars['update_check_interval_hours'].set(app.cfg['update_check_interval_hours'])
-        self._vars['update_check_interval_minutes'].set(app.cfg['update_check_interval_minutes'])
         try:
             save_config(app.cfg)
         except Exception:
@@ -1019,26 +997,29 @@ class SettingsTab:
 
     # ── Actions ────────────────────────────────────────────────────────────────
     def _check_logs_root_warning(self):
-        """Show a warning if logs_root points directly to an account folder."""
+        """Warn when the selected folder holds no Detuks client logs — neither
+        client.log directly (standard layout) nor in per-account subfolders."""
         path = self._vars['logs_root'].get().strip()
-        if is_logs_root_account_folder(path):
-            try:
-                parent = str(Path(path).parent)
-            except Exception:
-                parent = "the parent Logs folder"
-            self._logs_root_warn.configure(
-                text=(
-                    f"⚠  This path appears to be an account folder, not the parent Logs folder "
-                    f"(e.g. {parent}). Only this one account will be monitored — sibling accounts "
-                    f"will not be discovered. To monitor multiple accounts, select the parent "
-                    f"Logs folder instead."
-                )
-            )
-        else:
+        if not path:
             self._logs_root_warn.configure(text="")
+            return
+        try:
+            p = Path(path)
+            ok = folder_has_client_logs(p) or (
+                p.is_dir() and any(sub.is_dir() and folder_has_client_logs(sub)
+                                   for sub in p.iterdir()))
+        except Exception:
+            ok = False
+        if ok:
+            self._logs_root_warn.configure(text="")
+        else:
+            self._logs_root_warn.configure(
+                text=("⚠  No client.log found in this folder. Select the Detuks client's "
+                      "logs folder — the one that contains client.log (it appears after the "
+                      "client has been started once)."))
 
     def _browse_dir(self):
-        d = filedialog.askdirectory(title="Select DreamBot log folder")
+        d = filedialog.askdirectory(title="Select the Detuks logs folder (contains client.log)")
         if d:
             self._vars['logs_root'].set(os.path.normpath(d))
 
@@ -1118,7 +1099,7 @@ class SettingsTab:
                  "Slash commands (registered automatically on first run):\n"
                  "  /ss [account]                    — screenshot(s) → account monitor thread\n"
                  "  /s                               — status of all accounts → #monitor channel\n"
-                 "  /force <account> <action> [amt]  — Stats, Loot, -10m, +10m, Skip, Quest;\n"
+                 "  /force <account> <action> [amt]  — Stats, Logs, -10m, +10m, Skip, Pause, Quest;\n"
                  "                                      amt (1-20) only applies to -10m / +10m\n"
                  "  /train <account> <skill>         — force-train a specific skill\n"
                  "  /stats <account> <view>          — current levels, or time to 99 for a skill\n"

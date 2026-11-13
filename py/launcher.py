@@ -1,5 +1,5 @@
 """
-py/launcher.py — Safe DreamBot account launcher backend for P2P Monitor v1.8.0-beta.2
+py/launcher.py — Safe Detuks client account launcher backend for P2P Monitor v3.0.0
 
 Owns all high-level account launch logic:
   - Preset lookup and command building
@@ -9,8 +9,11 @@ Owns all high-level account launch logic:
   - Structured LaunchResult for UI and Discord consumption
 
 Safety contract:
-  - NEVER kills by generic process name (no "java.exe", no "DreamBot" wildcard)
-  - Only closes a process when window title can be matched to the requested account
+  - NEVER kills by generic process name (no "java.exe", no client-name wildcard)
+  - Only closes a process when its window title is 'BotClient - V… - <account>'
+    with the account matching EXACTLY (case-sensitive) — see
+    platform_ops.title_matches_account(). A client that has not logged in yet
+    ('BotClient - V…', no account) can never be targeted.
   - Ambiguous matches (multiple windows, or saved PID but no window) → refuse with explanation
   - Saved PID state is always validated/re-discovered before use; it is a cache, not truth
 
@@ -37,8 +40,8 @@ from typing import Optional
 # We import at call time in helpers to avoid circular import issues during testing.
 
 # ── Monitor-initiated relaunch suppress window ─────────────────────────────────
-# When the monitor closes a DreamBot client (via relaunch_account), the resulting
-# "Stopped P2P Master AI!" log line would normally trigger auto-restart.
+# When the monitor closes a client (via relaunch_account), the resulting
+# script-stop log line (Finished onExit) would normally trigger auto-restart.
 # These helpers let the watcher skip that spurious re-trigger.
 
 _relaunch_suppress: dict = {}          # account → suppress_until epoch timestamp
@@ -306,71 +309,125 @@ def find_preset(cfg: dict, account: str) -> Optional[dict]:
 
 # ── Command builder ────────────────────────────────────────────────────────────
 
-def build_command(jar_path: str, preset: dict) -> list:
+# Preset fields of the DreamBot era (v2.x). Any preset still carrying one of
+# these is migrated once by migrate_launcher_config() — see v3.0.0 CHANGELOG.
+_LEGACY_PRESET_KEYS = ('mem', 'covert', 'nofresh', 'fresh', 'menu_manipulation',
+                       'no_click_walk', 'world', 'params', 'proxy')
+
+DEFAULT_SCRIPT         = 'P2P Master AI'
+DEFAULT_SCRIPT_PROFILE = 'Default'
+
+
+def migrate_preset(p: dict) -> dict:
     """
-    Build the java CLI command list from a launcher preset dict.
+    Convert a v2.x DreamBot preset to the v3.0.0 Detuks shape.
 
-    Moved here from ui/launcher_tab.py so UI, launcher backend, and tests
-    all share the same command construction logic.
+      account            kept as-is (it becomes --jl-account; case-sensitive)
+      script             kept (default 'P2P Master AI')
+      params             -> script_profile (--scriptArgs), default 'Default'
+      proxy, mem, covert, nofresh, fresh, menu_manipulation, no_click_walk,
+      world              dropped — DreamBot-only, no Detuks equivalent
+      custom             dropped — it held DreamBot CLI flags that would be
+                         passed straight to the new client and break it
+    Already-migrated presets are returned unchanged (as a copy).
     """
-    cmd = []
+    if not any(k in p for k in _LEGACY_PRESET_KEYS):
+        return dict(p)
+    return {
+        'account':            (p.get('account') or '').strip(),
+        'script':             (p.get('script') or '').strip() or DEFAULT_SCRIPT,
+        'script_profile':     (p.get('script_profile') or p.get('params') or '').strip()
+                              or DEFAULT_SCRIPT_PROFILE,
+        'software_rendering': bool(p.get('software_rendering', False)),
+        'rl_properties':      (p.get('rl_properties') or '').strip(),
+        'custom':             '',
+    }
 
-    mem = preset.get('mem', '')
-    if mem:
-        try:
-            m = int(mem)
-            cmd += ['java', f'-Xmx{m}M', '-jar', jar_path]
-        except ValueError:
-            cmd += ['java', '-jar', jar_path]
-    else:
-        cmd += ['java', '-jar', jar_path]
 
-    script = preset.get('script', 'P2P Master AI').strip()
-    if script:
-        cmd += ['-script', script]
+def migrate_launcher_config(cfg: dict) -> int:
+    """Migrate every legacy preset in cfg in place. Returns how many changed."""
+    presets = cfg.get('launcher_presets', [])
+    if not isinstance(presets, list):
+        return 0
+    changed = 0
+    out = []
+    for p in presets:
+        if isinstance(p, dict) and any(k in p for k in _LEGACY_PRESET_KEYS):
+            out.append(migrate_preset(p))
+            changed += 1
+        else:
+            out.append(p)
+    if changed:
+        cfg['launcher_presets'] = out
+    return changed
 
-    account = preset.get('account', '').strip()
+
+def build_command(launcher_path: str, preset: dict) -> list:
+    """
+    Build the Detuks launcher command (argv list) from a preset.
+
+        <launcher> launch --jl-account <Account> [--software-rendering]
+                   [--rl-properties <file>]
+                   -- --script <Script> --scriptArgs <Profile> [custom...]
+
+    <launcher> is the Detuks Client AppImage on Linux or launcher.exe on
+    Windows — both take the same `launch` sub-command. Options before `--`
+    belong to the launcher; everything after `--` is passed to the client.
+
+    The command is an argv LIST and is spawned without a shell, so an
+    account name with spaces always arrives as ONE argument — the exact
+    equivalent of typing it in quotes. Literal quote characters must never be
+    added to the value itself (the launcher would receive them as part of the
+    name). Use format_command() for a copy-pasteable, correctly quoted string.
+
+    Shared by the Launcher tab preview, the launcher backend, and tests.
+    """
+    cmd = [launcher_path, 'launch']
+
+    account = (preset.get('account') or '').strip()
     if account:
-        cmd += ['-account', account]
+        cmd += ['--jl-account', account]
 
-    proxy = preset.get('proxy', '').strip()
-    if proxy:
-        cmd += ['-proxy', proxy]
+    if preset.get('software_rendering'):
+        cmd.append('--software-rendering')
 
-    if preset.get('covert'):
-        cmd.append('-covert')
-    if preset.get('nofresh'):
-        cmd.append('-nofresh')
-    if preset.get('fresh'):
-        cmd.append('-fresh')
-    if preset.get('menu_manipulation'):
-        cmd.append('-menuManipulation')
-    if preset.get('no_click_walk'):
-        cmd.append('-noClickWalk')
+    rl = (preset.get('rl_properties') or '').strip()
+    if rl:
+        cmd += ['--rl-properties', rl]
 
-    world = preset.get('world', '').strip()
-    if world:
-        cmd += ['-world', world]
+    client_args = []
+    script = (preset.get('script') or '').strip() or DEFAULT_SCRIPT
+    client_args += ['--script', script]
 
-    custom = preset.get('custom', '').strip()
+    profile = (preset.get('script_profile') or '').strip()
+    if profile:
+        client_args += ['--scriptArgs', profile]
+
+    custom = (preset.get('custom') or '').strip()
     if custom:
         try:
-            cmd += shlex.split(custom)
+            client_args += shlex.split(custom)
         except ValueError:
-            cmd.append(custom)
+            client_args.append(custom)
 
-    params = preset.get('params', '').strip()
-    if params:
-        cmd += ['-params', params]
-
+    cmd += ['--'] + client_args
     return cmd
+
+
+def format_command(cmd: list) -> str:
+    """Render an argv list as a copy-pasteable command line for THIS
+    platform: double-quoted cmd.exe/PowerShell style on Windows, POSIX shell
+    quoting on Linux. Display only — launching always uses the list."""
+    if sys.platform == 'win32':
+        return subprocess.list2cmdline(cmd)
+    return shlex.join(cmd)
 
 
 # ── Process discovery ──────────────────────────────────────────────────────────
 
 def discover_account_process(account: str) -> Optional[dict]:
     """
-    Locate a running DreamBot client window for 'account' and resolve its PID.
+    Locate a running client window for 'account' and resolve its PID.
 
     Returns:
         dict with keys 'window_id' and 'pid' — exactly one window found
@@ -388,7 +445,7 @@ def discover_account_process(account: str) -> Optional[dict]:
 
 def _discover_with_timeout(account: str, timeout: int = 30, poll: int = 2) -> Optional[dict]:
     """
-    Poll for the real DreamBot client window PID, with a timeout.
+    Poll for the real client window PID, with a timeout.
     Returns the dict from discover_account_process, or None if not found in time.
     """
     deadline = time.monotonic() + timeout
@@ -407,7 +464,7 @@ def _discover_with_timeout(account: str, timeout: int = 30, poll: int = 2) -> Op
 
 def _popen(cmd: list) -> int:
     """
-    Spawn a DreamBot launcher subprocess. Returns the immediate Popen PID.
+    Spawn the Detuks launcher subprocess. Returns the immediate Popen PID.
     Suppresses console windows on Windows.
     """
     kwargs = dict(
@@ -421,22 +478,28 @@ def _popen(cmd: list) -> int:
     return proc.pid
 
 
-def _validate_jar(cfg: dict) -> Optional[str]:
+def validate_launcher_path(cfg: dict) -> 'tuple[Optional[str], str]':
     """
-    Return the jar path from config if it exists, else None.
-    Used for early validation before spawning anything.
+    Return (path, '') when the configured Detuks launcher can be run, else
+    (None, reason). Linux additionally requires the execute bit — a freshly
+    downloaded AppImage is not executable until `chmod +x`.
     """
-    jar = cfg.get('launcher_jar', '').strip()
-    if not jar or not os.path.isfile(jar):
-        return None
-    return jar
+    path = (cfg.get('launcher_path') or '').strip()
+    if not path:
+        return None, 'Detuks launcher path is not set (Launcher tab).'
+    if not os.path.isfile(path):
+        return None, f'Detuks launcher not found at: {path!r}'
+    if sys.platform != 'win32' and not os.access(path, os.X_OK):
+        return None, (f'Detuks launcher is not executable: {path!r} — '
+                      f'run: chmod +x {shlex.quote(path)}')
+    return path, ''
 
 
 # ── Background PID discovery and cache ────────────────────────────────────────
 
 # ── Window-position restore (relaunch only — see relaunch_account) ─────────────
 
-# DreamBot's own client cannot render smaller than this — confirmed real
+# The OSRS game canvas cannot render smaller than this (765x503) — real
 # floor, not a guess. A captured size below this is known-impossible data
 # (e.g. a bad read mid-minimize), not a legitimately small real window —
 # see _size_is_plausible().
@@ -520,8 +583,8 @@ def _build_dpi_corrected_size(requested, ratio):
 
 def _size_is_plausible(geom) -> bool:
     """
-    True if the captured size could plausibly be a real DreamBot window.
-    DreamBot cannot render below DREAMBOT_MIN_W x DREAMBOT_MIN_H, so
+    True if the captured size could plausibly be a real client window.
+    The client cannot render below DREAMBOT_MIN_W x DREAMBOT_MIN_H, so
     anything smaller is known-bad data, not a legitimately small window —
     e.g. a geometry read taken mid-minimize/mid-animation. This is checked
     separately from _geometry_is_sane(): a geometry can pass the generic
@@ -539,7 +602,7 @@ def _size_is_plausible(geom) -> bool:
 def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict = None,
                         restore_geometry: Optional[tuple] = None) -> None:
     """
-    Run in a daemon thread after Popen. Polls for the real DreamBot client PID
+    Run in a daemon thread after Popen. Polls for the real client PID
     via window title, caches it in launcher_state.json.
 
     If the window is not found within 120 seconds, keeps watching at low
@@ -552,7 +615,7 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
     never pass this). If the new window is found in time and the geometry
     passes _geometry_is_sane(), best-effort move it back into place.
     Resize is applied too unless the captured size fails
-    _size_is_plausible() (below DreamBot's real minimum render size) —
+    _size_is_plausible() (below the client's real minimum render size) —
     in that case the position is still restored exactly as captured
     (never clamped or guessed), just without reapplying a size known to
     be bad. Any failure here is logged and swallowed — a missed position
@@ -625,7 +688,7 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
                     ok = set_window_geometry(new_wid, x, y, w, h, resize=resize_ok,
                                               debug_log=_dpi_debug_log)
 
-                    # Give the new DreamBot/AWT window a moment to settle
+                    # Give the new client window a moment to settle
                     # before re-querying — immediately re-reading right
                     # after SetWindowPos risks catching it mid-transition.
                     if sys.platform == 'win32':
@@ -691,14 +754,14 @@ def _discover_and_cache(account: str, immediate_pid: int, log_fn=None, cfg: dict
 
                     if ok:
                         action = 'Restored window position' if resize_ok else \
-                                 'Restored window position only — captured size was below DreamBot\'s minimum, not reapplied'
+                                 'Restored window position only — captured size was below the client\'s minimum, not reapplied'
                         write_debug_entry('launcher', {'account': account,
                                            'msg': f'{action} {restore_geometry}'})
                         if cfg and cfg.get('debug', False):
                             _log(f'↩️ [{account}] {action}.')
                         if not resize_ok:
                             _log(f'⚠️ [{account}] Captured size {restore_geometry[2]}x{restore_geometry[3]} '
-                                 f'is below DreamBot\'s minimum ({DREAMBOT_MIN_W}x{DREAMBOT_MIN_H}) — '
+                                 f'is below the client\'s minimum ({DREAMBOT_MIN_W}x{DREAMBOT_MIN_H}) — '
                                  f'position restored, size left as-is.')
                     else:
                         _log(f'⚠️ [{account}] Could not restore window position — '
@@ -736,11 +799,9 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
         return LaunchResult(ok=False, account=account, action='failed',
                             message=f'No launcher preset found for "{account}".')
 
-    jar = _validate_jar(cfg)
-    if not jar:
-        jar_path = cfg.get('launcher_jar', '').strip()
-        return LaunchResult(ok=False, account=account, action='failed',
-                            message=f'Launcher.jar not found at: {jar_path!r}')
+    launcher, why = validate_launcher_path(cfg)
+    if not launcher:
+        return LaunchResult(ok=False, account=account, action='failed', message=why)
 
     # Safety: refuse if already running
     try:
@@ -755,8 +816,8 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
                                     f'(PID {existing.get("pid")}). '
                                     f'Close the existing client before launching again.')
 
-    cmd = build_command(jar, preset)
-    _log(f'🚀 [{account}] Launching: {" ".join(shlex.quote(c) for c in cmd)}')
+    cmd = build_command(launcher, preset)
+    _log(f'🚀 [{account}] Launching: {format_command(cmd)}')
     try:
         immediate_pid = _popen(cmd)
     except Exception as exc:
@@ -785,7 +846,7 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
 def relaunch_account(cfg: dict, account: str, log_fn=None,
                      safe_delay_seconds: int = 10) -> LaunchResult:
     """
-    Safely close the existing DreamBot client for 'account', wait, then relaunch.
+    Safely close the existing client for 'account', wait, then relaunch.
 
     Validation chain (in order):
         1. Window title match → PID  (most trusted: proves ownership)
@@ -825,11 +886,9 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
         return LaunchResult(ok=False, account=account, action='failed',
                             message=f'No launcher preset found for "{account}".')
 
-    jar = _validate_jar(cfg)
-    if not jar:
-        jar_path = cfg.get('launcher_jar', '').strip()
-        return LaunchResult(ok=False, account=account, action='failed',
-                            message=f'Launcher.jar not found at: {jar_path!r}')
+    launcher, why = validate_launcher_path(cfg)
+    if not launcher:
+        return LaunchResult(ok=False, account=account, action='failed', message=why)
 
     # ── Step 1: discover running client ───────────────────────────────────────
     target_pid = None
@@ -850,7 +909,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
             return LaunchResult(
                 ok=False, account=account, action='skipped',
                 message=(
-                    f'DreamBot window found for "{account}", but PID could not be '
+                    f'Client window found for "{account}", but PID could not be '
                     f'resolved — refusing to relaunch safely. '
                     f'Close the client manually and retry.'
                 ),
@@ -903,18 +962,18 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
             # false-negative title match is provable from debug.jsonl
             # instead of guessed at after the fact.
             try:
-                from py.platform_ops import list_dreambot_window_titles
+                from py.platform_ops import list_client_window_titles
                 _dbg_log(f'🔍 [{account}] Ownership refusal diagnostics — '
                          f'saved PID {saved_pid} alive, no window matched.',
                          extra={'saved_pid': saved_pid,
-                                'visible_dreambot_windows':
-                                    list_dreambot_window_titles()})
+                                'visible_client_windows':
+                                    list_client_window_titles()})
             except Exception:
                 pass
             return LaunchResult(ok=False, account=account, action='skipped',
                                 message=(
                                     f'A process with saved PID {saved_pid} is running, '
-                                    f'but no DreamBot window matched "{account}". '
+                                    f'but no client window matched "{account}". '
                                     f'Ownership is ambiguous — refusing to close. '
                                     f'Close the client manually and retry.'
                                 ))
@@ -922,8 +981,8 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     # ── Step 2: if nothing running, fresh launch ───────────────────────────────
     if target_pid is None:
         _log(f'⚠️ [{account}] No running client found — launching fresh.')
-        cmd = build_command(jar, preset)
-        _log(f'🚀 [{account}] Launching: {" ".join(shlex.quote(c) for c in cmd)}')
+        cmd = build_command(launcher, preset)
+        _log(f'🚀 [{account}] Launching: {format_command(cmd)}')
         try:
             immediate_pid = _popen(cmd)
         except Exception as exc:
@@ -943,7 +1002,7 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     _dbg_log(f'🔴 [{account}] Closing client (PID {target_pid}, via {discovery_method})...',
              extra={'target_pid': target_pid, 'discovery_method': discovery_method})
     _set_pid(account, None)  # clear stale state before close
-    # Mark suppress window BEFORE terminating — watcher detects "Stopped P2P" shortly
+    # Mark suppress window BEFORE terminating — watcher detects the script-stop line shortly
     # after this and must not trigger an auto-restart loop.
     set_relaunch_suppress(account, duration_secs=300.0)
     try:
@@ -957,8 +1016,8 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     time.sleep(safe_delay_seconds)
 
     # ── Step 4: relaunch ──────────────────────────────────────────────────────
-    cmd = build_command(jar, preset)
-    _dbg_log(f'🚀 [{account}] Relaunching: {" ".join(shlex.quote(c) for c in cmd)}')
+    cmd = build_command(launcher, preset)
+    _dbg_log(f'🚀 [{account}] Relaunching: {format_command(cmd)}')
     try:
         immediate_pid = _popen(cmd)
     except Exception as exc:

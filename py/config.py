@@ -1,10 +1,11 @@
 """
-config.py — Config I/O for P2P Monitor v1.4.2
+config.py — Config I/O for P2P Monitor v3.0.0
 Owns CONFIG_FILE path, save_config(), load_config(), and sanitize_config().
 stdlib only — no imports from other py/ modules.
 """
 
 import json
+import re
 from pathlib import Path
 
 CONFIG_FILE = Path.home() / ".p2p_monitor" / "config.json"
@@ -47,25 +48,44 @@ _VALID_CHANNEL_NAMES = frozenset([
 ])
 
 
+# ── Detuks client log files (v3.0.0) ─────────────────────────────────────────
+# The Detuks client writes ONE shared log for every client instance:
+#   client.log                      — active file
+#   client_YYYY-MM-DD.N.log         — rotated parts; N keeps counting up
+# There is no per-account file and no account name on any line, so the
+# monitor attributes a log folder to a single account (see LogWatcher).
+CLIENT_LOG_ACTIVE     = 'client.log'
+CLIENT_LOG_ROTATED_RE = re.compile(r'^client_(\d{4}-\d{2}-\d{2})[._](\d+)\.log$')
+
+
+def is_client_log_name(name):
+    """True for client.log or a rotated client_YYYY-MM-DD.N.log name."""
+    return name == CLIENT_LOG_ACTIVE or bool(CLIENT_LOG_ROTATED_RE.match(name or ''))
+
+
+def folder_has_client_logs(path):
+    """True if 'path' is a directory directly containing Detuks client logs."""
+    try:
+        p = Path(path)
+        return p.is_dir() and any(f.is_file() and is_client_log_name(f.name)
+                                  for f in p.iterdir())
+    except Exception:
+        return False
+
+
 def is_logs_root_account_folder(logs_root):
     """
-    Return True if logs_root points directly to an account folder rather than
-    the parent Logs directory.
+    Return True if logs_root directly contains client logs — the standard
+    Detuks layout, where one shared log folder stands for one monitored
+    account (v3.0.0). In that layout there are no per-account subfolders,
+    so sanitize_config must NOT prune bot_thread_ids by subfolder name.
 
-    A correctly configured logs_root contains account subfolders, each of which
-    holds logfile-*.log files. An incorrectly configured logs_root points at one
-    of those account subfolders directly, so logfile-*.log files appear at the
-    root level rather than inside a subdirectory.
-
-    Used by sanitize_config (to skip destructive pruning) and the Settings UI
-    (to show a warning to the user).
+    (Name kept from v2.x, where the same "logs directly in root" shape
+    meant a single DreamBot account folder had been selected.)
     """
     if not logs_root:
         return False
-    p = Path(logs_root)
-    if not p.is_dir():
-        return False
-    return bool(list(p.glob('logfile-*.log')))
+    return folder_has_client_logs(logs_root)
 
 
 def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
@@ -76,8 +96,8 @@ def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
       3. Validate bot_channel_ids / bot_webhook_urls entries against known channel names.
       4. Validate bot_thread_ids structure: {account: {ch_name: id}}.
       5. Prune bot_thread_ids for accounts whose log folders no longer exist
-         (only when logs_root is set, is a directory, and is NOT itself an
-         account folder — i.e. does not contain logfile-*.log directly).
+         (only when logs_root is set, is a directory, and holds per-account
+         subfolders — never in the standard shared client.log layout).
     Returns the number of corrections made.
     """
     def _log(msg):
@@ -206,21 +226,28 @@ def sanitize_config(cfg, defaults, logs_root=None, log_fn=None, debug=False):
             _log(f'[CONFIG] Removed malformed thread entry for account {account!r}')
 
     # ── 5. Prune thread IDs for nonexistent account folders ───────────────────
-    # Skip this step entirely when logs_root is itself an account folder
-    # (i.e. contains logfile-*.log directly). In that configuration the folder
-    # has no account subfolders to compare against, so any pruning would
-    # incorrectly delete valid thread IDs every startup.
+    # Skip this step entirely when logs_root directly contains client logs
+    # (the standard Detuks shared-log layout). In that configuration the
+    # folder has no account subfolders to compare against, so any pruning
+    # would incorrectly delete valid thread IDs every startup.
     if logs_root:
         logs_path = Path(logs_root)
         if logs_path.is_dir():
             if is_logs_root_account_folder(logs_root):
                 _log(
-                    '[CONFIG] logs_root appears to be an account folder (contains logfile-*.log '
-                    'directly) — skipping bot_thread_ids folder-based pruning to preserve thread IDs'
+                    '[CONFIG] logs_root contains client logs directly (shared-log layout) '
+                    '— skipping bot_thread_ids folder-based pruning to preserve thread IDs'
                 )
             else:
-                existing_folders = {f.name for f in logs_path.iterdir() if f.is_dir()}
-                stale_accounts = [a for a in thread_ids if a not in existing_folders]
+                account_folders = {f.name for f in logs_path.iterdir()
+                                   if f.is_dir() and folder_has_client_logs(f)}
+                # Only prune when the per-account-subfolder layout is
+                # positively present. An empty/not-yet-written logs folder
+                # (client never run, logs cleared, wrong path) must never be
+                # read as "every account is gone" — that would wipe every
+                # Discord thread ID on startup.
+                stale_accounts = ([a for a in thread_ids if a not in account_folders]
+                                  if account_folders else [])
                 for account in stale_accounts:
                     del thread_ids[account]
                     corrections += 1
