@@ -79,6 +79,42 @@ def _is_gui_wait(b):
 def _is_script_stop(b):
     return bool(SCRIPT_STOP_RE.search(b))
 
+# v3.1.1 — who stopped the script, read from the line itself. In every Detuks
+# log so far: the script stopping itself logs "Finished onExit" on its own
+# worker thread (after a "…; stopping" reason), a stop by hand (plugin switch
+# or closing the client) logs it on the UI thread (AWT-EventQueue-*), and a
+# script update reload logs it on the UI thread right after the client's
+# 'Stopping external plugin' — the client then loads the new version itself.
+_LINE_THREAD_LOGGER_RE = re.compile(r'^\S+ \S+ \[([^\]]*)\]\s+\w+\s+(\S+)\s+-\s')
+_PLUGIN_LOAD_RE = re.compile(r'loading external plugin "p2p"', re.I)
+
+
+def _thread_and_logger(line):
+    m = _LINE_THREAD_LOGGER_RE.match(line)
+    return (m.group(1), m.group(2)) if m else ('', '')
+
+
+def _logger_family(logger):
+    """Package root of a logger ('com.d.a.a.Main' -> 'com.d.a'): every line
+    the script writes shares it, the client's own lines do not."""
+    parts = logger.split('.')
+    return '.'.join(parts[:3]) if len(parts) >= 3 else logger
+
+
+def _stop_kind(line, prior_lines):
+    """'reload' | 'manual' | 'script' for a "Finished onExit" line."""
+    if any('stopping external plugin' in p.lower() for p in prior_lines[-5:]):
+        return 'reload'
+    thread, _lg = _thread_and_logger(line)
+    if thread.startswith('AWT-EventQueue'):
+        return 'manual'
+    return 'script'
+
+
+def _is_plugin_load(b):
+    return bool(_PLUGIN_LOAD_RE.search(b))
+
+
 def _is_login(b):
     """Explicit 'now in game' lines. Detuks has no 'successfully logged in'
     line; it logs 'Relogged on world N' (script relog after hop/logout) and the
@@ -201,6 +237,12 @@ class AccountState:
         self._autostart_timer    = None   # threading.Timer for the next auto-click step
         self._autostart_attempts = 0
         self._gui_alerted        = False  # "needs a click" alert already sent this wait
+        # v3.1.1: stop kind, silence watchdog, script-never-started check
+        self._last_stop_kind      = ''    # 'script' | 'manual' | 'reload' (last stop line)
+        self._script_logger       = ''    # logger family of the script's lines ('com.d.a')
+        self._last_script_line_ts = 0.0   # epoch (wall clock) the last script line was read live
+        self._silence_alerted     = False # silence alert sent for the current silence
+        self._plugin_load_timer   = None  # threading.Timer: plugin loaded, waiting for the script
 
     def should_alert(self, key, threshold, window_sec, dedupe_sec):
         now = time.time()
@@ -412,6 +454,7 @@ class LogWatcher:
                     t.cancel()
                     state._pending_restart_timer = None
                 self._cancel_autostart(state)
+                self._cancel_script_load_check(state)
         if self._ss_svc:
             self._ss_svc.stop()
         with self._backfill_lock:
@@ -977,6 +1020,12 @@ class LogWatcher:
 
         # Accounts whose script GUI was already open and waiting at startup
         # get the same auto-click / alert handling as a live GUI wait.
+        # Silence watchdog starts counting now for accounts already running
+        # (their last log line may predate the monitor start).
+        with self._accounts_lock:
+            for _st in self._accounts.values():
+                if _st.script_running and not _st._last_script_line_ts:
+                    _st._last_script_line_ts = time.time()
         for _acct in sorted(getattr(self, '_startup_gui_waiting', set())):
             with self._accounts_lock:
                 _st = self._accounts.get(_acct)
@@ -1016,6 +1065,7 @@ class LogWatcher:
                     for _p_name, _p_fn in (
                             ('screenshot check',  lambda: self._check_screenshots(ss_min)),
                             ('daily summary',     self._check_daily_summary),
+                            ('silence watchdog',  self._check_silence),
                             ('screenshot prune',  self._prune_screenshots),
                             ('dedupe prune',      self._prune_dedupe),
                             ('status refresh',    self.on_status),
@@ -1147,6 +1197,9 @@ class LogWatcher:
                     state.banned       = False
                     break_start_log_ts = None
                 elif _is_script_loaded(b):
+                    _lg_c = _thread_and_logger(line)[1]
+                    if _lg_c:
+                        state._script_logger = _logger_family(_lg_c)
                     # Profile loaded; GUI opens and waits for Start (v3.0.0).
                     # A fresh load ends any previous run.
                     state.script_running = False
@@ -1875,6 +1928,95 @@ class LogWatcher:
     _AUTOSTART_MAX_ATTEMPTS = 2
     _GUI_WAIT_ALERT_SEC     = 300
     _GUI_WAIT_STALE_SEC     = 6 * 3600
+    # v3.1.1: a running script logs at least every ~50 s (19 h of real logs);
+    # 10 min of silence means the client froze or crashed. Alert only.
+    _SILENCE_ALERT_SEC      = 600
+    # v3.1.1: the script starts within seconds of its plugin loading; on some
+    # Windows setups the client's --script is never applied. Alert only.
+    _SCRIPT_LOAD_TIMEOUT_SEC = 180
+
+    def _cancel_script_load_check(self, state):
+        t = getattr(state, '_plugin_load_timer', None)
+        if t is not None:
+            t.cancel()
+            state._plugin_load_timer = None
+
+    def _arm_script_load_check(self, folder, state):
+        """Plugin loaded: if P2P Master AI hasn't started within the timeout,
+        alert (Errors) and stop any queued relaunch from retrying."""
+        self._cancel_script_load_check(state)
+
+        def _fire():
+            state._plugin_load_timer = None
+            if not self._running:
+                return
+            # A new client is up without the script: any earlier run is over
+            # (a relaunched client leaves no stop line) — Offline, and no
+            # silence alert on top of this one.
+            state.script_running = False
+            state.awaiting_start = False
+            mins = self._SCRIPT_LOAD_TIMEOUT_SEC // 60
+            detail = (f'The client opened and loaded P2P Master AI, but the script did not '
+                      f'start within {mins} minutes (a known Detuks issue on some Windows '
+                      f'setups). Turn the script on in the client\'s plugin list. '
+                      f'Not relaunching automatically.')
+            self.log(f'❌ [{folder}] Client opened but P2P Master AI didn\'t start '
+                     f'within {mins} min — turn it on in the client\'s plugin list.')
+            if self.relaunch_mgr is not None:
+                try:
+                    self.relaunch_mgr.on_script_never_started(folder)
+                except Exception as e:
+                    self._dbg(f'[relaunch] on_script_never_started failed for {folder}: {e}')
+            if self.cfg.get('monitor_errors', True):
+                try:
+                    self.handle_event({'type': 'error',
+                                       'value': "⚠ Client opened but P2P Master AI didn't start",
+                                       'activity': detail, 'ts': now_str(),
+                                       '_detail': detail, '_task_ctx': ''},
+                                      folder, source='live')
+                except Exception as e:
+                    self._dbg(f'[{folder}] script-load alert failed: {e}')
+
+        t = threading.Timer(self._SCRIPT_LOAD_TIMEOUT_SEC, _fire)
+        t.daemon = True
+        state._plugin_load_timer = t
+        t.start()
+
+    def _check_silence(self):
+        """Periodic (v3.1.1): alert once when a running account's script has
+        written nothing for _SILENCE_ALERT_SEC — the client froze or crashed."""
+        now = time.time()
+        with self._accounts_lock:
+            snapshot = list(self._accounts.items())
+        for name, st in snapshot:
+            if (not st.script_running or st.on_break or st._break_start_ts
+                    or st.awaiting_start or st.banned or st._silence_alerted
+                    or st._plugin_load_timer is not None):
+                continue
+            last = st._last_script_line_ts
+            if not last or now - last < self._SILENCE_ALERT_SEC:
+                continue
+            st._silence_alerted = True
+            mins = int((now - last) // 60)
+            try:
+                from py.platform_ops import find_account_window_and_pid
+                info = find_account_window_and_pid(name)
+                win = ('the client window is still open — it may be frozen' if info
+                       else 'no client window found — it may have crashed or been closed')
+            except Exception:
+                win = 'could not check the client window'
+            detail = (f'P2P Master AI has written nothing to the log for {mins} minutes; '
+                      f'{win}. Use /relaunch to restart it.')
+            self.log(f'❌ [{name}] Script silent for {mins} min — {win}.')
+            if self.cfg.get('monitor_errors', True):
+                try:
+                    self.handle_event({'type': 'error',
+                                       'value': '⚠ Script silent — client frozen or crashed?',
+                                       'activity': detail, 'ts': now_str(),
+                                       '_detail': detail, '_task_ctx': ''},
+                                      name, source='live')
+                except Exception as e:
+                    self._dbg(f'[{name}] silence alert failed: {e}')
 
     @staticmethod
     def _filter_start_events(events, genuine_starts, lines):
@@ -2053,7 +2195,7 @@ class LogWatcher:
         Gate checks (in order):
           1. auto_restart_enabled in cfg
           2. suppress window — monitor-initiated relaunch in progress
-          3. manual-stop signature in recent log lines
+          3. who stopped it — only a stop the script made itself (v3.1.1)
           4. game update window gate (if auto_restart_game_update_window_only)
           5. preset still exists for this account
         """
@@ -2077,18 +2219,16 @@ class LogWatcher:
         except Exception:
             pass
 
-        # ── Gate 3: manual-stop signature ─────────────────────────────────────
-        # DreamBot-era signature. v3.0.0: Detuks logs show NO verifiable
-        # manual-stop marker (a manual stop logs only "Finished onExit"; the
-        # client's 'Stopping external plugin' line also appears on script
-        # self-updates), so this gate cannot fire on Detuks today — a manual
-        # stop may be auto-restarted when auto restart is enabled (still bound
-        # by the update-window gate). See v3.0.0 CHANGELOG "Known gaps".
-        sig = 'user initiated script stop via control bar.'
-        recent_snapshot = list(state._recent_lines)
-        all_recent = list(lines) + recent_snapshot
-        if any(sig in ln.lower() for ln in all_recent):
-            status = 'skipped — manual stop detected'
+        # ── Gate 3: who stopped it (v3.1.1) ───────────────────────────────────
+        # Only a stop the script made itself (login timeout, error…) is
+        # restarted. A stop by hand is left alone, and a script update reload
+        # needs nothing — the client loads the new version itself.
+        kind = getattr(state, '_last_stop_kind', '')
+        if kind == 'manual':
+            status = 'skipped — stopped by hand'
+            return status, f'🔄 [{account}] Auto restart {status}.'
+        if kind == 'reload':
+            status = 'skipped — script update (the client reloads it)'
             return status, f'🔄 [{account}] Auto restart {status}.'
 
         # ── Gate 4: game update window ─────────────────────────────────────────
@@ -2235,9 +2375,18 @@ class LogWatcher:
 
         # Update login/break state from this batch
         genuine_starts = set()   # line idx of starts that really began a run (v3.0.0)
+        genuine_stops  = set()   # line idx of stops that really ended a run (v3.1.1)
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
             state._recent_lines.append(line)          # rolling buffer for manual-stop detection
+            # Silence watchdog (v3.1.1): only the script's own lines count —
+            # the client keeps logging while a hung script is silent.
+            _thr, _lg = _thread_and_logger(line)
+            if _lg and (not state._script_logger or _lg.startswith(state._script_logger)):
+                state._last_script_line_ts = time.time()
+                if state._silence_alerted:
+                    state._silence_alerted = False
+                    self.log(f'▶ [{folder}] Script is logging again.')
             if _is_break_start(line):
                 state.on_break  = True
                 state.logged_in = False
@@ -2292,11 +2441,18 @@ class LogWatcher:
                 if state._break_start_ts:
                     state.total_break_secs += time.time() - state._break_start_ts
                     state._break_start_ts = None
+            elif _is_plugin_load(b):
+                # Client loaded the P2P plugin — the script itself should
+                # start within seconds (v3.1.1 check, see _arm_script_load_check).
+                self._arm_script_load_check(folder, state)
             elif _is_script_loaded(b):
                 # Profile loaded — the script's GUI opens and waits for Start.
                 # Not a start (v3.0.0): status → Waiting for Start. A fresh
                 # load always means any previous run is over (a client that
                 # crashed leaves no "Finished onExit" line).
+                self._cancel_script_load_check(state)
+                if _lg:
+                    state._script_logger = _logger_family(_lg)
                 state.script_running = False
                 state.awaiting_start = True
                 state._gui_wait_since = None
@@ -2336,6 +2492,12 @@ class LogWatcher:
                 # Don't touch on_break — break state takes priority
                 state.logged_in = True
             elif _is_script_stop(b):
+                # v3.1.1: who stopped it decides auto restart (Gate 3), and
+                # only the first stop of a run is reported (the script can
+                # log "Finished onExit" several times in a row).
+                state._last_stop_kind = _stop_kind(line, list(state._recent_lines)[:-1])
+                if state.script_running or state.awaiting_start:
+                    genuine_stops.add(idx)
                 # Capture break context before clearing — used by _compute_restart_delay
                 # if 'Respect breaks on relaunch' is enabled.
                 state._pre_stop_break_snap = {
@@ -2355,6 +2517,9 @@ class LogWatcher:
         # Parse all events through the unified reader pipeline.
         parsed = parse_lines(lines, context_lines=_prior_context)
         parsed = self._filter_start_events(parsed, genuine_starts, lines)
+        parsed = [e for e in parsed
+                  if not (e.get('type') == 'script_event' and e.get('value') == 'stop'
+                          and e.get('_line_idx') not in genuine_stops)]
 
         # Snapshot the task/activity context as it stood *before* this batch —
         # used by reset attribution below so a reset line is matched against the

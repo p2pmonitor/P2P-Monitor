@@ -50,8 +50,8 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Client windows are matched by their exact title `BotClient - V… - <Account>` (case-sensitive) — a client that has not logged in yet, or any other window, can never be closed by a relaunch
 
 ### Auto restart after Script Stopped
-- Optional auto-restart when P2P Master AI logs its stop (`Finished onExit`)
-- ⚠ The Detuks log has no verifiable "manual stop" marker yet, so a stop you made by hand can also be auto-restarted while this is enabled (still limited by the update-window option)
+- Optional auto-restart when **the script stops itself** (e.g. a login timeout). The monitor tells who stopped it from the log: a stop you make by hand (switching the script off or closing the client) is never auto-restarted, and a script update reload is left to the client, which loads the new version itself
+- A ban stops the script too — banned accounts are never auto-restarted
 - Can respect active break state so accounts are not restarted during a break
 - Once auto-restart decides a relaunch is allowed, the launch itself uses the same safeguard as `/relaunch`: Script Started confirmation, automatic retry with backoff if startup isn't confirmed, restart-surviving pending state, and window-position restore
 - Supports random min/max restart delay
@@ -94,7 +94,10 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Backfill: on startup, re-reads the client log to populate history without re-pinging Discord. The very first run only imports the current `client.log` — older rotated parts can contain other accounts' lines
 
 ### Error detection
-- Detects and pings on: task locks (with the missing item/teleport), login time-outs, repeating script task-loop failures, pathing lockouts, script crashes, quest state loops, farming patch skips, severe lag spikes (10s–5min freezes while playing), and more
+- Detects and pings on: task locks (with the missing item/teleport), login time-outs, repeating script task-loop failures, pathing lockouts, quest state loops, farming patch skips, severe lag spikes (10s–5min freezes while playing), and more
+- **Bans:** detected from the Detuks client's ban message — status 🔨 Banned, a ban ping, and no auto restart or relaunch
+- **Frozen or crashed client:** if a running account's script writes nothing for **10 minutes** (outside breaks), an alert goes to the Errors channel saying whether the client window is still open. Alert only — use `/relaunch` to restart it
+- **Script didn't start:** if the client loads P2P Master AI but the script doesn't start within **3 minutes** (a known Detuks issue on some Windows setups), an alert goes to the Errors channel and the monitor does **not** keep relaunching — turn the script on in the client's plugin list
 - Errors enriched with last known task and activity context
 - Error detection patterns fetched from GitHub on startup — simple pattern fixes apply without a new build
 

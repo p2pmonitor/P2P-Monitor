@@ -1,5 +1,50 @@
 # Changelog
 
+## v3.1.1
+
+**Bans, stops, freezes and failed script starts — handled the Detuks way.** All
+built from real Detuks log lines.
+
+### Fixed
+
+**1. Ban detection works on Detuks.** The ban check still looked for
+DreamBot's messages. It now also recognises the Detuks client's
+`account-event: ban detected on login screen` and the script's
+`Disabled account login response; stopping` — status 🔨 Banned, ban ping, no
+auto restart or relaunch.
+
+**2. A stop made by hand is no longer auto-restarted.** Every Detuks stop
+logs `Finished onExit`, but from different places: the script stopping itself
+(login timeout, ban…) logs it from its own worker thread; switching the script
+off or closing the client logs it from the client's UI thread; a script update
+reload logs it right after the client's `Stopping external plugin`. Auto
+restart now only follows a stop the script made itself. Checked against all
+83 stops in the logs collected so far — every one classified correctly. The
+Script Stopped post says why a restart was skipped.
+
+**3. One Script Stopped per stop.** The script can log `Finished onExit`
+several times in a row (e.g. four within two seconds after a login timeout);
+only the first, which actually ends the run, is posted.
+
+### Added
+
+**1. Frozen / crashed client alert.** A running script logs at least every
+~50 seconds (longest gap in 19 hours of logs: 49 s). If an account's script
+writes nothing for 10 minutes outside a break, an Errors alert is sent once,
+saying whether the client window is still open. Only the script's own lines
+count — the client keeps logging while a hung script is silent. Alert only;
+use `/relaunch` to restart.
+
+**2. "Client opened but the script didn't start" alert.** If the client loads
+the P2P plugin but P2P Master AI doesn't start within 3 minutes — the Detuks
+`--script` issue seen on some Windows setups — an Errors alert is sent, the
+account shows Offline, and a pending relaunch is **not** retried (retrying
+would reopen the same client in a loop). `/relaunch` still works by hand.
+
+### Removed
+
+- The DreamBot-only "manual stop" signature check (never present on Detuks).
+
 ## v3.1.0
 
 **Every account gets its own Detuks home — any number of accounts tracked exactly, like on DreamBot.**

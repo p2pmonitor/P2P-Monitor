@@ -69,6 +69,7 @@ class RelaunchManager:
         self._pending  = {}                   # account -> {'phase', 'attempts', 'requested_ts'}
         self._timers   = {}                   # account -> threading.Timer
         self._confirm  = {}                   # account -> threading.Event
+        self._no_retry = set()                # accounts whose client never started the script (v3.1.1)
         self._queue    = queue.Queue()
         self._running  = False
         self._worker   = None
@@ -407,6 +408,8 @@ class RelaunchManager:
         """Watcher detected Script Started for this account. Confirms an
         in-flight attempt and clears ANY pending relaunch — a running script
         is the success condition regardless of who started it."""
+        with self._lock:
+            self._no_retry.discard(account)
         evt = self._confirm.get(account)
         if evt is not None:
             evt.set()
@@ -414,6 +417,22 @@ class RelaunchManager:
         if phase and phase != P_LAUNCHING:
             # Started outside our own attempt (manual start, auto-restart…)
             self._clear(account, reason='Script Started detected.')
+
+    def on_script_never_started(self, account):
+        """v3.1.1: the account's client loaded P2P Master AI but never started
+        it (Detuks `--script` not applied — seen on Windows). Retrying would
+        only reopen the same client in a loop, so any pending relaunch for
+        this account is dropped instead (the watcher alerts the user)."""
+        reason = ('the client opened but P2P Master AI never started — not retrying '
+                  '(turn the script on in the client, or /relaunch to try again).')
+        phase = self.pending_phase(account)
+        if phase == P_LAUNCHING:
+            # An attempt is still waiting for confirmation: stop it from
+            # scheduling a retry when its wait ends.
+            with self._lock:
+                self._no_retry.add(account)
+        elif phase:
+            self._clear(account, reason=reason)
 
     def on_break_started(self, account):
         """Watcher detected a break start. If this account has a relaunch
@@ -616,6 +635,14 @@ class RelaunchManager:
             self._schedule_retry(account, launched_but_unconfirmed=True)
 
     def _schedule_retry(self, account, launched_but_unconfirmed=False, reason=None):
+        with self._lock:
+            no_retry = account in self._no_retry
+            self._no_retry.discard(account)
+        if no_retry:
+            self._clear(account, reason='the client opened but P2P Master AI never started — '
+                                        'not retrying (turn the script on in the client, or '
+                                        '/relaunch to try again).')
+            return
         with self._lock:
             entry = self._pending.get(account)
             if entry is None:

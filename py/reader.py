@@ -71,16 +71,22 @@ TOTAL_LVL_RE    = re.compile(r"^\[GAME\]\s*Congratulations, you've reached a tot
 QUEST_COMPLETE_RE = re.compile(r"^\[GAME\]\s*Congratulations, you've completed a quest", re.I)
 QUEST_STARTED_RE  = re.compile(r"^\[GAME\]\s*You've started a new quest", re.I)
 
-# ── Ban detection (v2.2.0) ───────────────────────────────────────────────────
-# Two known DreamBot ban signatures:
+# ── Ban detection ────────────────────────────────────────────────────────────
+# Detuks (v3.1.1, from a real ban — client then script, same second):
+#   WARN  com.detuks.… - account-event: ban detected on login screen
+#   WARN  com.d.a.a.O  - Disabled account login response; stopping
+# DreamBot (v2.2.0), kept for old history imports:
 #   [ERROR] Account is being set to banned status
 #   [WARN]  High severity server response, stopping script! Response: DISABLED
-_BAN_STATUS_RE   = re.compile(r'account is being set to banned status', re.I)
-_BAN_DISABLED_RE = re.compile(r'high severity server response.*response:\s*disabled', re.I)
+_BAN_RE = re.compile(
+    r'account-event:\s*ban detected'
+    r'|disabled account login response'
+    r'|account is being set to banned status'
+    r'|high severity server response.*response:\s*disabled', re.I)
 
 def is_ban_line(stripped_body):
     """True if a (prefix-stripped) log line signals the account was banned."""
-    return bool(_BAN_STATUS_RE.search(stripped_body) or _BAN_DISABLED_RE.search(stripped_body))
+    return bool(_BAN_RE.search(stripped_body))
 # Script lifecycle (Detuks). Three distinct moments:
 #   LOADED  "P2P Master AI 0.82 started with profile Default" — the profile is
 #           loaded, then the script opens its GUI and WAITS ("Waiting for GUI
