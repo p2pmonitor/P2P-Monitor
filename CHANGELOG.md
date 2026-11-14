@@ -1,5 +1,65 @@
 # Changelog
 
+## v3.1.0
+
+**Per-account Detuks homes — monitor any number of accounts exactly again.**
+
+### Added
+
+**1. Per-account Detuks homes (Launcher tab).** The Detuks client keeps its
+settings, script profiles and log in the Java user home. When enabled, every
+account the monitor launches gets its own home —
+`<homes folder>/<account>` (default `%USERPROFILE%\DetuksHomes` /
+`~/DetuksHomes`, spaces in names become `_`, per-preset override available) —
+set with `JAVA_TOOL_OPTIONS=-Duser.home=…` for that launch only. Each account
+then writes its own `client.log`, and the monitor reads one log per account:
+status, tasks, pings, screenshots, stops, auto restart and relaunch
+confirmation are per account, like on DreamBot. A home's log that appears
+while the monitor runs (first launch) is picked up automatically; lines
+written since the monitor started are processed live, older ones go to
+history. The command preview (and the copy-pasteable command) includes the
+home setting for Command Prompt and Linux. Homes paths with spaces are
+refused with a clear message. Off by default.
+
+**2. Copy P2P profiles into homes.** One button copies every `.p2p` script
+profile (any file name) from your normal `.detuksosrs/P2P_Master_AI` folder
+into each account's home. Never overwrites, and copies nothing else from that
+folder (it also holds per-account script data). A launch whose `--scriptArgs`
+profile is missing from the account's home logs a warning.
+
+**3. "Use my main settings" in the preset dialog.** Fills **Settings file
+(`--rl-properties`)** with your existing `settings.properties`, so a new home
+keeps your client settings.
+
+**4. Launcher errors in the Event Log.** The launcher's output is saved to
+`~/.p2p_monitor/launcher_output/<account>.log` (overwritten per launch). If it
+exits with an error — e.g. an account name it doesn't know — the error is
+posted: `❌ [account] Launcher exited with code N: <error>`. Previously the
+launch just silently did nothing.
+
+### Changed
+
+**1. Auto-click Start finds the GUI before login.** The script opens its GUI
+while the client is still at the login screen (it logs in after Start), when
+the client's title has no account name yet. Auto-click now matches each
+`P2P Master AI` window to the client process that owns it and clicks: the
+GUI on the account's own client if there is one, otherwise the GUI(s) on
+clients that have not logged in yet. A GUI on a client logged in as another
+account is never clicked. With exactly one client open the v3.0.0 fallback
+still applies.
+
+**2. Shared log with per-account homes.** With homes on, the shared
+`client.log` is only read for **Settings → Log account**, and only if that
+account has no home of its own (two logs feeding one account would overwrite
+each other's state).
+
+### Fixed
+
+**1. History backfill no longer skips a whole log when its resume point is in
+another file** (e.g. an account moving from the shared log to its own home, or
+a resume line rotated away). It is now processed like a first run; already
+recorded events are not duplicated.
+
 ## v3.0.0
 
 **Major release: P2P Monitor now monitors the Detuks client instead of DreamBot.**

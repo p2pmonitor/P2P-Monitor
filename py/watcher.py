@@ -125,6 +125,32 @@ def _get_active_log_file(folder):
     return p if p.is_file() else None
 
 
+def _offset_since(path, since_epoch):
+    """Byte offset of the first line stamped at/after since_epoch (log
+    timestamps are local time), or the file size if there is none. Used when
+    a per-account log appears mid-run (v3.1.0): lines written since the
+    monitor started are processed live, older ones only go to history."""
+    try:
+        with open(path, 'rb') as fh:
+            pos = 0
+            for raw in fh:
+                m = LOG_TS_RE.match(raw[:19].decode('ascii', 'replace'))
+                if m:
+                    try:
+                        t = time.mktime(time.strptime(m.group(1), '%Y-%m-%d %H:%M:%S'))
+                    except Exception:
+                        t = None
+                    if t is not None and t >= since_epoch:
+                        return pos
+                pos += len(raw)
+            return pos
+    except Exception:
+        try:
+            return os.path.getsize(path)
+        except Exception:
+            return 0
+
+
 def _newest_rotated_file(folder):
     rotated = [f for f in _get_log_files(folder) if f.name != CLIENT_LOG_ACTIVE]
     return rotated[-1] if rotated else None
@@ -265,16 +291,39 @@ class LogWatcher:
             self._dbg(mirror_msg)
 
     # ── Dir discovery ──────────────────────────────────────────────────────────
+    def _home_log_dirs(self):
+        """{account: logs dir} for presets with a per-account Detuks home
+        (v3.1.0). Each such account has its own client.log."""
+        try:
+            from py.launcher import account_home_logs
+            return account_home_logs(self.cfg)
+        except Exception as e:
+            self._dbg(f'home log dirs unavailable: {e}')
+            return {}
+
+    def _shared_log_enabled(self, home_map):
+        """Whether the shared client.log (logs_root) is monitored. With
+        per-account homes it is only read for the Log account — and only if
+        that account has no home of its own (two sources feeding one account
+        would overwrite each other's state)."""
+        if not home_map:
+            return True
+        acct = (self.cfg.get('log_account') or '').strip()
+        return bool(acct) and acct not in home_map
+
     def _get_log_dirs(self):
         now = time.time()
         if now - self._dirs_last_check < 30 and self._cached_dirs:
             return self._cached_dirs
+        home_map = self._home_log_dirs()
+        self._dir_accounts = {normalize_path(d): a for a, d in home_map.items()}
+        dirs = [d for _a, d in sorted(home_map.items())
+                if os.path.isdir(d) and folder_has_client_logs(Path(d))]
         root = self.cfg.get('logs_root', '').strip()
-        if not root or not os.path.isdir(root):
-            self._cached_dirs = []
+        if not root or not os.path.isdir(root) or not self._shared_log_enabled(home_map):
+            self._cached_dirs = dirs
             self._dirs_last_check = now
-            return []
-        dirs = []
+            return dirs
         root_path = Path(root)
         if folder_has_client_logs(root_path):
             # Standard Detuks layout: the logs folder itself holds client.log.
@@ -298,6 +347,12 @@ class LogWatcher:
         name = (self.cfg.get('log_account') or '').strip()
         if name:
             return name
+        try:
+            from py.launcher import homes_enabled
+            if homes_enabled(self.cfg):
+                return SHARED_LOG_FALLBACK_ACCOUNT
+        except Exception:
+            pass
         accounts = [(p.get('account') or '').strip()
                     for p in self.cfg.get('launcher_presets', []) if isinstance(p, dict)]
         accounts = [a for a in accounts if a]
@@ -306,10 +361,17 @@ class LogWatcher:
         return SHARED_LOG_FALLBACK_ACCOUNT
 
     def _acct_for_dir(self, d):
-        """Account a log folder belongs to. The logs root (shared client.log)
-        maps to the resolved shared account; a per-account subfolder maps to
-        its folder name (the v2.x convention)."""
+        """Account a log folder belongs to. A per-account Detuks home maps to
+        its preset's account (v3.1.0); the logs root (shared client.log) maps
+        to the resolved shared account; any other subfolder maps to its
+        folder name (the v2.x convention)."""
         d = str(d)
+        try:
+            acct = getattr(self, '_dir_accounts', {}).get(normalize_path(d))
+            if acct:
+                return acct
+        except Exception:
+            pass
         root = (self.cfg.get('logs_root') or '').strip()
         try:
             if root and normalize_path(d) == normalize_path(root):
@@ -852,9 +914,57 @@ class LogWatcher:
             return True  # Fail open — assume active if unavailable
 
     # ── Main run loop ──────────────────────────────────────────────────────────
+    def _attach_new_dir(self, d):
+        """A log folder that appeared after startup (v3.1.0: an account's
+        Detuks home gets its .detukslogs/logs on first launch). Reconstruct
+        state from the whole log, process lines written since the monitor
+        started as live events (Script Started, tasks…), backfill the rest."""
+        acct = self._acct_for_dir(d)
+        active = _get_active_log_file(d)
+        for f in _get_log_files(d):
+            if active and normalize_path(f) == normalize_path(active):
+                continue
+            try:
+                with self._offsets_lock:
+                    self._offsets[str(f)] = f.stat().st_size
+            except Exception:
+                pass
+        if active and self._is_folder_active(d):
+            try:
+                self._startup_catchup(str(active))
+            except Exception as e:
+                self._dbg(f'[{acct}] catch-up of new log failed: {e}')
+            with self._offsets_lock:
+                self._offsets[str(active)] = _offset_since(str(active), self._run_started_wall)
+        else:
+            if active:
+                try:
+                    with self._offsets_lock:
+                        self._offsets[str(active)] = active.stat().st_size
+                except Exception:
+                    pass
+            with self._accounts_lock:
+                if acct not in self._accounts:
+                    self._accounts[acct] = AccountState(acct)
+                self._accounts[acct]._startup_done = True
+        self.log(f"▶ [{acct}] Monitoring its own log: {d}")
+        t = threading.Thread(target=self._backfill_history, args=(d,), daemon=True)
+        t.start()
+        with self._backfill_lock:
+            self._backfill_threads = [x for x in self._backfill_threads if x.is_alive()]
+            self._backfill_threads.append(t)
+        try:
+            self.on_status()
+        except Exception:
+            pass
+
     def _run(self):
+        self._run_started_wall = time.time()
         dirs = self._get_log_dirs()
-        if not dirs:
+        if not dirs and self._home_log_dirs():
+            self.log("⏳ Per-account Detuks homes: waiting for accounts to be launched "
+                     "(launch them from the Launcher tab or /launch).")
+        elif not dirs:
             # Idle wait — check every 5 seconds for up to 10 minutes
             self.log("⏳ Waiting for active sessions...")
             deadline = time.time() + 600  # 10 minutes
@@ -878,7 +988,9 @@ class LogWatcher:
                     else:
                         self._offsets[str(f)] = f.stat().st_size  # rotated — skip
         account_names = [self._acct_for_dir(d) for d in dirs]
-        self.log(f"▶ Monitoring {len(dirs)} account(s): {', '.join(account_names)}")
+        if dirs:
+            self.log(f"▶ Monitoring {len(dirs)} account(s): {', '.join(account_names)}")
+        self._known_dirs = {normalize_path(d) for d in dirs}
         if any(normalize_path(d) == normalize_path(self.cfg.get('logs_root', '')) for d in dirs):
             self.log("ℹ Detuks shared log: all client instances write to one client.log. "
                      f"Events are attributed to \"{self._shared_account}\" — monitoring is exact "
@@ -961,6 +1073,9 @@ class LogWatcher:
             try:
                 current_dirs = self._get_log_dirs()
                 for d in current_dirs:
+                    if normalize_path(d) not in self._known_dirs:
+                        self._known_dirs.add(normalize_path(d))
+                        self._attach_new_dir(d)
                     active = _get_active_log_file(d)
                     if not active:
                         continue
@@ -1266,7 +1381,35 @@ class LogWatcher:
 
             # Chronological: rotated parts by (date, N), then client.log
             log_files = sorted(log_files, key=_log_file_order)
-            if last_seen is None:
+            shared_dir = False
+            try:
+                _root = (self.cfg.get('logs_root') or '').strip()
+                shared_dir = bool(_root) and normalize_path(folder) == normalize_path(_root)
+            except Exception:
+                pass
+            # v3.1.0: the marker may come from a different log than this one
+            # (account moved from the shared log to its own Detuks home, or the
+            # marker's file was rotated away). If it is in none of the files,
+            # resume can never match — treat it as a first run instead of
+            # skipping everything (the idempotent preload absorbs overlap).
+            if last_seen is not None:
+                _present = False
+                for _f in log_files:
+                    try:
+                        with open(str(_f), 'r', encoding='utf-8', errors='replace') as _fh:
+                            if any(_ln.rstrip('\n\r') == last_seen for _ln in _fh):
+                                _present = True
+                                break
+                    except Exception:
+                        continue
+                if not _present:
+                    self._dbg(f'[backfill] {account}: resume marker not in any log file '
+                              f'— processing as first run')
+                    last_seen = None
+            # First run on the SHARED log: only client.log (older rotated parts
+            # can hold other accounts' lines). A per-account home's log is that
+            # account's alone, so all of it is imported.
+            if last_seen is None and shared_dir:
                 log_files = [f for f in log_files if f.name == CLIENT_LOG_ACTIVE]
 
             total_entries  = 0

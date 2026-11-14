@@ -366,50 +366,74 @@ def find_start_button(img, target=START_BTN_RGB, tol=START_BTN_TOL,
     return best
 
 
-def _account_client_pid(account):
-    """PID of the account's BotClient window. Falls back to the only BotClient
-    window on screen when the account cannot be matched by title (shared-log
-    fallback name, or the title has no account yet). Returns (pid, reason)."""
-    from py.platform_ops import (find_account_window_and_pid, get_pid_for_window,
-                                 list_client_window_titles)
-    try:
-        info = find_account_window_and_pid(account)
-    except ValueError as e:
-        return None, str(e)
-    if info and info.get('pid'):
-        return info['pid'], ''
+def find_start_guis(account):
+    """Script GUI windows to click Start on for this account (v3.1.0).
+    Each visible "P2P Master AI x.y" window is matched to the BotClient window
+    of the same process:
+      1. GUIs on the account's own client (title ends in "- <account>") —
+         used if there are any;
+      2. otherwise GUIs on clients that have not logged in yet (title without
+         an account) — a freshly loaded script waiting for Start (it logs in
+         only after Start), all of them;
+      never a GUI on a client logged in as another account — except when
+      exactly one client is open and no client shows this account's name
+      (shared-log fallback label), as in v3.0.0.
+    Returns (window_ids, reason_if_none)."""
+    from py.platform_ops import (list_script_gui_windows, client_titles_for_pid,
+                                 parse_client_title, title_matches_account)
+    from py.platform_ops import list_client_window_titles
+    guis = list_script_gui_windows()
+    if not guis:
+        if not list_client_window_titles():
+            return [], 'no BotClient window found'
+        return [], 'script GUI window not found (already started or not open yet)'
+    own, prelogin, other = [], [], 0
+    for wid, pid in guis:
+        titles = client_titles_for_pid(pid) if pid else []
+        if any(title_matches_account(t, account) for t in titles):
+            own.append(wid)
+        elif titles and all((parse_client_title(t) or (None, 'x'))[1] == '' for t in titles):
+            prelogin.append(wid)
+        else:
+            other += 1
+    if own:
+        return own, ''
+    if prelogin:
+        return prelogin, ''
+    # Shared-log fallback (account name not shown in any title, e.g. the
+    # neutral "Shared log" label): with exactly ONE client open, its GUI is
+    # the only candidate — same rule as v3.0.0.
     clients = list_client_window_titles()
-    if len(clients) == 1:
-        pid = get_pid_for_window(clients[0][0])
-        if pid:
-            return pid, ''
-    if not clients:
-        return None, 'no BotClient window found'
-    return None, (f'no BotClient window titled for this account '
-                  f'({len(clients)} client windows open)')
+    if guis and len(clients) == 1 and not any(
+            title_matches_account(t, account) for _w, t in clients):
+        return [wid for wid, _pid in guis], ''
+    return [], (f'no script GUI for this account ({other} open on other accounts\' clients)'
+                if other else 'script GUI window not found (already started or not open yet)')
 
 
 def click_script_start(account, log=None, window_lock=None):
     """Find the account's P2P Master AI GUI and click Start.
     Returns (ok, reason). Never raises."""
+    targets, why = find_start_guis(account)
+    if not targets:
+        return False, why
+    results = [_click_start_on(gwid, account, log, window_lock) for gwid in targets]
+    ok = [r for r in results if r[0]]
+    if ok:
+        return True, ''
+    return False, results[-1][1]
+
+
+def _click_start_on(gwid, account, log=None, window_lock=None):
+    """Locate Start in one GUI window by colour and click it. (ok, reason)."""
     import os
     import tempfile
     from contextlib import nullcontext
-    from py.platform_ops import find_script_gui_windows, capture_window_image
+    from py.platform_ops import capture_window_image
     try:
         from PIL import Image
     except ImportError:
         return False, 'Pillow not installed'
-
-    pid, why = _account_client_pid(account)
-    if not pid:
-        return False, why
-    guis = find_script_gui_windows(pid)
-    if not guis:
-        return False, 'script GUI window not found (already started or not open yet)'
-    if len(guis) > 1:
-        return False, f'{len(guis)} script GUI windows open for this client'
-    gwid = guis[0]
 
     ctx = window_lock if window_lock else nullcontext()
     tmp = os.path.join(tempfile.gettempdir(), f'p2p_gui_{os.getpid()}.png')

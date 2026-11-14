@@ -417,10 +417,12 @@ class SettingsTab:
         self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
         self._check_logs_root_warning()
         self._row_text(body, "Log account:", 'log_account',
-                       helper="Account this log belongs to — the exact Launcher account name "
-                              "(case-sensitive), so screenshots and relaunch find its window. "
-                              "Leave blank to use your only Launcher account automatically. "
-                              "Takes effect on monitor restart.")
+                       helper="Account the SHARED log belongs to — the exact Launcher account "
+                              "name (case-sensitive), so screenshots and relaunch find its window. "
+                              "Leave blank to use your only Launcher account automatically. With "
+                              "per-account Detuks homes (Launcher tab) each launched account has "
+                              "its own log and this is only needed for an account started outside "
+                              "the monitor. Takes effect on monitor restart.")
 
         # ── Manual Update Check (P2P Monitor's own self-update) ─────────────
         _, body = self._card(left, '🔄', 'Manual Update Check')

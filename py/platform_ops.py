@@ -298,8 +298,9 @@ def title_matches_account(title, account):
 
 # The P2P Master AI configuration GUI ("P2P Master AI 0.82") is its own
 # top-level window, owned by the SAME process as the account's BotClient
-# window. It is only ever looked up by that PID — never by title alone — so a
-# GUI belonging to another account's client can never be matched.
+# window. A GUI is always tied to its client through that PID (never by its
+# title alone): GUIs on another account's logged-in client are never used —
+# see paint.find_start_guis (v3.1.0 adds clients that have not logged in yet).
 SCRIPT_GUI_TITLE_RE = re.compile(r'^\s*P2P Master AI\s+v?\d', re.IGNORECASE)
 
 
@@ -348,6 +349,58 @@ def _list_windows_for_pid(pid):
     except Exception:
         pass
     return out
+
+
+def list_script_gui_windows():
+    """[(window_id, pid)] for every visible P2P Master AI GUI window, any
+    process (v3.1.0). Never raises."""
+    out = []
+    try:
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL('user32', use_last_error=True)
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype  = wintypes.DWORD
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype  = ctypes.c_bool
+            user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+            user32.GetWindowTextLengthW.restype  = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetWindowTextW.restype  = ctypes.c_int
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+            def _enum(hwnd, _lp):
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    n = user32.GetWindowTextLengthW(hwnd)
+                    if n <= 0:
+                        return True
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    if SCRIPT_GUI_TITLE_RE.match(buf.value or ''):
+                        wpid = wintypes.DWORD(0)
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+                        out.append((str(int(hwnd)), int(wpid.value)))
+                except Exception:
+                    pass
+                return True
+            user32.EnumWindows(_enum, 0)
+        else:
+            r = subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^P2P Master AI '],
+                               capture_output=True, text=True, timeout=10)
+            for wid in r.stdout.split():
+                if SCRIPT_GUI_TITLE_RE.match(get_window_title(wid) or ''):
+                    out.append((wid, get_pid_for_window(wid)))
+    except Exception:
+        pass
+    return out
+
+
+def client_titles_for_pid(pid):
+    """BotClient window titles owned by pid (usually exactly one)."""
+    return [t for _w, t in _list_windows_for_pid(pid) if is_client_title(t)]
 
 
 def find_script_gui_windows(pid):

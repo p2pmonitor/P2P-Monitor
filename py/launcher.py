@@ -1,5 +1,5 @@
 """
-py/launcher.py — Safe Detuks client account launcher backend for P2P Monitor v3.0.0
+py/launcher.py — Safe Detuks client account launcher backend for P2P Monitor v3.1.0
 
 Owns all high-level account launch logic:
   - Preset lookup and command building
@@ -414,13 +414,184 @@ def build_command(launcher_path: str, preset: dict) -> list:
     return cmd
 
 
-def format_command(cmd: list) -> str:
+def format_command(cmd: list, home: Optional[str] = None) -> str:
     """Render an argv list as a copy-pasteable command line for THIS
-    platform: double-quoted cmd.exe/PowerShell style on Windows, POSIX shell
-    quoting on Linux. Display only — launching always uses the list."""
+    platform: double-quoted cmd.exe style on Windows, POSIX shell quoting on
+    Linux. With a per-account home (v3.1.0) the JAVA_TOOL_OPTIONS setting is
+    included so the copied command behaves exactly like the monitor's launch.
+    Display only — launching always uses the list plus an env dict."""
     if sys.platform == 'win32':
-        return subprocess.list2cmdline(cmd)
-    return shlex.join(cmd)
+        line = subprocess.list2cmdline(cmd)
+        if home:
+            return f'set "JAVA_TOOL_OPTIONS={java_home_option(home)}" && {line}'
+        return line
+    line = shlex.join(cmd)
+    if home:
+        return f'JAVA_TOOL_OPTIONS={shlex.quote(java_home_option(home))} {line}'
+    return line
+
+
+# ── Per-account Detuks homes (v3.1.0) ─────────────────────────────────────────
+# The Detuks client keeps its settings, script profiles AND logs under the
+# Java user home (<home>/.detuksosrs, <home>/.detukslogs/logs/client.log).
+# Launching each account with its own user.home (via JAVA_TOOL_OPTIONS, read
+# by the client's JVM at startup) gives every account its own client.log —
+# per-account monitoring exactly like the DreamBot era. Only accounts the
+# monitor launches get this; anything started another way still writes to
+# the normal (shared) home.
+JAVA_TOOL_OPTIONS = 'JAVA_TOOL_OPTIONS'
+HOME_LOGS_SUBPATH = ('.detukslogs', 'logs')
+P2P_PROFILE_SUBPATH = ('.detuksosrs', 'P2P_Master_AI')
+_FOLDER_BAD_CHARS = set('<>:"/\\|?*')
+
+
+def default_homes_root() -> str:
+    """%USERPROFILE%\\DetuksHomes on Windows, ~/DetuksHomes on Linux."""
+    return str(Path.home() / 'DetuksHomes')
+
+
+def home_folder_name(account: str) -> str:
+    """Folder name for an account's home: whitespace → '_', characters that
+    are invalid in Windows file names → '_'. JAVA_TOOL_OPTIONS splits on
+    whitespace, so a home path must never contain a space."""
+    out = []
+    for ch in (account or '').strip():
+        out.append('_' if (ch.isspace() or ch in _FOLDER_BAD_CHARS or ord(ch) < 32) else ch)
+    name = ''.join(out).strip('. ')
+    return name or 'account'
+
+
+def homes_enabled(cfg: dict) -> bool:
+    return bool(cfg.get('detuks_homes_enabled', False))
+
+
+def account_home(cfg: dict, preset: Optional[dict]) -> Optional[str]:
+    """The Java home folder for a preset, or None when per-account homes are
+    off. A preset's own 'home_dir' overrides <homes root>/<folder name>."""
+    if not preset or not homes_enabled(cfg):
+        return None
+    own = (preset.get('home_dir') or '').strip()
+    if own:
+        return os.path.normpath(os.path.expanduser(own))
+    root = (cfg.get('detuks_homes_root') or '').strip() or default_homes_root()
+    return os.path.normpath(os.path.join(os.path.expanduser(root),
+                                         home_folder_name(preset.get('account', ''))))
+
+
+def home_logs_dir(home: str) -> str:
+    return os.path.join(home, *HOME_LOGS_SUBPATH)
+
+
+def home_profiles_dir(home: str) -> str:
+    return os.path.join(home, *P2P_PROFILE_SUBPATH)
+
+
+def account_home_logs(cfg: dict) -> dict:
+    """{account: logs dir} for every preset that has a home (homes enabled)."""
+    out = {}
+    if not homes_enabled(cfg):
+        return out
+    for p in list_presets(cfg):
+        acct = (p.get('account') or '').strip()
+        h = account_home(cfg, p)
+        if acct and h:
+            out[acct] = home_logs_dir(h)
+    return out
+
+
+def java_home_option(home: str) -> str:
+    return f'-Duser.home={home}'
+
+
+def validate_home(home: str) -> str:
+    """'' when the home path is usable, else the reason it is not."""
+    if any(ch.isspace() for ch in home):
+        return (f'Detuks home path contains a space: {home!r} — JAVA_TOOL_OPTIONS '
+                f'cannot pass it. Choose a homes folder without spaces (Launcher tab).')
+    return ''
+
+
+def launch_env(home: Optional[str]) -> Optional[dict]:
+    """Environment for the launcher process: the current environment with
+    -Duser.home=<home> appended to JAVA_TOOL_OPTIONS (existing options kept).
+    None (inherit unchanged) when there is no per-account home."""
+    if not home:
+        return None
+    env = dict(os.environ)
+    prev = (env.get(JAVA_TOOL_OPTIONS) or '').strip()
+    opt = java_home_option(home)
+    env[JAVA_TOOL_OPTIONS] = f'{prev} {opt}'.strip() if prev else opt
+    return env
+
+
+def main_home_from_logs_root(logs_root: str) -> Optional[str]:
+    """The client's normal (shared) home, derived from the Detuks logs folder
+    <home>/.detukslogs/logs. None if logs_root doesn't have that shape."""
+    if not logs_root:
+        return None
+    p = Path(os.path.normpath(logs_root))
+    if p.name.lower() == 'logs' and p.parent.name.lower() == '.detukslogs':
+        return str(p.parent.parent)
+    return None
+
+
+def copy_profiles_to_homes(cfg: dict) -> 'tuple[bool, str, list]':
+    """Copy every *.p2p script profile from the normal home into each account
+    home that doesn't have it yet. Never overwrites. Only .p2p files — the
+    folder also holds per-account script data that must not be shared.
+    Returns (ok, summary, detail_lines)."""
+    import shutil
+    if not homes_enabled(cfg):
+        return False, 'Per-account homes are off.', []
+    main = main_home_from_logs_root((cfg.get('logs_root') or '').strip())
+    if not main:
+        return False, ('Set Settings → Detuks Logs Folder first — the profiles are '
+                       'found next to it (…/.detuksosrs/P2P_Master_AI).'), []
+    src = Path(home_profiles_dir(main))
+    profiles = sorted(f for f in src.glob('*.p2p') if f.is_file()) if src.is_dir() else []
+    if not profiles:
+        return False, f'No .p2p profiles found in {src}', []
+    copied = skipped = 0
+    detail = []
+    for p in list_presets(cfg):
+        acct = (p.get('account') or '').strip()
+        home = account_home(cfg, p)
+        if not acct or not home:
+            continue
+        dst = Path(home_profiles_dir(home))
+        try:
+            dst.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            detail.append(f'{acct}: cannot create {dst} — {exc}')
+            continue
+        done, kept = [], []
+        for f in profiles:
+            target = dst / f.name
+            if target.exists():
+                kept.append(f.name)
+                skipped += 1
+                continue
+            try:
+                shutil.copy2(str(f), str(target))
+                done.append(f.name)
+                copied += 1
+            except Exception as exc:
+                detail.append(f'{acct}: {f.name} failed — {exc}')
+        detail.append(f'{acct}: copied {len(done)}'
+                      + (f', kept existing {len(kept)}' if kept else ''))
+    return True, f'Copied {copied} profile file(s), kept {skipped} existing.', detail
+
+
+def missing_profile_warning(cfg: dict, preset: dict) -> str:
+    """'' unless the preset's --scriptArgs profile is missing from its home."""
+    home = account_home(cfg, preset)
+    prof = (preset.get('script_profile') or '').strip()
+    if not home or not prof:
+        return ''
+    if os.path.isfile(os.path.join(home_profiles_dir(home), prof + '.p2p')):
+        return ''
+    return (f'Script profile "{prof}" is not in this account\'s home yet — the script '
+            f'will use default settings. Use Launcher → "Copy P2P profiles into homes".')
 
 
 # ── Process discovery ──────────────────────────────────────────────────────────
@@ -462,20 +633,107 @@ def _discover_with_timeout(account: str, timeout: int = 30, poll: int = 2) -> Op
 
 # ── Low-level launch ───────────────────────────────────────────────────────────
 
-def _popen(cmd: list) -> int:
+_LAUNCHER_OUT_DIR = Path.home() / '.p2p_monitor' / 'launcher_output'
+_LAUNCHER_EXIT_WAIT = 300   # seconds to wait for the launcher to hand off
+
+
+def launcher_output_file(account: str) -> Path:
+    return _LAUNCHER_OUT_DIR / f'{home_folder_name(account)}.log'
+
+
+def _launcher_error_lines(text: str, limit: int = 3) -> list:
+    """The useful part of the launcher's output: lines starting with 'error'
+    first (the Detuks launcher prints e.g. "error: unexpected argument …"),
+    else the last non-empty lines."""
+    lines = [ln.strip() for ln in (text or '').splitlines() if ln.strip()]
+    errs = [ln for ln in lines if ln.lower().startswith('error')]
+    return (errs or lines)[-limit:]
+
+
+def _popen(cmd: list, env: Optional[dict] = None, account: str = '',
+           log_fn=None) -> int:
     """
     Spawn the Detuks launcher subprocess. Returns the immediate Popen PID.
     Suppresses console windows on Windows.
+
+    v3.1.0: the launcher's own output (it reports problems such as an unknown
+    account or a bad option only by printing them) is written to
+    ~/.p2p_monitor/launcher_output/<account>.log, overwritten per launch.
+    If the launcher exits with an error, its error lines are posted to the
+    Event Log through log_fn. Falls back to discarding output if the file
+    cannot be opened.
     """
+    out = None
+    if account:
+        try:
+            _LAUNCHER_OUT_DIR.mkdir(parents=True, exist_ok=True)
+            out = open(launcher_output_file(account), 'w', encoding='utf-8', errors='replace')
+        except Exception:
+            out = None
     kwargs = dict(
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=out if out else subprocess.DEVNULL,
+        stderr=subprocess.STDOUT if out else subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
+    if env is not None:
+        kwargs['env'] = env
     if sys.platform == 'win32':
         kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        proc = subprocess.Popen(cmd, **kwargs)
+    finally:
+        if out:
+            out.close()   # the child keeps its own handle
+    if account and out:
+        threading.Thread(target=_watch_launcher_exit, args=(proc, account, log_fn),
+                         daemon=True, name=f'launcher-exit-{account}').start()
     return proc.pid
+
+
+def _watch_launcher_exit(proc, account: str, log_fn) -> None:
+    """Report a launcher that exits with an error (non-zero code)."""
+    try:
+        code = proc.wait(timeout=_LAUNCHER_EXIT_WAIT)
+    except Exception:
+        return   # still running after 5 min (or wait failed) — nothing to report
+    if code == 0:
+        return
+    try:
+        text = launcher_output_file(account).read_text(encoding='utf-8', errors='replace')
+    except Exception:
+        text = ''
+    lines = _launcher_error_lines(text)
+    msg = ' | '.join(lines) if lines else 'no output'
+    write_debug_entry('launcher', {'account': account, 'exit_code': code, 'output_tail': lines})
+    if log_fn:
+        log_fn(f'❌ [{account}] Launcher exited with code {code}: {msg}')
+
+
+def _spawn(cfg: dict, account: str, preset: dict, launcher: str, log_fn,
+           verb: str = 'Launching', debug_only: bool = False) -> int:
+    """Build the command (+ per-account home env), log it, spawn it.
+    Raises on failure (callers turn that into a LaunchResult)."""
+    def _out(msg):
+        if debug_only:
+            write_debug_entry('launcher', {'account': account, 'msg': msg})
+            if not (cfg and cfg.get('debug', False)):
+                return
+        if log_fn:
+            log_fn(msg)
+
+    cmd = build_command(launcher, preset)
+    home = account_home(cfg, preset)
+    if home:
+        bad = validate_home(home)
+        if bad:
+            raise RuntimeError(bad)
+        os.makedirs(home, exist_ok=True)
+        warn = missing_profile_warning(cfg, preset)
+        if warn and log_fn:
+            log_fn(f'⚠ [{account}] {warn}')
+    _out(f'🚀 [{account}] {verb}: {format_command(cmd, home)}')
+    return _popen(cmd, env=launch_env(home), account=account, log_fn=log_fn)
 
 
 def validate_launcher_path(cfg: dict) -> 'tuple[Optional[str], str]':
@@ -816,10 +1074,8 @@ def launch_account(cfg: dict, account: str, log_fn=None) -> LaunchResult:
                                     f'(PID {existing.get("pid")}). '
                                     f'Close the existing client before launching again.')
 
-    cmd = build_command(launcher, preset)
-    _log(f'🚀 [{account}] Launching: {format_command(cmd)}')
     try:
-        immediate_pid = _popen(cmd)
+        immediate_pid = _spawn(cfg, account, preset, launcher, log_fn)
     except Exception as exc:
         return LaunchResult(ok=False, account=account, action='failed',
                             message=f'Launch failed: {exc}')
@@ -981,10 +1237,8 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     # ── Step 2: if nothing running, fresh launch ───────────────────────────────
     if target_pid is None:
         _log(f'⚠️ [{account}] No running client found — launching fresh.')
-        cmd = build_command(launcher, preset)
-        _log(f'🚀 [{account}] Launching: {format_command(cmd)}')
         try:
-            immediate_pid = _popen(cmd)
+            immediate_pid = _spawn(cfg, account, preset, launcher, log_fn)
         except Exception as exc:
             return LaunchResult(ok=False, account=account, action='failed',
                                 message=f'Launch failed: {exc}')
@@ -1016,10 +1270,9 @@ def relaunch_account(cfg: dict, account: str, log_fn=None,
     time.sleep(safe_delay_seconds)
 
     # ── Step 4: relaunch ──────────────────────────────────────────────────────
-    cmd = build_command(launcher, preset)
-    _dbg_log(f'🚀 [{account}] Relaunching: {format_command(cmd)}')
     try:
-        immediate_pid = _popen(cmd)
+        immediate_pid = _spawn(cfg, account, preset, launcher, log_fn,
+                               verb='Relaunching', debug_only=True)
     except Exception as exc:
         return LaunchResult(ok=False, account=account, action='failed',
                             message=f'Relaunch failed after closing client: {exc}')

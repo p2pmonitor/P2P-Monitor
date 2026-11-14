@@ -63,7 +63,7 @@ from ui.settings_tab  import SettingsTab
 # MONO is kept for the raw event log text area and other monospace contexts.
 _SANS_FAMILY = 'Segoe UI' if _plat.system() == 'Windows' else 'DejaVu Sans'
 
-VERSION      = "3.0.0"
+VERSION      = "3.1.0"
 GITHUB_REPO  = "p2pmonitor/P2P-Monitor"
 
 def _is_frozen():
@@ -122,6 +122,8 @@ DEFAULT_CFG = {
     "launcher_presets": [],
     "auto_restart_enabled": False,
     "auto_click_start": True,
+    "detuks_homes_enabled": False,
+    "detuks_homes_root": "",
     "auto_restart_min_minutes": 1,
     "auto_restart_max_minutes": 30,
     "auto_restart_game_update_window_only": True,

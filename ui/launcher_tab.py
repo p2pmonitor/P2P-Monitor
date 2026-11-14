@@ -47,7 +47,9 @@ from tkinter import ttk, messagebox, filedialog
 from py.config   import save_config
 from py.launcher import (launch_account, relaunch_account, build_command, list_presets,
                           discover_account_process, format_command,
-                          validate_launcher_path, DEFAULT_SCRIPT, DEFAULT_SCRIPT_PROFILE)
+                          validate_launcher_path, DEFAULT_SCRIPT, DEFAULT_SCRIPT_PROFILE,
+                          account_home, default_homes_root, validate_home,
+                          copy_profiles_to_homes, main_home_from_logs_root)
 
 _IS_WINDOWS = os.name == 'nt'
 
@@ -96,6 +98,8 @@ class LauncherTab:
         tk.Button(path_row, text='+  Add Account', font=app.SANSB, bg=app.GREEN, fg=app.BG,
                   relief='flat', padx=14, pady=8, cursor='hand2',
                   command=self._open_add_dialog).pack(side='left')
+
+        self._build_homes_card(root)
 
         # ── Card: Launcher Accounts ─────────────────────────────────────────
         card = tk.Frame(root, bg=app.BG3, padx=14, pady=12)
@@ -165,8 +169,10 @@ class LauncherTab:
         info_row.pack(fill='x', pady=(8, 0))
         info_text = (
             "ⓘ  Each account must be saved in the Detuks Client launcher. The account name is its "
-            "display name there and is CASE-SENSITIVE (e.g. MyAccount ≠ myaccount). Works best "
-            "monitoring one account at a time — the client writes all accounts to one shared log."
+            "display name there and is CASE-SENSITIVE (e.g. MyAccount ≠ myaccount). With per-account "
+            "homes on, every account the monitor launches gets its own log — any number of accounts "
+            "are tracked exactly. Without them, the client writes all accounts to one shared log and "
+            "monitoring is exact for one account at a time."
         )
         info_lbl = tk.Label(info_row, text=info_text, font=app.SANSS, bg=app.BG2, fg=app.FG2,
                              justify='left', anchor='w')
@@ -176,6 +182,104 @@ class LauncherTab:
         self._refresh_rows()
 
     ROW_BTN_WIDTH = 11  # character width for each of the 3 right-side buttons
+
+    # ── Per-account Detuks homes (v3.1.0) ─────────────────────────────────────
+    def _build_homes_card(self, root):
+        app = self.app
+        card = tk.Frame(root, bg=app.BG3, padx=14, pady=10)
+        card.pack(fill='x', pady=(0, 12))
+        top = tk.Frame(card, bg=app.BG3)
+        top.pack(fill='x')
+        self._homes_on = tk.BooleanVar(value=bool(app.cfg.get('detuks_homes_enabled', False)))
+        tk.Checkbutton(top, text='  Per-account Detuks homes (each account gets its own log)',
+                       variable=self._homes_on, font=app.SANSB, bg=app.BG3, fg=app.FG,
+                       selectcolor=app.BG4, activebackground=app.BG3, activeforeground=app.FG,
+                       command=self._save_homes).pack(side='left')
+
+        row = tk.Frame(card, bg=app.BG3)
+        row.pack(fill='x', pady=(8, 0))
+        tk.Label(row, text='Homes folder:', font=app.SANS, bg=app.BG3, fg=app.FG
+                 ).pack(side='left', padx=(0, 8))
+        self._homes_root = tk.StringVar(
+            value=app.cfg.get('detuks_homes_root', '') or default_homes_root())
+        tk.Entry(row, textvariable=self._homes_root, font=app.SANS, bg=app.BG4, fg=app.FG,
+                 insertbackground=app.ACC, relief='flat'
+                 ).pack(side='left', fill='x', expand=True, ipady=5, padx=(0, 8))
+        self._homes_root.trace_add('write', lambda *_: self._save_homes())
+        tk.Button(row, text='📁  Browse', font=app.SANSS, bg=app.BG4, fg=app.FG, relief='flat',
+                  padx=10, pady=4, cursor='hand2', command=self._browse_homes
+                  ).pack(side='left', padx=(0, 8))
+        tk.Button(row, text='📋  Copy P2P profiles into homes', font=app.SANSS, bg=app.BG4,
+                  fg=app.ACC, relief='flat', padx=10, pady=4, cursor='hand2',
+                  command=self._copy_profiles).pack(side='left')
+
+        self._homes_warn = tk.Label(card, text='', font=app.SANSS, bg=app.BG3, fg=app.RED,
+                                    anchor='w', justify='left')
+        self._homes_warn.pack(fill='x')
+        help_txt = (
+            "Each account is launched with its own Java home: <homes folder>/<account> "
+            "(spaces become _). The Detuks client then keeps that account's settings, script "
+            "profiles and log there — so the monitor reads one log per account. Only accounts "
+            "launched by the monitor (or with the copied command) get this. A new home starts "
+            "with default client settings: set each preset's Settings file (--rl-properties) to "
+            "your existing settings.properties, and use \"Copy P2P profiles into homes\" so the "
+            "script finds your profiles (only .p2p files are copied; existing ones are never "
+            "overwritten). The homes folder must not contain spaces.")
+        hl = tk.Label(card, text=help_txt, font=app.SANSS, bg=app.BG3, fg=app.FG2,
+                      anchor='w', justify='left')
+        hl.pack(fill='x', pady=(6, 0))
+        card.bind('<Configure>', lambda e: (hl.configure(wraplength=max(e.width - 30, 100)),
+                                            self._homes_warn.configure(
+                                                wraplength=max(e.width - 30, 100))))
+        self._check_homes_warning()
+
+    def _save_homes(self):
+        cfg = self.app.cfg
+        cfg['detuks_homes_enabled'] = bool(self._homes_on.get())
+        root = self._homes_root.get().strip()
+        cfg['detuks_homes_root'] = '' if root == default_homes_root() else root
+        save_config(cfg)
+        self._check_homes_warning()
+        self._invalidate_watcher_dirs()
+
+    def _invalidate_watcher_dirs(self):
+        w = getattr(self.app, 'watcher', None)
+        if w is not None:
+            try:
+                w._dirs_last_check = 0
+            except Exception:
+                pass
+
+    def _check_homes_warning(self):
+        if not hasattr(self, '_homes_warn'):
+            return
+        root = self._homes_root.get().strip() or default_homes_root()
+        msg = ''
+        if self._homes_on.get() and any(ch.isspace() for ch in root):
+            msg = ('⚠ The homes folder contains a space — launches will be refused. '
+                   'Choose a folder without spaces (e.g. C:\\DetuksHomes).')
+        self._homes_warn.configure(text=msg)
+
+    def _browse_homes(self):
+        d = filedialog.askdirectory(title='Select the folder for per-account Detuks homes')
+        if d:
+            self._homes_root.set(os.path.normpath(d))
+
+    def _copy_profiles(self):
+        if not self._homes_on.get():
+            messagebox.showinfo('Launcher', 'Turn on per-account Detuks homes first.')
+            return
+        def _do():
+            ok, summary, detail = copy_profiles_to_homes(self.app.cfg)
+            def _show():
+                text = summary + ('\n\n' + '\n'.join(detail) if detail else '')
+                (messagebox.showinfo if ok else messagebox.showwarning)('Copy P2P profiles', text)
+                try:
+                    self.app._log(f'📋 Copy P2P profiles: {summary}')
+                except Exception:
+                    pass
+            self.app.after(0, _show)
+        threading.Thread(target=_do, daemon=True).start()
 
     def _build_column_header(self, parent):
         app = self.app
@@ -620,6 +724,24 @@ class _PresetDialog:
                   command=_browse_rl).pack(side='left')
         tk.Label(rl_btn_row, text='  optional — default is the client\'s own settings.properties',
                  font=app.SANSS, bg=app.BG2, fg=app.FG2).pack(side='left')
+        main_home = main_home_from_logs_root((app.cfg.get('logs_root') or '').strip())
+        if main_home:
+            main_rl = os.path.join(main_home, '.detuksosrs', 'settings.properties')
+            if os.path.isfile(main_rl):
+                use_row = tk.Frame(w, bg=app.BG2)
+                use_row.pack(fill='x', padx=14)
+                tk.Label(use_row, text='', width=22, bg=app.BG2).pack(side='left')
+                tk.Button(use_row, text='Use my main settings', font=app.SANSS, bg=app.BG4,
+                          fg=app.FG, relief='flat', padx=8, pady=2, cursor='hand2',
+                          command=lambda: rl_var.set(main_rl)).pack(side='left')
+                tk.Label(use_row, text=f'  {main_rl}', font=app.SANSS, bg=app.BG2,
+                         fg=app.FG2).pack(side='left')
+
+        if app.cfg.get('detuks_homes_enabled', False):
+            row('Home folder (optional)', entry, 'home_dir')
+            self._home_hint = tk.Label(w, text='', font=app.SANSS, bg=app.BG2, fg=app.FG2,
+                                       anchor='w', justify='left', wraplength=520)
+            self._home_hint.pack(fill='x', padx=14)
 
         row('Custom client args',     entry, 'custom')
 
@@ -655,7 +777,8 @@ class _PresetDialog:
             p[key] = var.get()
         # Strip only surrounding whitespace — never case (--jl-account is
         # case-sensitive) and never inner spaces (names may contain spaces).
-        for skey in ('account', 'script', 'script_profile', 'rl_properties', 'custom'):
+        for skey in ('account', 'script', 'script_profile', 'rl_properties', 'custom',
+                     'home_dir'):
             p[skey] = (p.get(skey) or '').strip()
         p['software_rendering'] = bool(p.get('software_rendering'))
         return p
@@ -666,7 +789,12 @@ class _PresetDialog:
         p    = self._get_preset()
         dflt = r'%LOCALAPPDATA%\BotClient\launcher.exe' if _IS_WINDOWS else '/path/to/DetuksClient.AppImage'
         path = self.app.cfg.get('launcher_path', '').strip() or dflt
-        self._preview.configure(text=format_command(build_command(path, p)))
+        home = account_home(self.app.cfg, p) if p.get('account') else None
+        if hasattr(self, '_home_hint'):
+            self._home_hint.configure(
+                text=(f'Blank = automatic. This account\'s home: {home}' if home
+                      else 'Blank = automatic: <homes folder>/<account>'))
+        self._preview.configure(text=format_command(build_command(path, p), home))
 
     def _save(self):
         p = self._get_preset()
@@ -679,5 +807,11 @@ class _PresetDialog:
                 'Enter the account name without quotes — names with spaces are '
                 'already passed as a single argument.')
             return
+        home = account_home(self.app.cfg, p)
+        if home and validate_home(home):
+            messagebox.showwarning('Launcher', validate_home(home))
+            return
+        if not p.get('home_dir'):
+            p.pop('home_dir', None)
         self.result = p
         self.window.destroy()
