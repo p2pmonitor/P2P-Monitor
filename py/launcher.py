@@ -432,22 +432,73 @@ def format_command(cmd: list, home: Optional[str] = None) -> str:
 
 
 # ── Per-account Detuks homes (v3.1.0) ─────────────────────────────────────────
-# The Detuks client keeps its settings, script profiles AND logs under the
-# Java user home (<home>/.detuksosrs, <home>/.detukslogs/logs/client.log).
-# Launching each account with its own user.home (via JAVA_TOOL_OPTIONS, read
-# by the client's JVM at startup) gives every account its own client.log —
-# per-account monitoring exactly like the DreamBot era. Only accounts the
-# monitor launches get this; anything started another way still writes to
-# the normal (shared) home.
+# The Detuks client keeps its settings, script profiles AND log under the Java
+# user home: <home>/.detuksosrs (logs in <home>/.detuksosrs/logs/client.log).
+# Every account the monitor launches gets its own user.home (JAVA_TOOL_OPTIONS,
+# read by the client's JVM at startup), so each account writes its own
+# client.log — per-account monitoring exactly like the DreamBot era. A new
+# home is seeded with a copy of the user's existing .detuksosrs (minus logs),
+# so all client settings, plugins and script profiles carry over.
 JAVA_TOOL_OPTIONS = 'JAVA_TOOL_OPTIONS'
-HOME_LOGS_SUBPATH = ('.detukslogs', 'logs')
-P2P_PROFILE_SUBPATH = ('.detuksosrs', 'P2P_Master_AI')
+DETUKS_DIR_NAME = '.detuksosrs'
+HOME_LOGS_SUBPATH = (DETUKS_DIR_NAME, 'logs')
+P2P_PROFILE_SUBPATH = (DETUKS_DIR_NAME, 'P2P_Master_AI')
 _FOLDER_BAD_CHARS = set('<>:"/\\|?*')
 
 
 def default_homes_root() -> str:
     """%USERPROFILE%\\DetuksHomes on Windows, ~/DetuksHomes on Linux."""
     return str(Path.home() / 'DetuksHomes')
+
+
+def default_main_detuks_folder() -> str:
+    """The client's normal .detuksosrs: %USERPROFILE%\\.detuksosrs on Windows;
+    inside the Detuks wine prefix on Linux. '' when not found."""
+    cands = [Path.home() / DETUKS_DIR_NAME]
+    if sys.platform != 'win32':
+        try:
+            import getpass
+            user = getpass.getuser()
+        except Exception:
+            user = ''
+        users = (Path.home() / '.local' / 'share' / 'detuks-client' / 'wineprefix'
+                 / 'drive_c' / 'users')
+        if user:
+            cands.insert(0, users / user / DETUKS_DIR_NAME)
+        try:
+            cands += sorted(users.glob(f'*/{DETUKS_DIR_NAME}'))
+        except Exception:
+            pass
+    for c in cands:
+        if c.is_dir():
+            return str(c)
+    return ''
+
+
+def main_detuks_folder(cfg: dict) -> str:
+    """The .detuksosrs new homes are copied from: the configured one, else
+    the auto-detected default ('' if none)."""
+    own = (cfg.get('detuks_main_folder') or '').strip()
+    return os.path.normpath(os.path.expanduser(own)) if own else default_main_detuks_folder()
+
+
+def migrate_main_folder(cfg: dict) -> bool:
+    """v3.1.0: the old 'Detuks Logs Folder' (<home>/.detuksosrs/logs) becomes
+    the copy source <home>/.detuksosrs; shared-log settings are dropped.
+    Returns True if cfg changed."""
+    changed = False
+    old = (cfg.get('logs_root') or '').strip()
+    if old and not (cfg.get('detuks_main_folder') or '').strip():
+        p = Path(os.path.normpath(old))
+        if p.name.lower() == 'logs' and p.parent.name.lower() == DETUKS_DIR_NAME:
+            cfg['detuks_main_folder'] = str(p.parent)
+        elif p.name.lower() == DETUKS_DIR_NAME:
+            cfg['detuks_main_folder'] = str(p)
+    for k in ('logs_root', 'log_account', 'detuks_homes_enabled'):
+        if k in cfg:
+            cfg.pop(k, None)
+            changed = True
+    return changed
 
 
 def home_folder_name(account: str) -> str:
@@ -461,14 +512,10 @@ def home_folder_name(account: str) -> str:
     return name or 'account'
 
 
-def homes_enabled(cfg: dict) -> bool:
-    return bool(cfg.get('detuks_homes_enabled', False))
-
-
 def account_home(cfg: dict, preset: Optional[dict]) -> Optional[str]:
-    """The Java home folder for a preset, or None when per-account homes are
-    off. A preset's own 'home_dir' overrides <homes root>/<folder name>."""
-    if not preset or not homes_enabled(cfg):
+    """The Java home folder for a preset (None without a preset). A preset's
+    own 'home_dir' overrides <homes root>/<folder name>."""
+    if not preset:
         return None
     own = (preset.get('home_dir') or '').strip()
     if own:
@@ -479,7 +526,18 @@ def account_home(cfg: dict, preset: Optional[dict]) -> Optional[str]:
 
 
 def home_logs_dir(home: str) -> str:
-    return os.path.join(home, *HOME_LOGS_SUBPATH)
+    """Where an account home's client.log lives: <home>/.detuksosrs/logs.
+    Also accepts <home>/logs, should a client build ever write there — the
+    first of the two that holds a client log wins."""
+    expected = os.path.join(home, *HOME_LOGS_SUBPATH)
+    try:
+        from py.config import folder_has_client_logs
+        for cand in (expected, os.path.join(home, 'logs')):
+            if os.path.isdir(cand) and folder_has_client_logs(Path(cand)):
+                return cand
+    except Exception:
+        pass
+    return expected
 
 
 def home_profiles_dir(home: str) -> str:
@@ -487,10 +545,8 @@ def home_profiles_dir(home: str) -> str:
 
 
 def account_home_logs(cfg: dict) -> dict:
-    """{account: logs dir} for every preset that has a home (homes enabled)."""
+    """{account: logs dir} for every launcher preset."""
     out = {}
-    if not homes_enabled(cfg):
-        return out
     for p in list_presets(cfg):
         acct = (p.get('account') or '').strip()
         h = account_home(cfg, p)
@@ -524,62 +580,54 @@ def launch_env(home: Optional[str]) -> Optional[dict]:
     return env
 
 
-def main_home_from_logs_root(logs_root: str) -> Optional[str]:
-    """The client's normal (shared) home, derived from the Detuks logs folder
-    <home>/.detukslogs/logs. None if logs_root doesn't have that shape."""
-    if not logs_root:
-        return None
-    p = Path(os.path.normpath(logs_root))
-    if p.name.lower() == 'logs' and p.parent.name.lower() == '.detukslogs':
-        return str(p.parent.parent)
-    return None
+_SEED_SKIP_DIRS = {'logs'}
 
 
-def copy_profiles_to_homes(cfg: dict) -> 'tuple[bool, str, list]':
-    """Copy every *.p2p script profile from the normal home into each account
-    home that doesn't have it yet. Never overwrites. Only .p2p files — the
-    folder also holds per-account script data that must not be shared.
-    Returns (ok, summary, detail_lines)."""
+def _seed_ignore(src_dir, names):
+    """Skip the log folder and the client's own detuks-client.log* files at
+    the top level of .detuksosrs — a new home starts with fresh logs."""
+    if os.path.normpath(src_dir) != os.path.normpath(_seed_ignore.root):
+        return []
+    return [n for n in names
+            if n.lower() in _SEED_SKIP_DIRS or n.lower().startswith('detuks-client.log')]
+
+
+def seed_home(cfg: dict, home: str, account: str = '', log_fn=None) -> str:
+    """Give a new account home a copy of the user's existing .detuksosrs
+    (everything except logs/ and detuks-client.log*), so client settings,
+    plugins and script profiles carry over. Only when the home has no
+    .detuksosrs yet — never overwrites. Copies into a temporary folder and
+    renames it into place, so an interrupted copy never leaves a half home.
+    Returns '' on success / nothing to do, else a warning (launch continues:
+    the client simply starts with default settings)."""
     import shutil
-    if not homes_enabled(cfg):
-        return False, 'Per-account homes are off.', []
-    main = main_home_from_logs_root((cfg.get('logs_root') or '').strip())
-    if not main:
-        return False, ('Set Settings → Detuks Logs Folder first — the profiles are '
-                       'found next to it (…/.detuksosrs/P2P_Master_AI).'), []
-    src = Path(home_profiles_dir(main))
-    profiles = sorted(f for f in src.glob('*.p2p') if f.is_file()) if src.is_dir() else []
-    if not profiles:
-        return False, f'No .p2p profiles found in {src}', []
-    copied = skipped = 0
-    detail = []
-    for p in list_presets(cfg):
-        acct = (p.get('account') or '').strip()
-        home = account_home(cfg, p)
-        if not acct or not home:
-            continue
-        dst = Path(home_profiles_dir(home))
-        try:
-            dst.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            detail.append(f'{acct}: cannot create {dst} — {exc}')
-            continue
-        done, kept = [], []
-        for f in profiles:
-            target = dst / f.name
-            if target.exists():
-                kept.append(f.name)
-                skipped += 1
-                continue
-            try:
-                shutil.copy2(str(f), str(target))
-                done.append(f.name)
-                copied += 1
-            except Exception as exc:
-                detail.append(f'{acct}: {f.name} failed — {exc}')
-        detail.append(f'{acct}: copied {len(done)}'
-                      + (f', kept existing {len(kept)}' if kept else ''))
-    return True, f'Copied {copied} profile file(s), kept {skipped} existing.', detail
+    dst = Path(home) / DETUKS_DIR_NAME
+    if dst.exists():
+        return ''
+    src = main_detuks_folder(cfg)
+    if not src or not os.path.isdir(src):
+        return ('No Detuks folder to copy settings from (Launcher tab → "Copy new homes '
+                'from") — this account starts with default client settings.')
+    if os.path.normpath(src) == os.path.normpath(str(dst)):
+        return ''
+    tmp = Path(home) / (DETUKS_DIR_NAME + '.partial')
+    try:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        Path(home).mkdir(parents=True, exist_ok=True)
+        if log_fn:
+            log_fn(f'📦 [{account}] New Detuks home — copying settings from {src} …')
+        _seed_ignore.root = src
+        t0 = time.time()
+        shutil.copytree(src, str(tmp), ignore=_seed_ignore)
+        os.replace(str(tmp), str(dst))
+        if log_fn:
+            log_fn(f'📦 [{account}] Home ready: {home} ({time.time() - t0:.1f}s)')
+        return ''
+    except Exception as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return (f'Copying Detuks settings into {home} failed ({exc}) — this account '
+                f'starts with default client settings.')
 
 
 def missing_profile_warning(cfg: dict, preset: dict) -> str:
@@ -590,8 +638,8 @@ def missing_profile_warning(cfg: dict, preset: dict) -> str:
         return ''
     if os.path.isfile(os.path.join(home_profiles_dir(home), prof + '.p2p')):
         return ''
-    return (f'Script profile "{prof}" is not in this account\'s home yet — the script '
-            f'will use default settings. Use Launcher → "Copy P2P profiles into homes".')
+    return (f'Script profile "{prof}" was not found in this account\'s home '
+            f'({home_profiles_dir(home)}) — the script will use default settings.')
 
 
 # ── Process discovery ──────────────────────────────────────────────────────────
@@ -729,6 +777,9 @@ def _spawn(cfg: dict, account: str, preset: dict, launcher: str, log_fn,
         if bad:
             raise RuntimeError(bad)
         os.makedirs(home, exist_ok=True)
+        seed_warn = seed_home(cfg, home, account, log_fn)
+        if seed_warn and log_fn:
+            log_fn(f'⚠ [{account}] {seed_warn}')
         warn = missing_profile_warning(cfg, preset)
         if warn and log_fn:
             log_fn(f'⚠ [{account}] {warn}')

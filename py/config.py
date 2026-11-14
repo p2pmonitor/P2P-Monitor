@@ -49,11 +49,11 @@ _VALID_CHANNEL_NAMES = frozenset([
 
 
 # ── Detuks client log files (v3.0.0) ─────────────────────────────────────────
-# The Detuks client writes ONE shared log for every client instance:
+# Each Detuks home writes its log to <home>/.detuksosrs/logs:
 #   client.log                      — active file
 #   client_YYYY-MM-DD.N.log         — rotated parts; N keeps counting up
-# There is no per-account file and no account name on any line, so the
-# monitor attributes a log folder to a single account (see LogWatcher).
+# No line carries an account name, so v3.1.0 launches every account with its
+# own home — one log folder per account (see launcher.account_home_logs).
 CLIENT_LOG_ACTIVE     = 'client.log'
 CLIENT_LOG_ROTATED_RE = re.compile(r'^client_(\d{4}-\d{2}-\d{2})[._](\d+)\.log$')
 

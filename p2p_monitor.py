@@ -75,7 +75,7 @@ def _is_frozen():
 SCRIPT_PATH = sys.executable if _is_frozen() else os.path.abspath(__file__)
 
 DEFAULT_CFG = {
-    "logs_root": "", "webhook_quest": "", "webhook_task": "",
+    "webhook_quest": "", "webhook_task": "",
     "webhook_chat": "", "webhook_error": "", "webhook_drops": "", "webhook_default": "",
     "mention_id": "", "check_interval": 5, "beta_updates": False,
     "screenshot_minutes": 60, "bot_token": "",
@@ -116,14 +116,14 @@ DEFAULT_CFG = {
     # v3.0.0 — Detuks launcher (AppImage on Linux, launcher.exe on Windows).
     # Replaces the DreamBot-era "launcher_jar" key, which sanitize_config drops.
     "launcher_path": "",
-    # v3.0.0 — account name for the shared Detuks log (client.log). Empty =
-    # auto: the single launcher preset's account if exactly one exists.
-    "log_account": "",
     "launcher_presets": [],
     "auto_restart_enabled": False,
     "auto_click_start": True,
-    "detuks_homes_enabled": False,
+    # v3.1.0 — every launched account gets its own Detuks home (and log):
+    # <detuks_homes_root>/<account>, seeded from detuks_main_folder (the
+    # user's existing .detuksosrs). Empty = auto-detected defaults.
     "detuks_homes_root": "",
+    "detuks_main_folder": "",
     "auto_restart_min_minutes": 1,
     "auto_restart_max_minutes": 30,
     "auto_restart_game_update_window_only": True,
@@ -229,9 +229,12 @@ class App(tk.Tk):
         # (params → script_profile; DreamBot-only fields dropped). One-shot —
         # migrated presets carry no legacy keys, so this is a no-op afterwards.
         _migrated = _launcher.migrate_launcher_config(self.cfg)
+        # v3.1.0: shared-log settings → per-account homes (old logs folder
+        # becomes the folder new homes are copied from).
+        _migrated = _launcher.migrate_main_folder(self.cfg) or _migrated
         _corrections = sanitize_config(
             self.cfg, DEFAULT_CFG,
-            logs_root=self.cfg.get('logs_root', ''),
+            logs_root=None,
             log_fn=self._log,
             debug=self.cfg.get('debug', False),
         )
@@ -595,8 +598,10 @@ class App(tk.Tk):
 
     # ── Start / Stop ───────────────────────────────────────────────────────────
     def _start(self):
-        if not self.cfg.get('logs_root', '').strip():
-            messagebox.showwarning("No log directory", "Configure a log directory in Settings first.")
+        if not _launcher.list_presets(self.cfg):
+            messagebox.showwarning("No accounts",
+                                   "Add your accounts in the Launcher tab first — the monitor "
+                                   "tracks the accounts it launches.")
             return
         self._settings.save()
         self._btn_start.configure(state='disabled', bg=self.BG3, fg=self.FG2)

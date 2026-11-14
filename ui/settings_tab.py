@@ -14,7 +14,7 @@ currently visible.
 
 Sections (per the agreed mockup-driven structure — supersedes the
 original 7-section text breakdown):
-  1. General Settings    — logs folder, monitoring interval, manual update
+  1. General Settings    — monitoring interval, manual update
                             check (the app's own self-update), debug,
                             paint reference
   2. Discord Alerts       — bot setup, bot instructions, webhooks
@@ -45,7 +45,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from py.discord import post_discord, bot_setup_discord, _embed
 from py.util    import now_str, DEBUG_LOG_FILE, is_frozen
-from py.config  import save_config, folder_has_client_logs, CONFIG_FILE
+from py.config  import save_config, CONFIG_FILE
 from py.platform_ops import open_path
 
 # Minimum genuine overflow (in px) before a scroll container shows its
@@ -393,36 +393,6 @@ class SettingsTab:
         left.grid(row=0, column=0, sticky='nsew', padx=(0, 6))
         right = tk.Frame(cols, bg=app.BG2)
         right.grid(row=0, column=1, sticky='nsew', padx=(6, 0))
-
-        # ── Logs folder ──────────────────────────────────────────────────────
-        _, body = self._card(left, '📁', 'Detuks Logs Folder',
-                              "The Detuks client logs folder (the one containing client.log). "
-                              "The client writes every account to this ONE shared log with no "
-                              "account name on its lines, so the monitor works best with one "
-                              "account running at a time — that is what lets it know exactly "
-                              "which account a task, screenshot or ping belongs to.")
-        dr = tk.Frame(body, bg=app.BG3)
-        dr.pack(fill='x')
-        self._vars['logs_root'] = tk.StringVar(value=app.cfg.get('logs_root', ''))
-        tk.Entry(dr, textvariable=self._vars['logs_root'], font=self._sans, bg=app.BG4, fg=app.FG,
-            relief='flat', insertbackground=app.ACC).pack(side='left', fill='x', expand=True, ipady=4)
-        tk.Button(dr, text="📁  Browse", font=self._sans, bg=app.BG4, fg=app.ACC,
-            relief='flat', padx=8, pady=4, cursor='hand2',
-            command=self._browse_dir).pack(side='left', padx=(6, 0))
-        self._logs_root_warn = tk.Label(
-            body, text="", font=self._sanss, bg=app.BG3, fg=app.YEL,
-            wraplength=420, justify='left', anchor='w')
-        self._logs_root_warn.pack(fill='x', pady=(6, 0))
-        body.bind('<Configure>', lambda e: self._logs_root_warn.configure(wraplength=max(e.width - 8, 100)))
-        self._vars['logs_root'].trace_add('write', lambda *_: self._check_logs_root_warning())
-        self._check_logs_root_warning()
-        self._row_text(body, "Log account:", 'log_account',
-                       helper="Account the SHARED log belongs to — the exact Launcher account "
-                              "name (case-sensitive), so screenshots and relaunch find its window. "
-                              "Leave blank to use your only Launcher account automatically. With "
-                              "per-account Detuks homes (Launcher tab) each launched account has "
-                              "its own log and this is only needed for an account started outside "
-                              "the monitor. Takes effect on monitor restart.")
 
         # ── Manual Update Check (P2P Monitor's own self-update) ─────────────
         _, body = self._card(left, '🔄', 'Manual Update Check')
@@ -975,7 +945,7 @@ class SettingsTab:
             save_config(app.cfg)
         except Exception:
             pass
-        # Invalidate watcher dir cache so a changed logs_root takes effect immediately
+        # Invalidate watcher dir cache so changed settings take effect immediately
         if app.watcher:
             app.watcher._dirs_last_check = 0
         self._saved_lbl.configure(text="✅ Settings saved", fg=app.GREEN)
@@ -998,33 +968,6 @@ class SettingsTab:
                 pass
 
     # ── Actions ────────────────────────────────────────────────────────────────
-    def _check_logs_root_warning(self):
-        """Warn when the selected folder holds no Detuks client logs — neither
-        client.log directly (standard layout) nor in per-account subfolders."""
-        path = self._vars['logs_root'].get().strip()
-        if not path:
-            self._logs_root_warn.configure(text="")
-            return
-        try:
-            p = Path(path)
-            ok = folder_has_client_logs(p) or (
-                p.is_dir() and any(sub.is_dir() and folder_has_client_logs(sub)
-                                   for sub in p.iterdir()))
-        except Exception:
-            ok = False
-        if ok:
-            self._logs_root_warn.configure(text="")
-        else:
-            self._logs_root_warn.configure(
-                text=("⚠  No client.log found in this folder. Select the Detuks client's "
-                      "logs folder — the one that contains client.log (it appears after the "
-                      "client has been started once)."))
-
-    def _browse_dir(self):
-        d = filedialog.askdirectory(title="Select the Detuks logs folder (contains client.log)")
-        if d:
-            self._vars['logs_root'].set(os.path.normpath(d))
-
     def _test_webhooks(self):
         self.save()
         app     = self.app

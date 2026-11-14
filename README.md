@@ -6,7 +6,7 @@ Runs on **Linux** (Debian/Ubuntu) and **Windows 10/11**. Requires the Detuks cli
 
 > **v3.0.0 — moved from DreamBot to the Detuks client.** DreamBot is no longer supported. See [CHANGELOG.md](CHANGELOG.md) for what changed and what is migrated automatically.
 
-> **Several accounts? Turn on per-account Detuks homes (v3.1.0, Launcher tab).** Normally the Detuks client writes every running client into a single shared `client.log` with no account name in it, so the monitor can only track one account at a time exactly. With per-account homes, every account **launched by the monitor** gets its own Java home folder — and with it its own client settings, script profiles and `client.log` — so any number of accounts are tracked exactly, just like on DreamBot. See [Per-account Detuks homes](#per-account-detuks-homes).
+> **v3.1.0 — every account gets its own Detuks home.** Each account **launched by the monitor** gets its own Java home folder — and with it its own client settings, script profiles and `client.log` — so any number of accounts are tracked exactly, just like on DreamBot. The first launch copies your existing Detuks folder into the new home, so nothing has to be set up again. See [Account homes](#account-homes).
 
 ---
 
@@ -28,14 +28,14 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 ## Features
 
 ### Account monitoring
-- **Per-account Detuks homes** (Launcher tab): each account the monitor launches writes its own `client.log` under `<homes folder>/<account>/.detukslogs/logs/` — tasks, pings, screenshots, stops and relaunches are tracked per account, for any number of accounts
-- Without them: reads the Detuks client's shared `client.log` (and its rotated `client_YYYY-MM-DD.N.log` parts) and attributes it to one account — **Settings → Log account**, or automatically your only Launcher account
+- **One log per account:** each account the monitor launches writes its own `client.log` under `<homes folder>/<account>/.detuksosrs/logs/` (and rotated `client_YYYY-MM-DD.N.log` parts) — tasks, pings, screenshots, stops and relaunches are tracked per account, for any number of accounts
+- Only accounts launched by the monitor are tracked (Launcher tab, `/launch`, `/relaunch`, auto restart, or the copied command)
 - Detects account status: 🟢 Logged In, 🟡 Starting..., 🟡 Waiting for Start, 🟡 On Break, 🔴 Offline
 - **Script start:** on Detuks, P2P Master AI opens its settings GUI after loading and waits for **Start**. The monitor shows 🟡 Waiting for Start and only posts *Script Started* when the run really begins (Start pressed, or the first task if the script starts on its own)
 - **Auto-click Start** (on by default): about 10 seconds after the GUI opens, the monitor finds the Start button by its colour and clicks it, then restores your focus. It clicks the GUI on that account's own client, or — since the script only logs in after Start — on a client that has not logged in yet; never a GUI on a client logged in as another account. It retries once; if the script still hasn't started, an alert goes to the Errors channel
 - Tracks current task, activity, location, planned task duration, uptime (since the current script run started), and break time
 - Log rotation is followed live — lines written just before a rotation are recovered from the rotated file, not lost
-- If no client log exists on startup, monitor waits up to 10 minutes before stopping
+- Accounts are picked up automatically as they are launched — the monitor can be started before any client
 
 ### Launcher and relaunching (Detuks CLI)
 - Launcher tab stores per-account presets for the Detuks CLI: the AppImage on Linux, `launcher.exe` on Windows, both run as `launch --jl-account <Account> -- --script "P2P Master AI" --scriptArgs <Profile>`
@@ -45,7 +45,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - `/relaunch all` restarts all configured launcher presets one at a time, each account following its own break/retry state independently
 - Relaunch success is confirmed by the script's start message, never by process spawn alone; unconfirmed attempts retry automatically with increasing delays (5/10/20/30, capped at 60 minutes), and pending relaunches are remembered across monitor restarts
 - Client window position/size is captured before closing and persisted per account, so it is restored even when the relaunch happens much later (break-end relaunch, retry, or after the monitor itself restarted) — best-effort, never blocks the relaunch if it fails
-- Launcher command preview shows the exact command that will be used, quoted correctly for your platform (copy-pasteable) — including the per-account home setting when homes are on
+- Launcher command preview shows the exact command that will be used, quoted correctly for your platform (copy-pasteable) — including the account's home setting
 - **Launcher errors are shown in the Event Log.** If the Detuks launcher refuses a launch (e.g. an account name it doesn't know — names are case-sensitive), its error is posted as `❌ [account] Launcher exited with code N: <error>`; the full output is kept in `~/.p2p_monitor/launcher_output/<account>.log`
 - Client windows are matched by their exact title `BotClient - V… - <Account>` (case-sensitive) — a client that has not logged in yet, or any other window, can never be closed by a relaunch
 
@@ -170,20 +170,16 @@ See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for full Windows build details.
 
 ## Setup
 
-### Detuks logs
-Set **Settings → General Settings → Detuks Logs Folder** to the Detuks client's logs folder — the folder that contains `client.log` (it appears once the client has been started). It lives under the client's user folder: inside the Detuks wine prefix on Linux (`…/wineprefix/drive_c/users/<you>/…/logs`), under your user profile on Windows. A warning appears in Settings if no `client.log` is found.
+### Account homes
+The Detuks client keeps its settings, plugins, script profiles and log in `.detuksosrs` inside the Java **user home** folder. The monitor launches every account with its own home, so every account has its own log and is tracked exactly, however many run at once.
 
-Then set **Log account** to the account you are monitoring — the exact Launcher account name (case-sensitive). Leave it blank if you have exactly one Launcher account; it is used automatically. With per-account Detuks homes (below) the Log account is only needed for an account you start outside the monitor; the Detuks Logs Folder is still used to find your normal settings and script profiles.
+1. **Launcher tab → Homes folder:** defaults to `%USERPROFILE%\DetuksHomes` (Windows) or `~/DetuksHomes` (Linux); each account gets `<homes folder>/<account>` (spaces in the name become `_`). A preset can point to its own folder with **Home folder (optional)**. **The path must not contain spaces.**
+2. **Launcher tab → Copy new homes from:** your existing Detuks folder (`.detuksosrs`) — found automatically: `%USERPROFILE%\.detuksosrs` on Windows, inside the Detuks wine prefix on Linux. The **first launch** of each account copies it into the account's home — everything except its logs — so your client settings, plugins, P2P profiles and game cache carry over (a few seconds, about 100 MB). After that each account keeps its own copy; nothing is ever overwritten.
+3. **Launch accounts from the monitor** (Launcher tab, `/launch`, `/relaunch`, auto restart). Each launch sets `JAVA_TOOL_OPTIONS=-Duser.home=<account home>` for that launch only — nothing system-wide changes. To start one yourself, copy the command from the preset's preview; it includes the setting.
 
-### Per-account Detuks homes
-The Detuks client keeps its settings (`.detuksosrs`), script profiles and log (`.detukslogs/logs/client.log`) in the Java **user home** folder. Launching each account with its own home gives each account its own log — the monitor then tracks every account exactly, however many run at once.
+An account started any other way writes to the client's normal folder and is **not** tracked.
 
-1. **Launcher tab → tick "Per-account Detuks homes".** The homes folder defaults to `%USERPROFILE%\DetuksHomes` (Windows) or `~/DetuksHomes` (Linux); each account gets `<homes folder>/<account>` (spaces in the name become `_`). A preset can point to its own folder with **Home folder (optional)**. **The path must not contain spaces.**
-2. **Keep your client settings:** a new home starts with default client settings. In each preset set **Settings file (`--rl-properties`)** to your existing `settings.properties` — the dialog offers **Use my main settings** when it can find it.
-3. **Keep your script profiles:** press **Copy P2P profiles into homes**. Every `.p2p` profile (any name) is copied from your normal `.detuksosrs/P2P_Master_AI` folder into each account's home. Existing profiles in a home are never overwritten, and nothing else from that folder is copied (it also holds per-account script data). If a preset's `--scriptArgs` profile is missing from its home, the launch is still made but the Event Log warns you.
-4. **Launch accounts from the monitor** (Launcher tab, `/launch`, `/relaunch`, auto restart). Each launch sets `JAVA_TOOL_OPTIONS=-Duser.home=<account home>` for that launch only — nothing system-wide changes. To start one yourself, copy the command from the preset's preview; it includes the setting.
-
-An account started any other way writes to the normal shared log as before.
+Updating from v3.0.0: the old **Settings → Detuks Logs Folder** becomes **Copy new homes from** automatically, and **Log account** is gone. Clients already running are tracked once relaunched from the monitor.
 
 ### Paint reference (hide-paint screenshots)
 Screenshots can hide the P2P Master AI paint first. To know whether the paint is currently shown, the monitor compares the panel's **Hide/Show** button with a reference: with the client open and the paint **shown** (button reads *Hide*), press **Settings → Paint Reference → Snap Paint Reference** once. After updating from v2.x, snap it again — the DreamBot reference is not used.
@@ -211,11 +207,11 @@ The Launcher tab is used by `/launch`, `/relaunch`, and auto-restart after a scr
 | `Script (--script)` | `P2P Master AI` |
 | `Script profile (--scriptArgs)` | Your P2P Master AI profile, e.g. `Default`. The script still opens its GUI and waits for Start — the monitor clicks it for you (see below) |
 | `--software-rendering` | Optional — force software rendering |
-| `Settings file (--rl-properties)` | Optional — a specific `settings.properties` for this account. **With per-account homes, point this at your existing settings** |
-| `Home folder (optional)` | Only with per-account homes — overrides `<homes folder>/<account>` (no spaces) |
+| `Settings file (--rl-properties)` | Optional — a specific `settings.properties` for this account (by default the account's home has its own copy of yours) |
+| `Home folder (optional)` | Overrides `<homes folder>/<account>` (no spaces) |
 | `Custom client args` | Optional — extra client arguments (passed after `--`) |
 
-The resulting command, which you can also run yourself to test:
+The resulting command (without the account's home setting), which you can also run yourself to test:
 
 ```bash
 # Linux
@@ -232,7 +228,7 @@ The resulting command, which you can also run yourself to test:
 
 Options before `--` go to the launcher; everything after `--` goes to the client. Quote names that contain spaces when typing the command yourself — the monitor passes them correctly on its own.
 
-With per-account homes the command is prefixed with the home setting, e.g.:
+The monitor prefixes it with the account's home setting — the preview shows the exact command, e.g.:
 
 ```bash
 # Linux
@@ -334,7 +330,7 @@ Every relaunch is confirmed by watching for the script's start message — a spa
 
 ## Data and files
 
-Config is automatically sanitized on startup: stale keys from older versions are removed and types are validated. Discord thread IDs are never pruned in the standard shared-log layout.
+Config is automatically sanitized on startup: stale keys from older versions are removed and types are validated. Discord thread IDs are never pruned by folder.
 
 | Path | Contents |
 |---|---|
@@ -343,7 +339,7 @@ Config is automatically sanitized on startup: stale keys from older versions are
 | `~/.p2p_monitor/offsets.json` | Log file read positions |
 | `~/.p2p_monitor/screenshots/` | Screenshot files (auto-deleted after 24h) |
 | `~/.p2p_monitor/launcher_output/<account>.log` | The Detuks launcher's output from the last launch of that account |
-| `~/DetuksHomes/<account>/` | Per-account Detuks home (client settings, script profiles, logs) when enabled — folder configurable |
+| `~/DetuksHomes/<account>/` | Per-account Detuks home (client settings, script profiles, logs) — one per launched account, folder configurable |
 
 On Windows, `~` resolves to `C:\Users\<you>`.
 

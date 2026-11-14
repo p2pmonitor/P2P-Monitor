@@ -2,36 +2,44 @@
 
 ## v3.1.0
 
-**Per-account Detuks homes — monitor any number of accounts exactly again.**
+**Every account gets its own Detuks home — any number of accounts tracked exactly, like on DreamBot.**
+
+### ⚠ Read first
+- Accounts are now tracked **only when launched by the monitor** (Launcher
+  tab, `/launch`, `/relaunch`, auto restart, or the copied command). Clients
+  already running when you update are picked up once relaunched from the
+  monitor.
+- The **first launch** of each account creates its home and copies your
+  existing Detuks folder into it (a few seconds, about 100 MB with the game
+  cache).
 
 ### Added
 
-**1. Per-account Detuks homes (Launcher tab).** The Detuks client keeps its
-settings, script profiles and log in the Java user home. When enabled, every
-account the monitor launches gets its own home —
-`<homes folder>/<account>` (default `%USERPROFILE%\DetuksHomes` /
-`~/DetuksHomes`, spaces in names become `_`, per-preset override available) —
-set with `JAVA_TOOL_OPTIONS=-Duser.home=…` for that launch only. Each account
-then writes its own `client.log`, and the monitor reads one log per account:
-status, tasks, pings, screenshots, stops, auto restart and relaunch
-confirmation are per account, like on DreamBot. A home's log that appears
-while the monitor runs (first launch) is picked up automatically; lines
-written since the monitor started are processed live, older ones go to
-history. The command preview (and the copy-pasteable command) includes the
-home setting for Command Prompt and Linux. Homes paths with spaces are
-refused with a clear message. Off by default.
+**1. Per-account Detuks homes (always on).** The Detuks client keeps its
+settings, plugins, script profiles and log in the Java user home. Every
+account the monitor launches gets its own home — `<homes folder>/<account>`
+(default `%USERPROFILE%\DetuksHomes` / `~/DetuksHomes`, spaces in names
+become `_`, per-preset override) — set with
+`JAVA_TOOL_OPTIONS=-Duser.home=…` for that launch only. Each account writes
+its own `<home>/.detuksosrs/logs/client.log`, and the monitor reads one log
+per account: status, tasks, pings, screenshots, stops, auto restart and
+relaunch confirmation are per account again. A home's log that appears while
+the monitor runs is picked up automatically (lines since the monitor started
+are processed live, older ones go to history). The command preview includes
+the home setting for Command Prompt and Linux. Homes paths with spaces are
+refused with a clear message.
 
-**2. Copy P2P profiles into homes.** One button copies every `.p2p` script
-profile (any file name) from your normal `.detuksosrs/P2P_Master_AI` folder
-into each account's home. Never overwrites, and copies nothing else from that
-folder (it also holds per-account script data). A launch whose `--scriptArgs`
-profile is missing from the account's home logs a warning.
+**2. New homes start as a copy of your existing Detuks folder.** The first
+launch of an account copies your normal `.detuksosrs` (Launcher tab → **Copy
+new homes from**, auto-detected) into its home — everything except `logs/`
+and the `detuks-client.log*` files — so client settings, plugins, P2P
+profiles and the game cache carry over. Copied into a temporary folder and
+moved into place, so an interrupted copy never leaves a half home. Never
+overwrites: after the first launch each account keeps its own copy. A launch
+whose `--scriptArgs` profile is missing from the account's home logs a
+warning.
 
-**3. "Use my main settings" in the preset dialog.** Fills **Settings file
-(`--rl-properties`)** with your existing `settings.properties`, so a new home
-keeps your client settings.
-
-**4. Launcher errors in the Event Log.** The launcher's output is saved to
+**3. Launcher errors in the Event Log.** The launcher's output is saved to
 `~/.p2p_monitor/launcher_output/<account>.log` (overwritten per launch). If it
 exits with an error — e.g. an account name it doesn't know — the error is
 posted: `❌ [account] Launcher exited with code N: <error>`. Previously the
@@ -45,13 +53,17 @@ the client's title has no account name yet. Auto-click now matches each
 `P2P Master AI` window to the client process that owns it and clicks: the
 GUI on the account's own client if there is one, otherwise the GUI(s) on
 clients that have not logged in yet. A GUI on a client logged in as another
-account is never clicked. With exactly one client open the v3.0.0 fallback
-still applies.
+account is never clicked.
 
-**2. Shared log with per-account homes.** With homes on, the shared
-`client.log` is only read for **Settings → Log account**, and only if that
-account has no home of its own (two logs feeding one account would overwrite
-each other's state).
+**2. Settings → Detuks Logs Folder is now Launcher tab → Copy new homes
+from.** Converted automatically (the old logs folder's `.detuksosrs`).
+**Start** now asks you to add accounts in the Launcher tab if there are none.
+
+### Removed
+
+**1. Shared-log mode and Settings → Log account.** The client's normal shared
+`client.log` (no account name on its lines) is no longer read; the
+"works best with one account at a time" limitation is gone with it.
 
 ### Fixed
 

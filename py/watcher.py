@@ -1,14 +1,14 @@
 """
-watcher.py — Log watching engine for P2P Monitor v3.0.0
+watcher.py — Log watching engine for P2P Monitor v3.1.0
 LogWatcher: discovers accounts, polls log files, drives backfill and live events.
 Backfill and live monitor both call reader.parse_lines() — no more triple pipeline.
 
-v3.0.0 (Detuks client): the client writes ONE shared log (client.log, rotated
-to client_YYYY-MM-DD.N.log) for every client instance, with no account name on
-any line. A logs folder is therefore attributed to exactly one account —
-cfg['log_account'], else the only launcher preset's account. Monitoring is
-exact with one account running; with several, their lines are merged under
-that one name (documented: works best with one account at a time).
+v3.1.0 (Detuks client): every account the monitor launches has its own Java
+home, so it writes its own log (<home>/.detuksosrs/logs/client.log, rotated to
+client_YYYY-MM-DD.N.log). The watcher reads one log folder per launcher
+preset — the folder IS the account, like the DreamBot era. The client's normal
+shared log (accounts started outside the monitor) is not read: its lines carry
+no account name.
 """
 import json
 import os
@@ -49,7 +49,6 @@ from py.screenshot import (get_focused_wid,
                             ScreenshotService)
 from py.inferno import InfernoTracker
 
-SHARED_LOG_FALLBACK_ACCOUNT = 'Shared log'   # used when no account can be resolved
 
 _IS_BREAK_START_RE = re.compile(r'BREAK START', re.IGNORECASE)
 _IS_BREAK_OVER_RE  = re.compile(r'break over\s*(-?\d+)', re.IGNORECASE)
@@ -271,7 +270,6 @@ class LogWatcher:
         self.cfg = {}
         self._cached_dirs     = []
         self._dirs_last_check = 0
-        self._shared_account  = ''   # resolved in start() — see _resolve_shared_account
         self._last_summary_date = None
         self._ss_skip_log_ts = {}      # account -> last "due but gated" debug log time (10-min throttle)
         self._last_heartbeat = 0.0     # epoch float: last 24h heartbeat log
@@ -292,8 +290,7 @@ class LogWatcher:
 
     # ── Dir discovery ──────────────────────────────────────────────────────────
     def _home_log_dirs(self):
-        """{account: logs dir} for presets with a per-account Detuks home
-        (v3.1.0). Each such account has its own client.log."""
+        """{account: logs dir} — one per launcher preset (its Detuks home)."""
         try:
             from py.launcher import account_home_logs
             return account_home_logs(self.cfg)
@@ -301,17 +298,9 @@ class LogWatcher:
             self._dbg(f'home log dirs unavailable: {e}')
             return {}
 
-    def _shared_log_enabled(self, home_map):
-        """Whether the shared client.log (logs_root) is monitored. With
-        per-account homes it is only read for the Log account — and only if
-        that account has no home of its own (two sources feeding one account
-        would overwrite each other's state)."""
-        if not home_map:
-            return True
-        acct = (self.cfg.get('log_account') or '').strip()
-        return bool(acct) and acct not in home_map
-
     def _get_log_dirs(self):
+        """Log folders that exist and hold a client log (an account's home
+        gets one the first time it is launched)."""
         now = time.time()
         if now - self._dirs_last_check < 30 and self._cached_dirs:
             return self._cached_dirs
@@ -319,63 +308,24 @@ class LogWatcher:
         self._dir_accounts = {normalize_path(d): a for a, d in home_map.items()}
         dirs = [d for _a, d in sorted(home_map.items())
                 if os.path.isdir(d) and folder_has_client_logs(Path(d))]
-        root = self.cfg.get('logs_root', '').strip()
-        if not root or not os.path.isdir(root) or not self._shared_log_enabled(home_map):
-            self._cached_dirs = dirs
-            self._dirs_last_check = now
-            return dirs
-        root_path = Path(root)
-        if folder_has_client_logs(root_path):
-            # Standard Detuks layout: the logs folder itself holds client.log.
-            dirs.append(str(root_path))
-        else:
-            # Per-account subfolders (logs_root/<account>/client.log) — only
-            # possible if the client ever gains per-instance log folders.
-            for sub in sorted(root_path.iterdir(), key=lambda x: x.name):
-                if sub.is_dir() and folder_has_client_logs(sub):
-                    dirs.append(str(sub))
         self._cached_dirs = dirs
         self._dirs_last_check = now
         return dirs
 
     # ── Log folder → account name ──────────────────────────────────────────────
-    def _resolve_shared_account(self):
-        """Account name for the shared client.log (logs_root itself):
-        cfg['log_account'] if set, else the single launcher preset's account,
-        else a neutral label. Resolved once per monitor start (start()), so an
-        edit mid-run can never split one log across two account states."""
-        name = (self.cfg.get('log_account') or '').strip()
-        if name:
-            return name
-        try:
-            from py.launcher import homes_enabled
-            if homes_enabled(self.cfg):
-                return SHARED_LOG_FALLBACK_ACCOUNT
-        except Exception:
-            pass
-        accounts = [(p.get('account') or '').strip()
-                    for p in self.cfg.get('launcher_presets', []) if isinstance(p, dict)]
-        accounts = [a for a in accounts if a]
-        if len(accounts) == 1:
-            return accounts[0]
-        return SHARED_LOG_FALLBACK_ACCOUNT
-
     def _acct_for_dir(self, d):
-        """Account a log folder belongs to. A per-account Detuks home maps to
-        its preset's account (v3.1.0); the logs root (shared client.log) maps
-        to the resolved shared account; any other subfolder maps to its
-        folder name (the v2.x convention)."""
+        """Account a log folder belongs to: the launcher preset whose home it
+        is. Unknown folders fall back to the folder name."""
         d = str(d)
         try:
             acct = getattr(self, '_dir_accounts', {}).get(normalize_path(d))
             if acct:
                 return acct
-        except Exception:
-            pass
-        root = (self.cfg.get('logs_root') or '').strip()
-        try:
-            if root and normalize_path(d) == normalize_path(root):
-                return self._shared_account or self._resolve_shared_account()
+            if not getattr(self, '_dir_accounts', None):
+                self._get_log_dirs()
+                acct = self._dir_accounts.get(normalize_path(d))
+                if acct:
+                    return acct
         except Exception:
             pass
         return os.path.basename(os.path.normpath(d))
@@ -392,7 +342,6 @@ class LogWatcher:
         reset_debug_log()
         self.cfg      = cfg
         self._running = True
-        self._shared_account = self._resolve_shared_account()
         self._router  = DiscordRouter({
             'get_cfg':            lambda: self.cfg,
             'log':                self.log,
@@ -916,7 +865,7 @@ class LogWatcher:
     # ── Main run loop ──────────────────────────────────────────────────────────
     def _attach_new_dir(self, d):
         """A log folder that appeared after startup (v3.1.0: an account's
-        Detuks home gets its .detukslogs/logs on first launch). Reconstruct
+        Detuks home gets its .detuksosrs/logs on first launch). Reconstruct
         state from the whole log, process lines written since the monitor
         started as live events (Script Started, tasks…), backfill the rest."""
         acct = self._acct_for_dir(d)
@@ -961,23 +910,10 @@ class LogWatcher:
     def _run(self):
         self._run_started_wall = time.time()
         dirs = self._get_log_dirs()
-        if not dirs and self._home_log_dirs():
-            self.log("⏳ Per-account Detuks homes: waiting for accounts to be launched "
-                     "(launch them from the Launcher tab or /launch).")
-        elif not dirs:
-            # Idle wait — check every 5 seconds for up to 10 minutes
-            self.log("⏳ Waiting for active sessions...")
-            deadline = time.time() + 600  # 10 minutes
-            while self._running and time.time() < deadline:
-                time.sleep(5)
-                dirs = self._get_log_dirs()
-                if dirs:
-                    break
-            if not dirs:
-                self.log("⚠ No active sessions found after 10 minutes — stopping monitor.")
-                self._running = False
-                return
-            self.log("✅ Sessions found — starting monitor.")
+        if not dirs:
+            # Homes get their log on first launch; the poll loop attaches them.
+            self.log("⏳ Waiting for accounts to be launched (Launcher tab or /launch) — "
+                     "each launched account is picked up automatically.")
         for d in dirs:
             log_files = _get_log_files(d)
             active = _get_active_log_file(d)
@@ -991,14 +927,6 @@ class LogWatcher:
         if dirs:
             self.log(f"▶ Monitoring {len(dirs)} account(s): {', '.join(account_names)}")
         self._known_dirs = {normalize_path(d) for d in dirs}
-        if any(normalize_path(d) == normalize_path(self.cfg.get('logs_root', '')) for d in dirs):
-            self.log("ℹ Detuks shared log: all client instances write to one client.log. "
-                     f"Events are attributed to \"{self._shared_account}\" — monitoring is exact "
-                     "with one account running at a time.")
-            if self._shared_account == SHARED_LOG_FALLBACK_ACCOUNT:
-                self.log("⚠ No account set for the shared log — set Settings → Log account "
-                         "(or keep exactly one Launcher account) so screenshots and relaunch "
-                         "can find the client window.")
         for d in dirs:
             log_files = _get_log_files(d)
             active = _get_active_log_file(d)
@@ -1324,10 +1252,8 @@ class LogWatcher:
         """
         Scan all log files for this account and write missing history entries.
 
-        v3.0.0 first run (no resume marker): only the active client.log is
-        backfilled. Older rotated parts of the shared Detuks log can hold other
-        accounts' lines (every client writes the same file), so importing them
-        wholesale into one account's history would be wrong.
+        Each folder is one account's own Detuks home log (v3.1.0), so all of
+        its files belong to that account.
 
         Uses a last-seen-line approach instead of byte offsets or scanned-file sets:
         - All log files sorted chronologically by unix timestamp in filename
@@ -1381,12 +1307,6 @@ class LogWatcher:
 
             # Chronological: rotated parts by (date, N), then client.log
             log_files = sorted(log_files, key=_log_file_order)
-            shared_dir = False
-            try:
-                _root = (self.cfg.get('logs_root') or '').strip()
-                shared_dir = bool(_root) and normalize_path(folder) == normalize_path(_root)
-            except Exception:
-                pass
             # v3.1.0: the marker may come from a different log than this one
             # (account moved from the shared log to its own Detuks home, or the
             # marker's file was rotated away). If it is in none of the files,
@@ -1406,11 +1326,6 @@ class LogWatcher:
                     self._dbg(f'[backfill] {account}: resume marker not in any log file '
                               f'— processing as first run')
                     last_seen = None
-            # First run on the SHARED log: only client.log (older rotated parts
-            # can hold other accounts' lines). A per-account home's log is that
-            # account's alone, so all of it is imported.
-            if last_seen is None and shared_dir:
-                log_files = [f for f in log_files if f.name == CLIENT_LOG_ACTIVE]
 
             total_entries  = 0
             skipped_existing = 0
