@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.1.2
+
+### Fixed
+
+**1. Uptime and break time after a monitor (re)start.** The Detuks client
+starts a new `client.log` at midnight. On startup the monitor only looked at
+yesterday's part when today's log had no task in it at all — so after any
+restart past midnight (e.g. after updating) uptime counted from the monitor's
+start and break time only from midnight, even though the script had been
+running since the day before. Startup now reads back through the rotated
+parts (up to 10) until it finds where the current run began, so uptime and
+break time are right even for runs lasting several days. Checked against a
+real 19-hour run with two breaks: live and after a restart at any point, both
+match the log to the minute.
+
+**2. Break time shows `0h 00m` instead of `—`** for a running account that
+hasn't taken a break yet (Status tab and uptime ticker).
+
 ## v3.1.1
 
 **Bans, stops, freezes and failed script starts — handled the Detuks way.** All

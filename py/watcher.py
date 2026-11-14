@@ -190,10 +190,10 @@ def _newest_rotated_file(folder):
     rotated = [f for f in _get_log_files(folder) if f.name != CLIENT_LOG_ACTIVE]
     return rotated[-1] if rotated else None
 
-def _fmt_duration(secs):
-    """Format a duration in seconds as 'Xh YYm', or '—' if zero/negative."""
+def _fmt_duration(secs, zero='—'):
+    """Format a duration in seconds as 'Xh YYm', or `zero` if zero/negative."""
     if secs <= 0:
-        return '—'
+        return zero
     h, rem = divmod(int(secs), 3600)
     return f"{h}h {rem // 60:02d}m"
 
@@ -523,7 +523,8 @@ class LogWatcher:
             break_secs = s.total_break_secs
             if s._break_start_ts:
                 break_secs += time.time() - s._break_start_ts
-            break_str = _fmt_duration(break_secs) if (s.script_running or s.on_break or s._break_start_ts) else '—'
+            break_str = (_fmt_duration(break_secs, zero='0h 00m')
+                         if (s.script_running or s.on_break or s._break_start_ts) else '—')
             rows.append({'account': name, 'task': s.last_task or '—',
                          'activity': s.last_activity or '—', 'status': status,
                          'uptime': uptime_str, 'break_time': break_str,
@@ -550,7 +551,8 @@ class LogWatcher:
                 break_secs += time.time() - s._break_start_ts
             rows.append({'account': name,
                          'uptime': uptime_str,
-                         'break_time': _fmt_duration(break_secs)})
+                         'break_time': (_fmt_duration(break_secs, zero='0h 00m')
+                                        if show_uptime else '—')})
         return rows
 
     def _is_muted(self, account):
@@ -1118,10 +1120,14 @@ class LogWatcher:
                              timestamp math) within that run only
           last_task / last_activity - from the last NEW TASK block
 
-        Files scanned: client.log, plus the newest rotated part
-        (client_YYYY-MM-DD.N.log) when client.log alone holds no script start
-        and no NEW TASK — i.e. rotation happened mid-run. Older parts are
-        never needed for current state.
+        Files scanned: client.log, plus rotated parts (client_YYYY-MM-DD.N.log,
+        newest first) until the beginning of the current run is included — a
+        script load, Start press or stop line. The client rotates its log at
+        midnight, so a run started yesterday (or days ago) has its start and
+        earlier breaks in rotated parts (v3.1.1 — previously only one part
+        was added, and only when client.log had no task at all, so uptime and
+        break time were lost on any monitor start after midnight). At most
+        _CATCHUP_MAX_ROTATED parts are read.
 
         is_rotation is accepted for call compatibility and ignored (v3.0.0:
         rotation is handled inline in _check_file).
@@ -1140,16 +1146,24 @@ class LogWatcher:
                     self.log(f"⚠ [{folder}] Could not read {os.path.basename(str(path))}: {e}")
                     return []
 
+            def _has_run_anchor(lines_):
+                for l in lines_:
+                    b_ = strip_prefix(l).strip()
+                    if _is_script_loaded(b_) or _is_script_start(b_) or _is_script_stop(b_):
+                        return True
+                return False
+
             active_lines = _read(active_path)
             scan_lines   = active_lines
             used_files   = [os.path.basename(active_path)]
-            has_anchor = any(_is_script_start(strip_prefix(l).strip()) or 'NEW TASK' in l
-                             for l in active_lines)
-            if not has_anchor:
-                prev = _newest_rotated_file(log_dir)
-                if prev is not None:
-                    scan_lines = _read(prev) + active_lines
+            if not _has_run_anchor(active_lines):
+                rotated = [f for f in _get_log_files(log_dir) if f.name != CLIENT_LOG_ACTIVE]
+                for prev in reversed(rotated[-self._CATCHUP_MAX_ROTATED:]):
+                    prev_lines = _read(prev)
+                    scan_lines = prev_lines + scan_lines
                     used_files.insert(0, prev.name)
+                    if _has_run_anchor(prev_lines):
+                        break
 
             self._dbg(f'[{folder}] _startup_catchup: files (oldest→newest): {used_files}')
 
@@ -1934,6 +1948,8 @@ class LogWatcher:
     # v3.1.1: the script starts within seconds of its plugin loading; on some
     # Windows setups the client's --script is never applied. Alert only.
     _SCRIPT_LOAD_TIMEOUT_SEC = 180
+    # v3.1.1: rotated log parts read back at startup to find the run start.
+    _CATCHUP_MAX_ROTATED     = 10
 
     def _cancel_script_load_check(self, state):
         t = getattr(state, '_plugin_load_timer', None)
