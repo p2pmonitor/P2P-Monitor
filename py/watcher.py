@@ -230,7 +230,7 @@ class AccountState:
         self._pre_stop_break_snap = None  # break snapshot captured before script-stop clears it
         # v3.0.0 Detuks extras (live only)
         self._lag_quiet_until    = 0.0    # epoch: ignore LAG DETECTED until (login/start warm-up)
-        self.last_gp             = None   # last "Up to N coins available" value logged
+        self.last_gp             = None   # last "Up to N coins available" value seen (not logged)
         self.count_milestones    = {}     # count name -> last milestone notified
         # Script GUI / Start (v3.0.0): profile loaded, GUI open, Start not pressed
         self.awaiting_start      = False
@@ -2206,9 +2206,10 @@ class LogWatcher:
                     gp = int(m.group(1).replace(',', ''))
                 except ValueError:
                     continue
-                if gp != state.last_gp:
-                    state.last_gp = gp
-                    self.log(f"🪙 [{folder}] Coins available (GE check): {gp:,}")
+                # Kept off the Event Log: the script checks its GE budget on
+                # every visit and the value changes almost every time
+                # (~400 lines in 3 days, up to 77 an hour).
+                state.last_gp = gp
 
     def _maybe_schedule_auto_restart(self, folder: str, lines: list,
                                      state: 'AccountState') -> tuple:

@@ -28,6 +28,11 @@ skips in three days of real logs.
 **3. "Task is not supported N" is no longer posted as a task** called
 "not supported N".
 
+**4. "Coins available" no longer floods the Event Log.** The script checks its
+Grand Exchange budget on every GE visit and the amount changes almost every
+time, so the line was logged ~400 times in three days (up to 77 an hour while
+Herblore was running). It is no longer shown.
+
 ### Changed
 
 **1. Lag alerts only for freezes of 30 seconds or more** (was 10 s). Over three
