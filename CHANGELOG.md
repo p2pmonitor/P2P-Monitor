@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.1.3
+
+### Fixed
+
+**1. Uptime after a monitor restart (follow-up to v3.1.2).** On startup the
+monitor reads back through older log files to find where the current run
+began, but it also stopped at a **Start** press — and Start can be pressed
+mid-run when the script's window is reopened, so the run's real start was
+missed and uptime showed `—`. Only a script load or a stop now marks a run
+boundary. Also covers the client's mid-day log split (a new file every
+~10 MB). Checked against a real 3-day run: 41h 09m up / 13h 58m on break,
+matching the log.
+
+### Changed
+
+**1. Lag alerts only for freezes of 30 seconds or more** (was 10 s). Over three
+days of real logs this cuts the alerts from 8 to 1 — the 16–27 s spikes that
+recovered on their own are no longer pinged (spikes right after a login were
+already ignored).
+
 ## v3.1.2
 
 ### Fixed

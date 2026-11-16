@@ -94,7 +94,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Backfill: on startup, re-reads the client log to populate history without re-pinging Discord. The very first run only imports the current `client.log` — older rotated parts can contain other accounts' lines
 
 ### Error detection
-- Detects and pings on: task locks (with the missing item/teleport), login time-outs, repeating script task-loop failures, pathing lockouts, quest state loops, farming patch skips, severe lag spikes (10s–5min freezes while playing), and more
+- Detects and pings on: task locks (with the missing item/teleport), login time-outs, repeating script task-loop failures, pathing lockouts, quest state loops, farming patch skips, severe lag spikes (30s–5min freezes while playing), and more
 - **Bans:** detected from the Detuks client's ban message — status 🔨 Banned, a ban ping, and no auto restart or relaunch
 - **Frozen or crashed client:** if a running account's script writes nothing for **10 minutes** (outside breaks), an alert goes to the Errors channel saying whether the client window is still open. Alert only — use `/relaunch` to restart it
 - **Script didn't start:** if the client loads P2P Master AI but the script doesn't start within **3 minutes** (a known Detuks issue on some Windows setups), an alert goes to the Errors channel and the monitor does **not** keep relaunching — turn the script on in the client's plugin list

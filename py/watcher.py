@@ -1123,8 +1123,8 @@ class LogWatcher:
         Files scanned: client.log, plus rotated parts (client_YYYY-MM-DD.N.log,
         newest first) until the beginning of the current run is included — a
         script load, Start press or stop line. The client rotates its log at
-        midnight, so a run started yesterday (or days ago) has its start and
-        earlier breaks in rotated parts (v3.1.1 — previously only one part
+        midnight and when a part reaches ~10 MB, so a run started yesterday
+        (or days ago) has its start and earlier breaks in rotated parts (v3.1.1 — previously only one part
         was added, and only when client.log had no task at all, so uptime and
         break time were lost on any monitor start after midnight). At most
         _CATCHUP_MAX_ROTATED parts are read.
@@ -1147,9 +1147,12 @@ class LogWatcher:
                     return []
 
             def _has_run_anchor(lines_):
+                # Only a script load or a stop marks a run boundary. A Start
+                # press can also come mid-run (script GUI reopened), so it
+                # must not end the walk-back (v3.1.3).
                 for l in lines_:
                     b_ = strip_prefix(l).strip()
-                    if _is_script_loaded(b_) or _is_script_start(b_) or _is_script_stop(b_):
+                    if _is_script_loaded(b_) or _is_script_stop(b_):
                         return True
                 return False
 
@@ -2120,10 +2123,10 @@ class LogWatcher:
     # Severe-lag alert window. LAG DETECTED is the script's own tick-gap
     # measurement: the median is ~1s; spikes right after a client start /
     # login / break are normal loading (40s+), and gaps of minutes/hours are
-    # time spent logged out — not lag. Only a 10s–5min freeze while logged
+    # time spent logged out — not lag. Only a 30s–5min freeze while logged
     # in, running, and past a 3-minute warm-up is reported, at most once per
     # 30 minutes.
-    _LAG_ALERT_MIN_MS = 10_000
+    _LAG_ALERT_MIN_MS = 30_000
     _LAG_ALERT_MAX_MS = 300_000
     _LAG_DEDUPE_SEC   = 1800
 
