@@ -59,7 +59,7 @@ Go to the [**Releases**](https://github.com/p2pmonitor/P2P-Monitor/releases/late
 - Pending auto-restart is cancelled if the script starts again before the timer fires
 
 ### Discord notifications
-- Posts embeds for: tasks (with location and planned duration), Slayer tasks and completions, quest starts and completions, drops, deaths, level ups, kill/lap-count milestones (every 100), errors, severe lag spikes, script lifecycle events, launcher events, and daily summaries
+- Posts embeds for: tasks (with location and planned duration), Slayer tasks, completions and skips (with the reason and the task streak lost), quest starts and completions, drops, deaths, level ups, kill/lap-count milestones (every 100), errors, severe lag spikes, script lifecycle events, launcher events, and daily summaries
 - Supports webhook mode with per-event-type webhooks or a single default webhook
 - Supports Discord bot mode with per-account monitor threads
 - **Discord webhooks are not required when using Discord bot mode**

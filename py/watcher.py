@@ -23,7 +23,7 @@ from pathlib import Path
 from py.config  import (save_config, CLIENT_LOG_ACTIVE, CLIENT_LOG_ROTATED_RE,
                         is_client_log_name, folder_has_client_logs)
 from py.util    import now_str, write_debug_entry, reset_debug_log
-from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task
+from py.reader  import parse_lines, parse_log_ts, strip_prefix, slice_last_task, SlayerSkipTracker
 from py.reader  import (LOG_TS_RE, is_ban_line, SCRIPT_START_RE, SCRIPT_STOP_RE,
                         SCRIPT_LOADED_RE, SCRIPT_GUI_WAIT_RE,
                         LAG_RE, COUNT_RE, COINS_RE, COUNT_MILESTONE_EVERY)
@@ -225,6 +225,7 @@ class AccountState:
         self._err_burst_task_ctx = ''  # task context when burst started
         # Auto-restart state
         self._recent_lines       = deque(maxlen=30)  # rolling buffer; manual-stop signature check
+        self.slayer_skips        = SlayerSkipTracker()  # v3.1.3: Turael skips span many batches
         self._pending_restart_timer: 'threading.Timer | None' = None
         self._pre_stop_break_snap = None  # break snapshot captured before script-stop clears it
         # v3.0.0 Detuks extras (live only)
@@ -1192,7 +1193,9 @@ class LogWatcher:
             break_length_ms     = None
 
             from py.util import parse_break_length_ms
+            state.slayer_skips = SlayerSkipTracker()
             for idx, line in enumerate(scan_lines):
+                state.slayer_skips.feed(line)   # in step for a skip finishing live
                 b = strip_prefix(line).strip()
                 if _is_break_start(line):
                     state.on_break  = True
@@ -1417,6 +1420,7 @@ class LogWatcher:
             # Run state across chunks/files so backfilled history only gets a
             # 'Script Started' for runs that really began (v3.0.0).
             bf_running  = False
+            bf_skips    = SlayerSkipTracker()   # v3.1.3: Turael skips across chunks
             bf_awaiting = False
             # One InfernoTracker per account for the full backfill — state must
             # persist across chunks so gear-check windows and attempt waves that
@@ -1508,7 +1512,12 @@ class LogWatcher:
                     if not chunk:
                         return
                     _genuine = set()
+                    _skips = []
                     for _i, _ln in enumerate(chunk):
+                        _sk = bf_skips.feed(_ln)
+                        if _sk:
+                            _sk['_line_idx'] = _i
+                            _skips.append(_sk)
                         _b = strip_prefix(_ln).strip()
                         if _is_script_stop(_b):
                             bf_running = bf_awaiting = False
@@ -1521,6 +1530,9 @@ class LogWatcher:
                     try:
                         events = parse_lines(chunk, context_lines=bf_recent_tail)
                         events = self._filter_start_events(events, _genuine, chunk)
+                        if _skips:
+                            events = sorted(events + _skips,
+                                            key=lambda e: (e.get('ts', ''), e.get('_line_idx', 0)))
                     except Exception as pe:
                         self.log(f'  ⚠ [{account}] Backfill parse error: {pe}')
                         return
@@ -1844,7 +1856,8 @@ class LogWatcher:
                         _ping(slayer_complete_payload(mention, account, value, td, pe, tp), 'task'))
                 elif etype == 'slayer_skip':
                     self._router.post_event(account, 'task',
-                        _ping(slayer_skipped_payload(mention, account, value, activity), 'task'))
+                        _ping(slayer_skipped_payload(mention, account, value, activity,
+                                                     ev.get('_slayer_skip')), 'task'))
                 elif etype == 'chat':
                     self._router.post_event(account, 'chat',
                         _ping(chat_payload(mention, account, value, activity), 'chat'))
@@ -2395,9 +2408,14 @@ class LogWatcher:
         # Update login/break state from this batch
         genuine_starts = set()   # line idx of starts that really began a run (v3.0.0)
         genuine_stops  = set()   # line idx of stops that really ended a run (v3.1.1)
+        slayer_skip_events = []  # Turael skips completed in this batch (v3.1.3)
         for idx, line in enumerate(lines):
             b = strip_prefix(line).strip()
             state._recent_lines.append(line)          # rolling buffer for manual-stop detection
+            _sk = state.slayer_skips.feed(line)
+            if _sk:
+                _sk['_line_idx'] = idx
+                slayer_skip_events.append(_sk)
             # Silence watchdog (v3.1.1): only the script's own lines count —
             # the client keeps logging while a hung script is silent.
             _thr, _lg = _thread_and_logger(line)
@@ -2539,6 +2557,9 @@ class LogWatcher:
         parsed = [e for e in parsed
                   if not (e.get('type') == 'script_event' and e.get('value') == 'stop'
                           and e.get('_line_idx') not in genuine_stops)]
+        if slayer_skip_events:
+            parsed = sorted(parsed + slayer_skip_events,
+                            key=lambda e: (e.get('ts', ''), e.get('_line_idx', 0)))
 
         # Snapshot the task/activity context as it stood *before* this batch —
         # used by reset attribution below so a reset line is matched against the

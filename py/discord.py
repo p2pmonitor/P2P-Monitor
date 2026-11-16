@@ -97,10 +97,26 @@ def slayer_complete_payload(mention, folder, monster, tasks_done, points_earned,
         fields.append({"name": "Total Points", "value": f"{total_points:,}", "inline": True})
     return _embed("✅ Slayer Task Complete", _desc(mention, folder), fields, 0x5bc65b)
 
-def slayer_skipped_payload(mention, folder, monster, reason):
-    return _embed("⏭️ Slayer Task Skipped", _desc(mention, folder),
-                  [{"name": "Monster", "value": monster, "inline": True},
-                   {"name": "Reason",  "value": reason,  "inline": True}], 0xff9900)
+def slayer_skipped_payload(mention, folder, monster, reason, detail=None):
+    """Slayer task skipped. `detail` (v3.1.3, Turael skips) adds who gave
+    the task, how it was skipped, the streak lost and the new task."""
+    if not detail:
+        return _embed("⏭️ Slayer Task Skipped", _desc(mention, folder),
+                      [{"name": "Monster", "value": monster, "inline": True},
+                       {"name": "Reason",  "value": reason,  "inline": True}], 0xff9900)
+    skipped = monster + (f" *(from {detail['master']})*" if detail.get('master') else '')
+    how = 'Turael skip'
+    if detail.get('streak') is not None:
+        how += f" — task streak reset {detail['streak']} → 0"
+    fields = [{"name": "Skipped", "value": skipped, "inline": False},
+              {"name": "Why",     "value": reason,  "inline": False},
+              {"name": "How",     "value": how,     "inline": False}]
+    if detail.get('new_monster'):
+        new = f"{detail['new_qty']} {detail['new_monster']}"
+        if detail.get('new_master'):
+            new += f" *(from {detail['new_master']})*"
+        fields.append({"name": "New task", "value": new, "inline": False})
+    return _embed("⏭️ Slayer Task Skipped", _desc(mention, folder), fields, 0xff9900)
 
 def drop_payload(mention, folder, drop_types, item):
     TITLES = {'collection': 'Collection Log', 'untradeable': 'Untradeable Drop',

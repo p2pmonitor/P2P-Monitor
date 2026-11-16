@@ -506,6 +506,100 @@ def slice_slayer_complete(lines):
         results.append((monster, tasks_done, points_earned, total_points))
     return results
 
+# ── Slayer Turael skips (v3.1.3) ─────────────────────────────────────────────
+# Without Slayer points the script skips a task it can't do by visiting
+# Turael/Aya, which resets the task streak — the game never says "Your task
+# has been cancelled" (that is the points skip, see slice_slayer_skipped).
+# The sequence, over ~1-2 minutes (too long for one live batch):
+#   [GAME] Steve|Your new task is to kill 115 Cave Kraken.
+#   (checklist)  Kraken for Magic is disabled by the user;   /  This slayer task is not supported
+#   Want to Turael-skip the slayer task (buffer: 1)
+#   [GAME] Aya|If you do get a new one, you will reset your standard task streak of 1. …
+#   [GAME] Your standard task streak of 3 was reset to 0.
+#   [GAME] Aya|Your new task is to kill 22 Crawling Hands.
+# SlayerSkipTracker follows it line by line (one per account, kept across
+# batches) and returns one 'slayer_skip' event when the replacement arrives.
+_SLAYER_ASSIGN_RE  = re.compile(r'\[GAME\]\s*([^|\]]+?)\|\s*Your new task is to kill\s+'
+                                r'([\d,]+)\s+(.+?)\.?\s*$', re.I)
+_SLAYER_STREAK_RES = (re.compile(r'Your standard task streak of ([\d,]+) was reset to 0', re.I),
+                      re.compile(r'reset your standard task streak of ([\d,]+)', re.I))
+
+
+class SlayerSkipTracker:
+    def __init__(self):
+        self.assigned = None
+        self._clear()
+
+    def _clear(self):
+        self.reasons      = []
+        self.unsupported  = False
+        self.no_style     = False
+        self.skip_pending = False
+        self.streak       = None
+        self._checklist   = False
+
+    def reason_text(self):
+        monster = self.assigned[2] if self.assigned else 'This task'
+        if self.unsupported:
+            return f'{monster} not supported, consider blocking'
+        if self.reasons:
+            return '; '.join(r.replace('disabled by the user', 'turned off in your script settings')
+                             for r in self.reasons)
+        if self.no_style:
+            return 'No usable combat style for this task'
+        return "The script couldn't start this task"
+
+    def feed(self, line):
+        """Feed one raw log line; returns a 'slayer_skip' event dict or None."""
+        b = strip_prefix(line).strip()
+        m = _SLAYER_ASSIGN_RE.search(b)
+        if m:
+            master = m.group(1).strip()
+            qty    = int(m.group(2).replace(',', ''))
+            mon    = m.group(3).strip()
+            ev = None
+            if self.skip_pending and self.assigned:
+                o_master, o_qty, o_mon = self.assigned
+                ts = LOG_TS_RE.match(line)
+                ev = {'type': 'slayer_skip', 'value': f'{o_qty} {o_mon}',
+                      'activity': self.reason_text(),
+                      'ts': ts.group(1) if ts else '',
+                      '_slayer_skip': {'master': o_master, 'qty': o_qty, 'monster': o_mon,
+                                       'reason': self.reason_text(), 'streak': self.streak,
+                                       'new_master': master, 'new_qty': qty, 'new_monster': mon}}
+            self._clear()
+            self.assigned = (master, qty, mon)
+            return ev
+        if not self.assigned:
+            return None
+        low = b.lower()
+        if 'this slayer task is not supported' in low:
+            self.unsupported = True
+        elif 'not doable with this style' in low or 'no combat styles available' in low:
+            self.no_style = True
+        elif low.startswith('===slayer checklist==='):
+            self._checklist = True
+        elif self._checklist:
+            if low.startswith('able to start') or low.startswith('==='):
+                self._checklist = False
+            else:
+                r = b.rstrip('; ').strip()
+                if r and r not in self.reasons:
+                    self.reasons.append(r)
+        elif 'want to turael-skip' in low:
+            self.skip_pending = True
+        else:
+            for rx in _SLAYER_STREAK_RES:
+                ms = rx.search(b)
+                if ms:
+                    self.streak = int(ms.group(1).replace(',', ''))
+                    break
+        if 'you have completed your task' in low:
+            self.assigned = None
+            self._clear()
+        return None
+
+
 def slice_slayer_skipped(lines):
     """
     Returns list of (monster, reason).
@@ -654,9 +748,9 @@ def slice_tasks(lines):
             i += 1
             continue
 
-        # 'Task is X' — skip doable/NOT doable variants
+        # 'Task is X' — skip doable/NOT doable and (v3.1.3) 'not supported N'
         if (re.match(r'^Task is\b', b, re.IGNORECASE)
-                and not re.match(r'^Task is(?:\s+NOT)?\s+doable', b, re.IGNORECASE)):
+                and not re.match(r'^Task is(?:\s+NOT)?\s+(?:doable|supported)', b, re.IGNORECASE)):
 
             task_name = re.sub(r'^Task is\s*', '', b, flags=re.IGNORECASE).strip()
 

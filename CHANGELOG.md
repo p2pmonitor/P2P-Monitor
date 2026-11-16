@@ -13,6 +13,21 @@ boundary. Also covers the client's mid-day log split (a new file every
 ~10 MB). Checked against a real 3-day run: 41h 09m up / 13h 58m on break,
 matching the log.
 
+**2. Slayer task skips are reported again — with the reason.** Without Slayer
+points the script skips a task it can't do by visiting Turael/Aya, which
+resets the task streak. The monitor only knew the points skip ("Your task has
+been cancelled"), so these skips were never reported — you only saw a new
+task appear. Each skip now posts one message when the replacement task is
+given: the skipped task and who gave it, why (the script's own reason, e.g.
+"Kraken for Magic is turned off in your script settings", or "Custodian
+Stalkers not supported, consider blocking"), the task streak that was reset,
+and the new task. The skip spans a minute or two of log, so it is followed
+across reads; history backfill records it too. Checked against all three
+skips in three days of real logs.
+
+**3. "Task is not supported N" is no longer posted as a task** called
+"not supported N".
+
 ### Changed
 
 **1. Lag alerts only for freezes of 30 seconds or more** (was 10 s). Over three
